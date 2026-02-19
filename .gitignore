@@ -1,0 +1,50 @@
+# Environment variables (contain secrets)
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+venv/
+env/
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# Database (contains personal financial data)
+*.db
+*.sqlite
+
+# Generated portfolio data exports
+portfolio_data*.json
+
+# Logs
+*.log
+*.txt
+
+# Data exports (contain personal account data)
+*.xml
+*.csv
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+nul
+
+# Build artifacts
+dist/
+build/
+
+# Node
+node_modules/
+
+# Claude Code local settings
+.claude/

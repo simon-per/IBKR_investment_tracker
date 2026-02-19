@@ -1,0 +1,10 @@
+services:
+  portfolio-backend:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"   # localhost only — nginx proxies from outside
+    volumes:
+      - ./portfolio.db:/app/portfolio.db
+    env_file:
+      - .env                     # IBKR_TOKEN, IBKR_QUERY_ID, CORS_ORIGINS, etc.
+    restart: unless-stopped
