@@ -25,15 +25,7 @@ if [ ! -f backend/.env ]; then
     fi
 fi
 
-# 3. Rebuild and restart backend
-echo ""
-echo "--- Rebuilding backend Docker container ---"
-cd "$REPO_DIR/backend"
-docker compose down
-docker compose build --no-cache
-docker compose up -d
-
-# 4. Rebuild frontend
+# 3. Build frontend (before docker compose, since frontend container mounts dist/)
 echo ""
 echo "--- Rebuilding frontend ---"
 cd "$REPO_DIR/frontend"
@@ -48,18 +40,19 @@ fi
 npm ci
 npm run build
 
-# 5. Update nginx config
+# 4. Rebuild and restart Docker containers (backend + frontend nginx)
 echo ""
-echo "--- Updating nginx config ---"
-cd "$REPO_DIR"
-bash backend/setup_ssl.sh
+echo "--- Rebuilding Docker containers ---"
+cd "$REPO_DIR/backend"
+docker compose down
+docker compose build --no-cache
+docker compose up -d
 
-# 6. Status check
+# 5. Status check
 echo ""
 echo "=== Deployment Complete ==="
 echo ""
 echo "--- Docker status ---"
-cd "$REPO_DIR/backend"
 docker compose ps
 
 echo ""

@@ -2,9 +2,40 @@ services:
   portfolio-backend:
     build: .
     ports:
-      - "127.0.0.1:8000:8000"   # localhost only — nginx proxies from outside
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./portfolio.db:/app/portfolio.db
     env_file:
-      - .env                     # IBKR_TOKEN, IBKR_QUERY_ID, CORS_ORIGINS, etc.
+      - .env
     restart: unless-stopped
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.portfolio-api.rule=Host(`portfolio.srv1211053.hstgr.cloud`) && (PathPrefix(`/api`) || Path(`/health`))
+      - traefik.http.routers.portfolio-api.tls=true
+      - traefik.http.routers.portfolio-api.entrypoints=websecure
+      - traefik.http.routers.portfolio-api.tls.certresolver=mytlschallenge
+      - traefik.http.services.portfolio-api.loadbalancer.server.port=8000
+    networks:
+      - default
+      - n8n_default
+
+  portfolio-frontend:
+    image: nginx:alpine
+    volumes:
+      - ../frontend/dist:/usr/share/nginx/html:ro
+      - ./frontend-nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    restart: unless-stopped
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.portfolio-frontend.rule=Host(`portfolio.srv1211053.hstgr.cloud`)
+      - traefik.http.routers.portfolio-frontend.tls=true
+      - traefik.http.routers.portfolio-frontend.entrypoints=websecure
+      - traefik.http.routers.portfolio-frontend.tls.certresolver=mytlschallenge
+      - traefik.http.services.portfolio-frontend.loadbalancer.server.port=80
+    networks:
+      - default
+      - n8n_default
+
+networks:
+  n8n_default:
+    external: true
