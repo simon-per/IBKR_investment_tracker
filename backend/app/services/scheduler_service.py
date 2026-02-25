@@ -9,6 +9,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from datetime import date, timedelta
+
 from app.database import AsyncSessionLocal
 from app.services.ibkr_service import IBKRService
 from app.services.market_data_service import MarketDataService
@@ -242,6 +244,79 @@ class SchedulerService:
                     "timestamp": datetime.now().isoformat()
                 }
 
+    async def sync_exchange_rates(self, days_back: int = 30) -> dict:
+        """
+        Sync exchange rates from Frankfurter API for all non-EUR currencies
+        used by securities in the portfolio.
+
+        Args:
+            days_back: Number of days to fetch rates for
+
+        Returns:
+            Summary of synced rates
+        """
+        logger.info("Starting exchange rate sync...")
+
+        async with AsyncSessionLocal() as db:
+            try:
+                security_repo = SecurityRepository(db)
+                currency_service = CurrencyService(db)
+
+                # Get all unique non-EUR currencies from securities
+                securities = await security_repo.get_all(limit=1000)
+                currencies = set()
+                for sec in securities:
+                    if sec.currency and sec.currency != "EUR":
+                        currencies.add(sec.currency)
+
+                if not currencies:
+                    logger.info("No non-EUR currencies found")
+                    return {
+                        "status": "success",
+                        "currencies_synced": 0,
+                        "timestamp": datetime.now().isoformat()
+                    }
+
+                logger.info(f"Syncing exchange rates for currencies: {currencies}")
+
+                today = date.today()
+                total_rates = 0
+
+                for currency in currencies:
+                    try:
+                        # Use the currency service's batch fetch to get rates
+                        target_date = today
+                        await currency_service._batch_fetch_rates(
+                            from_currency=currency,
+                            target_date=target_date,
+                            to_currency="EUR",
+                            days_back=days_back
+                        )
+                        logger.info(f"Fetched exchange rates for {currency}")
+                        total_rates += 1
+                    except Exception as e:
+                        logger.error(f"Failed to fetch rates for {currency}: {e}")
+
+                await db.commit()
+
+                result = {
+                    "status": "success",
+                    "currencies_synced": total_rates,
+                    "currencies": list(currencies),
+                    "timestamp": datetime.now().isoformat()
+                }
+                logger.info(f"Exchange rate sync completed: {total_rates} currencies updated")
+                return result
+
+            except Exception as e:
+                await db.rollback()
+                logger.error(f"Failed to sync exchange rates: {str(e)}", exc_info=True)
+                return {
+                    "status": "error",
+                    "message": f"Failed to sync exchange rates: {str(e)}",
+                    "timestamp": datetime.now().isoformat()
+                }
+
     async def full_sync_job(self):
         """
         Full sync job that runs once daily at 08:00 Europe/Berlin.
@@ -260,7 +335,12 @@ class SchedulerService:
         ibkr_result = await self.sync_ibkr_data()
         logger.info(f"IBKR Sync Result: {ibkr_result}")
 
-        # Step 2: Sync market data (only if IBKR sync was successful)
+        # Step 2: Sync exchange rates (always, even if IBKR sync fails)
+        logger.info("Syncing exchange rates...")
+        fx_result = await self.sync_exchange_rates(days_back=30)
+        logger.info(f"Exchange Rate Sync Result: {fx_result}")
+
+        # Step 3: Sync market data (only if IBKR sync was successful)
         if ibkr_result.get("status") == "success":
             logger.info("IBKR sync successful, proceeding to market data sync (730 days)...")
             market_result = await self.sync_market_data(days_back=730)
@@ -273,6 +353,7 @@ class SchedulerService:
             "type": "full_sync",
             "timestamp": datetime.now().isoformat(),
             "ibkr_result": ibkr_result,
+            "fx_result": fx_result,
             "market_result": market_result,
             "status": ibkr_result.get("status", "error"),
         }
@@ -285,10 +366,15 @@ class SchedulerService:
         """
         Market-data-only sync job that runs at 15:00 and 22:00 Europe/Berlin.
         Only checks last 7 days — very lightweight, just picks up recent closing prices.
+        Also syncs exchange rates to keep FX data current.
         """
         logger.info("=" * 80)
-        logger.info("STARTING MARKET DATA ONLY SYNC (7 days)")
+        logger.info("STARTING MARKET DATA + EXCHANGE RATE SYNC (7 days)")
         logger.info("=" * 80)
+
+        # Sync exchange rates first (needed for portfolio value calculation)
+        fx_result = await self.sync_exchange_rates(days_back=7)
+        logger.info(f"Exchange Rate Sync Result: {fx_result}")
 
         market_result = await self.sync_market_data(days_back=7)
         logger.info(f"Market Data Sync Result: {market_result}")
@@ -297,6 +383,7 @@ class SchedulerService:
         self.last_sync_result = {
             "type": "market_data_only",
             "timestamp": datetime.now().isoformat(),
+            "fx_result": fx_result,
             "market_result": market_result,
             "status": market_result.get("status", "error"),
         }
