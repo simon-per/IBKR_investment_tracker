@@ -15,6 +15,7 @@ services:
       - traefik.http.routers.portfolio-api.entrypoints=websecure
       - traefik.http.routers.portfolio-api.tls.certresolver=mytlschallenge
       - traefik.http.services.portfolio-api.loadbalancer.server.port=8000
+      - traefik.docker.network=n8n_default
     networks:
       - default
       - n8n_default
@@ -32,6 +33,7 @@ services:
       - traefik.http.routers.portfolio-frontend.entrypoints=websecure
       - traefik.http.routers.portfolio-frontend.tls.certresolver=mytlschallenge
       - traefik.http.services.portfolio-frontend.loadbalancer.server.port=80
+      - traefik.docker.network=n8n_default
     networks:
       - default
       - n8n_default
