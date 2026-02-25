@@ -11,7 +11,7 @@ import { PositionsList } from './PositionsList'
 import { AllocationTab } from './AllocationTab'
 import { ForecastTab } from './ForecastTab'
 import { ThemeToggle } from './ThemeToggle'
-import { RefreshCw, Download } from 'lucide-react'
+import { RefreshCw, Download, Clock } from 'lucide-react'
 
 type TimeRange = '1W' | '1M' | '3M' | '6M' | '1Y' | '2Y' | '3Y' | '5Y' | 'ALL'
 
@@ -73,6 +73,13 @@ export function Dashboard() {
   const { data: positions, isLoading: positionsLoading } = useQuery({
     queryKey: ['portfolio', 'positions'],
     queryFn: () => api.getPositions(),
+  })
+
+  // Fetch scheduler status (poll every 60s)
+  const { data: schedulerStatus } = useQuery({
+    queryKey: ['scheduler', 'status'],
+    queryFn: () => api.getSchedulerStatus(),
+    refetchInterval: 60_000,
   })
 
   // Calculate performance metrics for selected timeframe
@@ -226,6 +233,23 @@ export function Dashboard() {
               <p className="text-muted-foreground mt-1">
                 Track your IBKR portfolio with cost basis and market value
               </p>
+              {schedulerStatus && schedulerStatus.status === 'running' && (
+                <div className="flex items-center gap-3 mt-2 text-xs text-muted-foreground">
+                  <Clock className="h-3 w-3" />
+                  {schedulerStatus.last_sync ? (
+                    <span>
+                      Last sync: {new Date(schedulerStatus.last_sync.timestamp).toLocaleString()} ({schedulerStatus.last_sync.status})
+                    </span>
+                  ) : (
+                    <span>No sync has run yet</span>
+                  )}
+                  {schedulerStatus.jobs.length > 0 && schedulerStatus.jobs[0].next_run_time && (
+                    <span>
+                      · Next: {new Date(schedulerStatus.jobs[0].next_run_time).toLocaleString()}
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
             <div className="flex gap-2">
               <ThemeToggle />

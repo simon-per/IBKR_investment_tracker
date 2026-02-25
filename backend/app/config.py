@@ -1,9 +1,11 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
 
-# Get the project root directory (parent of backend folder)
-PROJECT_ROOT = Path(__file__).parent.parent.parent
-ENV_FILE = PROJECT_ROOT / ".env"
+# Get the backend directory (parent of app/)
+# In Docker: /app/app/config.py → /app/.env
+# Locally: backend/app/config.py → backend/.env
+BACKEND_ROOT = Path(__file__).parent.parent
+ENV_FILE = BACKEND_ROOT / ".env"
 
 
 class Settings(BaseSettings):

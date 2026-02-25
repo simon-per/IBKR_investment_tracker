@@ -37,7 +37,7 @@ async def lifespan(app: FastAPI):
     from app.services.scheduler_service import get_scheduler
     scheduler = get_scheduler()
     scheduler.start()
-    print("Scheduler started - Daily sync scheduled for 4:00 PM")
+    print("Scheduler started - Syncs at 08:00, 15:00, 22:00 Europe/Berlin")
 
     yield
 

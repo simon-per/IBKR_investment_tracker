@@ -25,6 +25,7 @@ portfolio_data*.json
 # Logs
 *.log
 *.txt
+!requirements.txt
 
 # Data exports (contain personal account data)
 *.xml

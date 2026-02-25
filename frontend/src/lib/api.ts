@@ -56,6 +56,24 @@ export interface Position {
   analyst_rating: AnalystRating | null;
 }
 
+export interface SchedulerJob {
+  id: string;
+  name: string;
+  next_run_time: string | null;
+  trigger: string;
+}
+
+export interface SchedulerStatus {
+  status: string;
+  jobs: SchedulerJob[];
+  last_sync: {
+    type: string;
+    timestamp: string;
+    status: string;
+  } | null;
+  message?: string;
+}
+
 export interface SyncResponse {
   message: string;
   securities_synced: number;
@@ -159,6 +177,11 @@ class ApiClient {
     newest_update: string | null;
   }> {
     return this.request('/api/allocation/status');
+  }
+
+  // Scheduler endpoints
+  async getSchedulerStatus(): Promise<SchedulerStatus> {
+    return this.request<SchedulerStatus>('/api/scheduler/status');
   }
 
   // Health check

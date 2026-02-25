@@ -30,14 +30,15 @@ class SchedulerService:
     """
     Service for scheduling automated data synchronization tasks.
 
-    Runs 3 times daily:
-    - 08:00 UTC: Full sync (IBKR + 730 days market data) — fills historical gaps gradually
-    - 15:00 UTC: Market data only (7 days) — picks up EU closing prices
-    - 22:00 UTC: Market data only (7 days) — picks up US closing prices
+    Runs 3 times daily (Europe/Berlin):
+    - 08:00: Full sync (IBKR + 730 days market data) — fills historical gaps gradually
+    - 15:00: Market data only (7 days) — picks up EU closing prices
+    - 22:00: Market data only (7 days) — picks up US closing prices
     """
 
     def __init__(self):
         self.scheduler: Optional[AsyncIOScheduler] = None
+        self.last_sync_result: Optional[dict] = None
 
     async def sync_ibkr_data(self) -> dict:
         """
@@ -243,7 +244,7 @@ class SchedulerService:
 
     async def full_sync_job(self):
         """
-        Full sync job that runs once daily at 8 AM UTC.
+        Full sync job that runs once daily at 08:00 Europe/Berlin.
 
         Executes in sequence:
         1. IBKR data sync (securities and tax lots)
@@ -252,6 +253,8 @@ class SchedulerService:
         logger.info("=" * 80)
         logger.info("STARTING FULL SYNC JOB (IBKR + MARKET DATA)")
         logger.info("=" * 80)
+
+        market_result = None
 
         # Step 1: Sync IBKR data
         ibkr_result = await self.sync_ibkr_data()
@@ -265,13 +268,22 @@ class SchedulerService:
         else:
             logger.error("IBKR sync failed, skipping market data sync")
 
+        # Track result
+        self.last_sync_result = {
+            "type": "full_sync",
+            "timestamp": datetime.now().isoformat(),
+            "ibkr_result": ibkr_result,
+            "market_result": market_result,
+            "status": ibkr_result.get("status", "error"),
+        }
+
         logger.info("=" * 80)
         logger.info("FULL SYNC JOB COMPLETED")
         logger.info("=" * 80)
 
     async def market_data_only_sync_job(self):
         """
-        Market-data-only sync job that runs at 15:00 and 22:00 UTC.
+        Market-data-only sync job that runs at 15:00 and 22:00 Europe/Berlin.
         Only checks last 7 days — very lightweight, just picks up recent closing prices.
         """
         logger.info("=" * 80)
@@ -281,16 +293,24 @@ class SchedulerService:
         market_result = await self.sync_market_data(days_back=7)
         logger.info(f"Market Data Sync Result: {market_result}")
 
+        # Track result
+        self.last_sync_result = {
+            "type": "market_data_only",
+            "timestamp": datetime.now().isoformat(),
+            "market_result": market_result,
+            "status": market_result.get("status", "error"),
+        }
+
         logger.info("=" * 80)
         logger.info("MARKET DATA ONLY SYNC COMPLETED")
         logger.info("=" * 80)
 
     def start(self):
         """
-        Start the scheduler with 3 daily syncs:
-        - 08:00 UTC: Full sync (IBKR + 730 days market data) — fills historical gaps
-        - 15:00 UTC: Market data only (7 days) — after European market close
-        - 22:00 UTC: Market data only (7 days) — after US market close
+        Start the scheduler with 3 daily syncs (Europe/Berlin):
+        - 08:00: Full sync (IBKR + 730 days market data) — fills historical gaps
+        - 15:00: Market data only (7 days) — after European market close
+        - 22:00: Market data only (7 days) — after US market close
         """
         if self.scheduler is not None:
             logger.warning("Scheduler is already running")
@@ -300,30 +320,30 @@ class SchedulerService:
 
         self.scheduler = AsyncIOScheduler()
 
-        # 08:00 UTC — full sync (IBKR + market data)
+        # 08:00 Europe/Berlin — full sync (IBKR + market data)
         self.scheduler.add_job(
             self.full_sync_job,
-            trigger=CronTrigger(hour=8, minute=0),
+            trigger=CronTrigger(hour=8, minute=0, timezone='Europe/Berlin'),
             id='full_sync_job',
-            name='Full IBKR + Market Data Sync (08:00 UTC)',
+            name='Full IBKR + Market Data Sync (08:00 Europe/Berlin)',
             replace_existing=True
         )
 
-        # 15:00 UTC — market data only (after EU close)
+        # 15:00 Europe/Berlin — market data only (after EU close)
         self.scheduler.add_job(
             self.market_data_only_sync_job,
-            trigger=CronTrigger(hour=15, minute=0),
+            trigger=CronTrigger(hour=15, minute=0, timezone='Europe/Berlin'),
             id='market_sync_eu_close',
-            name='Market Data Sync after EU Close (15:00 UTC)',
+            name='Market Data Sync after EU Close (15:00 Europe/Berlin)',
             replace_existing=True
         )
 
-        # 22:00 UTC — market data only (after US close)
+        # 22:00 Europe/Berlin — market data only (after US close)
         self.scheduler.add_job(
             self.market_data_only_sync_job,
-            trigger=CronTrigger(hour=22, minute=0),
+            trigger=CronTrigger(hour=22, minute=0, timezone='Europe/Berlin'),
             id='market_sync_us_close',
-            name='Market Data Sync after US Close (22:00 UTC)',
+            name='Market Data Sync after US Close (22:00 Europe/Berlin)',
             replace_existing=True
         )
 
@@ -355,6 +375,7 @@ class SchedulerService:
         """
         logger.info("Manually triggering full sync job...")
         await self.full_sync_job()
+        # last_sync_result is already set by full_sync_job
         return {"status": "completed", "message": "Manual sync triggered successfully"}
 
 

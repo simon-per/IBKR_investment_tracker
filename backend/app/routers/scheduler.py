@@ -21,7 +21,7 @@ async def trigger_sync_now():
     2. Then runs market data sync
     3. Returns results from both operations
 
-    Useful for testing or manual syncs outside of the scheduled 4 PM time.
+    Useful for testing or manual syncs outside of the scheduled times.
 
     Returns:
         Summary of sync operations
@@ -41,10 +41,10 @@ async def trigger_sync_now():
 @router.get("/status", response_model=Dict)
 async def get_scheduler_status():
     """
-    Get the current status of the scheduler.
+    Get the current status of the scheduler, including all jobs and last sync result.
 
     Returns:
-        Information about the scheduler and next scheduled run
+        Information about the scheduler, all scheduled jobs, and last sync result
     """
     try:
         scheduler = get_scheduler()
@@ -52,23 +52,24 @@ async def get_scheduler_status():
         if scheduler.scheduler is None:
             return {
                 "status": "not_running",
-                "message": "Scheduler is not running"
+                "message": "Scheduler is not running",
+                "jobs": [],
+                "last_sync": None,
             }
 
-        # Get the daily sync job
-        job = scheduler.scheduler.get_job('daily_sync_job')
-
-        if job is None:
-            return {
-                "status": "error",
-                "message": "Daily sync job not found"
-            }
+        jobs = []
+        for job in scheduler.scheduler.get_jobs():
+            jobs.append({
+                "id": job.id,
+                "name": job.name,
+                "next_run_time": job.next_run_time.isoformat() if job.next_run_time else None,
+                "trigger": str(job.trigger),
+            })
 
         return {
             "status": "running",
-            "job_name": job.name,
-            "next_run_time": job.next_run_time.isoformat() if job.next_run_time else None,
-            "trigger": str(job.trigger),
+            "jobs": jobs,
+            "last_sync": scheduler.last_sync_result,
         }
 
     except Exception as e:
