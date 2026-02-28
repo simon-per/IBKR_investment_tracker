@@ -66,6 +66,18 @@ class PortfolioValuePoint(BaseModel):
         from_attributes = True
 
 
+class AnnualizedReturnResponse(BaseModel):
+    """Response for XIRR annualized return calculation"""
+    method: str = Field(..., description="Calculation method used (xirr)")
+    annualized_return_pct: Optional[float] = Field(None, description="Annualized return percentage")
+    start_date: str = Field(..., description="Start date of the calculation period")
+    end_date: str = Field(..., description="End date of the calculation period")
+    num_cash_flows: int = Field(..., description="Number of cash flows used in calculation")
+
+    class Config:
+        from_attributes = True
+
+
 class PortfolioSummary(BaseModel):
     """Current portfolio summary"""
     total_cost_basis_eur: float = Field(..., description="Total amount invested")

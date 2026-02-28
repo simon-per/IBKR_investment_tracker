@@ -75,6 +75,13 @@ export function Dashboard() {
     queryFn: () => api.getPositions(),
   })
 
+  // Fetch XIRR annualized return for selected time range
+  const { data: annualizedReturn, isLoading: xirrLoading } = useQuery({
+    queryKey: ['portfolio', 'annualized-return', dateRange],
+    queryFn: () => api.getAnnualizedReturn(dateRange.start, dateRange.end),
+    enabled: !!dateRange.start && !!dateRange.end,
+  })
+
   // Fetch scheduler status (poll every 60s)
   const { data: schedulerStatus } = useQuery({
     queryKey: ['scheduler', 'status'],
@@ -122,27 +129,8 @@ export function Dashboard() {
       return null
     }
 
-    // 1. CAGR (Compound Annual Growth Rate)
-    const firstPoint = valueOverTime[0]
-    const lastPoint = valueOverTime[valueOverTime.length - 1]
-    const startValue = firstPoint.market_value_eur
-    const endValue = lastPoint.market_value_eur
-
-    // Calculate years between first and last point
-    const startDate = new Date(firstPoint.date)
-    const endDate = new Date(lastPoint.date)
-    const daysDiff = (endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)
-    const years = daysDiff / 365.25
-
-    let cagr: number
-    if (years < 0.08 || startValue <= 0) {
-      // For periods < ~1 month, show simple return instead of CAGR
-      cagr = startValue > 0 ? ((endValue - startValue) / startValue) * 100 : 0
-    } else {
-      cagr = (Math.pow(endValue / startValue, 1 / years) - 1) * 100
-    }
-    // Clamp to reasonable range
-    cagr = Math.max(-999, Math.min(9999, cagr))
+    // 1. Annual Return (XIRR) - from backend, fallback to null
+    const xirr = annualizedReturn?.annualized_return_pct ?? null
 
     // 2. Maximum Drawdown
     let maxDrawdown = 0
@@ -200,14 +188,14 @@ export function Dashboard() {
     const winRate = positions.length > 0 ? (profitablePositions / positions.length) * 100 : 0
 
     return {
-      cagr,
+      xirr,
       maxDrawdown,
       sharpeRatio,
       winRate,
       profitablePositions,
       totalPositions: positions.length,
     }
-  }, [valueOverTime, positions])
+  }, [valueOverTime, positions, annualizedReturn])
 
   // Sync mutation
   const syncMutation = useMutation({
@@ -318,7 +306,7 @@ export function Dashboard() {
             {/* Performance Metrics - Time-Filtered KPIs */}
             <PerformanceMetricsCards
               metrics={kpiMetrics}
-              isLoading={chartLoading || positionsLoading}
+              isLoading={chartLoading || positionsLoading || xirrLoading}
             />
 
             {/* Portfolio Value Chart */}

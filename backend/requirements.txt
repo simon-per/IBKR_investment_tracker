@@ -23,6 +23,9 @@ requests==2.31.0
 # Market Data
 yfinance>=1.1.0
 
+# Financial calculations
+pyxirr>=0.10.0
+
 # Scheduling
 APScheduler==3.11.2
 

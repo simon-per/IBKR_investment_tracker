@@ -56,6 +56,14 @@ export interface Position {
   analyst_rating: AnalystRating | null;
 }
 
+export interface AnnualizedReturnResponse {
+  method: string;
+  annualized_return_pct: number | null;
+  start_date: string;
+  end_date: string;
+  num_cash_flows: number;
+}
+
 export interface SchedulerJob {
   id: string;
   name: string;
@@ -129,6 +137,12 @@ class ApiClient {
 
   async getPortfolioSummary(): Promise<PortfolioSummary> {
     return this.request<PortfolioSummary>('/api/portfolio/summary');
+  }
+
+  async getAnnualizedReturn(startDate: string, endDate: string): Promise<AnnualizedReturnResponse> {
+    return this.request<AnnualizedReturnResponse>(
+      `/api/portfolio/annualized-return?start_date=${startDate}&end_date=${endDate}`
+    );
   }
 
   async getPositions(): Promise<Position[]> {

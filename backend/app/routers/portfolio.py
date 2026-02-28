@@ -12,7 +12,8 @@ from app.services.portfolio_service import PortfolioService
 from app.schemas.portfolio import (
     PortfolioValuePoint,
     PortfolioSummary,
-    PositionResponse
+    PositionResponse,
+    AnnualizedReturnResponse
 )
 
 
@@ -96,6 +97,36 @@ async def get_portfolio_summary(db: AsyncSession = Depends(get_db)):
     summary = await portfolio_service.get_current_portfolio_summary()
 
     return summary
+
+
+@router.get("/annualized-return", response_model=AnnualizedReturnResponse)
+async def get_annualized_return(
+    start_date: date = Query(..., description="Start date for the calculation"),
+    end_date: date = Query(..., description="End date for the calculation"),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Calculate XIRR (money-weighted annualized return) for the portfolio.
+
+    Treats each tax lot purchase as a dated cash flow and finds the annualized
+    rate that makes the NPV of all cash flows equal zero.
+    """
+    if start_date >= end_date:
+        raise HTTPException(
+            status_code=400,
+            detail="start_date must be before end_date"
+        )
+
+    portfolio_service = PortfolioService(db)
+    xirr_pct, num_cash_flows, eff_start, eff_end = await portfolio_service.calculate_xirr(start_date, end_date)
+
+    return AnnualizedReturnResponse(
+        method="xirr",
+        annualized_return_pct=round(xirr_pct, 2) if xirr_pct is not None else None,
+        start_date=eff_start.isoformat(),
+        end_date=eff_end.isoformat(),
+        num_cash_flows=num_cash_flows
+    )
 
 
 @router.get("/positions", response_model=List[PositionResponse])

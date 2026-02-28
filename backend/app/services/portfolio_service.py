@@ -2,7 +2,7 @@
 Portfolio Service
 Calculates cost basis and market value for the portfolio over time.
 """
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from datetime import date, timedelta
 from decimal import Decimal
 from sqlalchemy import select, and_
@@ -245,6 +245,125 @@ class PortfolioService:
         positions_list.sort(key=lambda x: x["market_value_eur"], reverse=True)
 
         return positions_list
+
+    async def calculate_xirr(
+        self,
+        start_date: date,
+        end_date: date
+    ) -> Tuple[Optional[float], int, date, date]:
+        """
+        Calculate XIRR (money-weighted annualized return) for the portfolio.
+
+        Cash flows:
+        - Negative: portfolio market value on start_date (money already invested)
+        - Negative: each tax lot opened in (start_date, end_date] at its cost_basis_eur
+        - Positive: portfolio market value on end_date (terminal value)
+
+        Returns: (annualized_return_pct or None, num_cash_flows)
+        """
+        import pyxirr
+
+        # Get all open taxlots
+        result = await self.db.execute(
+            select(TaxLot, Security)
+            .join(Security, TaxLot.security_id == Security.id)
+            .where(TaxLot.is_open == True)
+            .order_by(TaxLot.open_date.asc())
+        )
+        taxlots_with_securities = result.all()
+
+        if not taxlots_with_securities:
+            return None, 0, start_date, end_date
+
+        # Pre-load caches for start and end dates
+        unique_securities = {security for _, security in taxlots_with_securities}
+        price_cache = await self._preload_market_prices(unique_securities, start_date, end_date)
+        exchange_rate_cache = await self._preload_exchange_rates(unique_securities, start_date, end_date)
+
+        # Find the effective end date: latest date with actual market prices
+        # This handles stale price data (e.g., prices only go up to Feb 2 but end_date is Feb 27)
+        effective_end_date = self._find_latest_price_date(end_date, price_cache)
+        if effective_end_date is None or effective_end_date <= start_date:
+            logger.warning(f"No usable price data found near {end_date}")
+            return None, 0, start_date, end_date
+
+        # Similarly find effective start date
+        effective_start_date = self._find_latest_price_date(start_date, price_cache)
+        if effective_start_date is None:
+            effective_start_date = start_date
+
+        # Get portfolio market values on effective start and end dates
+        start_value = self._calculate_daily_value(
+            effective_start_date, taxlots_with_securities, price_cache, exchange_rate_cache
+        )
+        end_value = self._calculate_daily_value(
+            effective_end_date, taxlots_with_securities, price_cache, exchange_rate_cache
+        )
+
+        start_mv = start_value["market_value_eur"]
+        end_mv = end_value["market_value_eur"]
+
+        # Build cash flows
+        dates = []
+        amounts = []
+
+        # Initial outflow: portfolio value at effective start date
+        if start_mv > 0:
+            dates.append(effective_start_date)
+            amounts.append(-start_mv)
+
+        # Intermediate outflows: tax lots opened during (start_date, effective_end_date]
+        for taxlot, security in taxlots_with_securities:
+            if effective_start_date < taxlot.open_date <= effective_end_date:
+                dates.append(taxlot.open_date)
+                amounts.append(-float(taxlot.cost_basis_eur))
+
+        # Terminal inflow: portfolio value at effective end date
+        if end_mv > 0:
+            dates.append(effective_end_date)
+            amounts.append(end_mv)
+
+        num_cash_flows = len(dates)
+
+        # Need at least 2 cash flows (one negative, one positive)
+        if num_cash_flows < 2 or start_mv <= 0 or end_mv <= 0:
+            return None, num_cash_flows, effective_start_date, effective_end_date
+
+        # For very short periods (< 30 days), return simple period return
+        days_diff = (effective_end_date - effective_start_date).days
+        if days_diff < 30:
+            total_invested = -sum(a for a in amounts if a < 0)
+            if total_invested > 0:
+                simple_return = (end_mv / total_invested - 1) * 100
+                return simple_return, num_cash_flows, effective_start_date, effective_end_date
+            return None, num_cash_flows, effective_start_date, effective_end_date
+
+        try:
+            xirr_result = pyxirr.xirr(dates, amounts)
+            if xirr_result is None:
+                logger.warning("XIRR calculation did not converge")
+                return None, num_cash_flows, effective_start_date, effective_end_date
+            return xirr_result * 100, num_cash_flows, effective_start_date, effective_end_date
+        except Exception as e:
+            logger.warning(f"XIRR calculation failed: {e}")
+            return None, num_cash_flows, effective_start_date, effective_end_date
+
+    def _find_latest_price_date(
+        self,
+        target_date: date,
+        price_cache: Dict,
+        max_lookback_days: int = 30
+    ) -> Optional[date]:
+        """
+        Find the latest date on or before target_date that has price data
+        for at least one security in the cache.
+        """
+        for days_back in range(0, max_lookback_days + 1):
+            check_date = target_date - timedelta(days=days_back)
+            for security_id, dates_dict in price_cache.items():
+                if check_date in dates_dict:
+                    return check_date
+        return None
 
     async def _preload_market_prices(
         self,
