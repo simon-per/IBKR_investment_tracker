@@ -8,26 +8,40 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from 'recharts'
-import type { PortfolioValuePoint } from '@/lib/api'
+import type { PortfolioValuePoint, BenchmarkValuePoint } from '@/lib/api'
 import { formatCurrency, formatDate } from '@/lib/utils'
 
 interface PortfolioValueChartProps {
   data: PortfolioValuePoint[]
+  benchmarkData?: BenchmarkValuePoint[]
+  benchmarkName?: string
   isLoading?: boolean
 }
 
-export function PortfolioValueChart({ data, isLoading }: PortfolioValueChartProps) {
+export function PortfolioValueChart({ data, benchmarkData, benchmarkName, isLoading }: PortfolioValueChartProps) {
   const [showCostBasis, setShowCostBasis] = useState(true)
   const [showMarketValue, setShowMarketValue] = useState(true)
   const [showProfit, setShowProfit] = useState(true)
+  const [showBenchmark, setShowBenchmark] = useState(false)
 
   const chartData = useMemo(() => {
+    // Build a lookup of benchmark values by date
+    const benchmarkByDate: Record<string, number> = {}
+    if (benchmarkData) {
+      for (const bp of benchmarkData) {
+        benchmarkByDate[bp.date] = bp.benchmark_value_eur
+      }
+    }
+
     return data.map(point => ({
       ...point,
       profit_eur: point.market_value_eur - point.cost_basis_eur,
+      benchmark_value_eur: benchmarkByDate[point.date] ?? null,
       dateFormatted: formatDate(point.date),
     }))
-  }, [data])
+  }, [data, benchmarkData])
+
+  const hasBenchmark = benchmarkData && benchmarkData.length > 0
 
   // Custom tick formatter for X axis - show first day of each month
   const formatXAxisTick = (value: string) => {
@@ -66,6 +80,9 @@ export function PortfolioValueChart({ data, isLoading }: PortfolioValueChartProp
       if (showCostBasis) allValues.push(point.cost_basis_eur)
       if (showMarketValue) allValues.push(point.market_value_eur)
       if (showProfit) allValues.push(point.profit_eur)
+      if (showBenchmark && point.benchmark_value_eur != null) {
+        allValues.push(point.benchmark_value_eur)
+      }
     })
 
     if (allValues.length === 0) {
@@ -113,7 +130,7 @@ export function PortfolioValueChart({ data, isLoading }: PortfolioValueChartProp
       domain: [domainMinRounded, domainMaxRounded] as [number, number],
       ticks
     }
-  }, [chartData, showCostBasis, showMarketValue, showProfit])
+  }, [chartData, showCostBasis, showMarketValue, showProfit, showBenchmark])
 
   if (isLoading) {
     return (
@@ -174,6 +191,19 @@ export function PortfolioValueChart({ data, isLoading }: PortfolioValueChartProp
           <div className={`w-2.5 h-2.5 rounded-full ${showProfit ? 'bg-[#f59e0b]' : 'bg-muted-foreground/30'}`} />
           Profit/Loss
         </button>
+        {hasBenchmark && (
+          <button
+            onClick={() => setShowBenchmark(!showBenchmark)}
+            className={`flex items-center gap-2 text-sm px-3 py-1.5 rounded-md transition-all ${
+              showBenchmark
+                ? 'bg-[#3b82f6]/10 text-[#3b82f6] font-medium'
+                : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+            }`}
+          >
+            <div className={`w-2.5 h-2.5 rounded-full ${showBenchmark ? 'bg-[#3b82f6]' : 'bg-muted-foreground/30'}`} />
+            {benchmarkName || 'S&P 500'}
+          </button>
+        )}
       </div>
 
       {/* Chart */}
@@ -233,6 +263,19 @@ export function PortfolioValueChart({ data, isLoading }: PortfolioValueChartProp
               name="Profit/Loss"
               dot={false}
               activeDot={{ r: 6 }}
+            />
+          )}
+          {showBenchmark && (
+            <Line
+              type="monotone"
+              dataKey="benchmark_value_eur"
+              stroke="#3b82f6"
+              strokeWidth={2}
+              strokeDasharray="5 5"
+              name={benchmarkName || 'S&P 500'}
+              dot={false}
+              activeDot={{ r: 6 }}
+              connectNulls
             />
           )}
         </LineChart>

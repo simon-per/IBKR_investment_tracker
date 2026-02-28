@@ -78,6 +78,22 @@ class AnnualizedReturnResponse(BaseModel):
         from_attributes = True
 
 
+class BenchmarkValuePoint(BaseModel):
+    """Single data point for benchmark comparison"""
+    date: str
+    benchmark_value_eur: float
+    cost_basis_eur: float
+    gain_loss_eur: float
+    gain_loss_percent: float
+
+
+class BenchmarkResponse(BaseModel):
+    """Response for benchmark comparison endpoint"""
+    benchmark_name: str
+    benchmark_ticker: str
+    data: List[BenchmarkValuePoint]
+
+
 class PortfolioSummary(BaseModel):
     """Current portfolio summary"""
     total_cost_basis_eur: float = Field(..., description="Total amount invested")

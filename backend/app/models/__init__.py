@@ -8,6 +8,7 @@ from app.models.taxlot import TaxLot
 from app.models.exchange_rate import ExchangeRate
 from app.models.market_price import MarketPrice
 from app.models.analyst_rating import AnalystRating
+from app.models.benchmark_price import BenchmarkPrice
 
 __all__ = [
     "Security",
@@ -15,4 +16,5 @@ __all__ = [
     "ExchangeRate",
     "MarketPrice",
     "AnalystRating",
+    "BenchmarkPrice",
 ]

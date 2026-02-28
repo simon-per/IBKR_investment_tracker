@@ -9,11 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.services.portfolio_service import PortfolioService
+from app.services.benchmark_service import BenchmarkService, BENCHMARKS
 from app.schemas.portfolio import (
     PortfolioValuePoint,
     PortfolioSummary,
     PositionResponse,
-    AnnualizedReturnResponse
+    AnnualizedReturnResponse,
+    BenchmarkResponse,
 )
 
 
@@ -126,6 +128,51 @@ async def get_annualized_return(
         start_date=eff_start.isoformat(),
         end_date=eff_end.isoformat(),
         num_cash_flows=num_cash_flows
+    )
+
+
+@router.get("/benchmark", response_model=BenchmarkResponse)
+async def get_benchmark_comparison(
+    response: Response,
+    start_date: date = Query(default=None, description="Start date (defaults to 1 year ago)"),
+    end_date: date = Query(default=None, description="End date (defaults to today)"),
+    benchmark: str = Query(default="sp500", description="Benchmark: sp500 or nasdaq"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Compare portfolio against a benchmark index.
+
+    Simulates investing every tax lot into S&P 500 or NASDAQ instead,
+    using the same dates and EUR amounts.
+    """
+    if benchmark not in BENCHMARKS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown benchmark '{benchmark}'. Choose from: {', '.join(BENCHMARKS.keys())}",
+        )
+
+    if not end_date:
+        end_date = date.today()
+    if not start_date:
+        start_date = end_date - timedelta(days=365)
+
+    if start_date > end_date:
+        raise HTTPException(status_code=400, detail="start_date must be before or equal to end_date")
+
+    max_days = 365 * 5
+    if (end_date - start_date).days > max_days:
+        raise HTTPException(status_code=400, detail=f"Date range too large. Maximum {max_days} days.")
+
+    bench_info = BENCHMARKS[benchmark]
+    service = BenchmarkService(db)
+    data = await service.calculate_benchmark_value_over_time(start_date, end_date, benchmark)
+
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+
+    return BenchmarkResponse(
+        benchmark_name=bench_info["name"],
+        benchmark_ticker=bench_info["ticker"],
+        data=data,
     )
 
 

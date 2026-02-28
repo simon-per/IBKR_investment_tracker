@@ -4,7 +4,7 @@ Allocation service for fetching and caching sector/geographic data for securitie
 import asyncio
 import random
 from datetime import datetime, timedelta
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 import yfinance as yf
@@ -173,7 +173,7 @@ class AllocationService:
     async def get_portfolio_allocation(self) -> Dict:
         """
         Get current portfolio allocation breakdown by sector and geography.
-        Calculates weighted percentages based on current market values.
+        Returns weighted percentages with position-level detail for drill-down.
         """
         from app.services.portfolio_service import PortfolioService
 
@@ -185,19 +185,45 @@ class AllocationService:
                 'sector_allocation': {},
                 'geographic_allocation': {},
                 'asset_type_allocation': {},
+                'total_market_value_eur': 0.0,
             }
 
-        # Calculate total portfolio value
         total_value = sum(pos['market_value_eur'] for pos in positions)
 
-        # Get all securities with allocation data
         result = await self.db.execute(select(Security))
         securities = {sec.id: sec for sec in result.scalars().all()}
 
-        # Aggregate allocations
-        sector_allocation = {}
-        geographic_allocation = {}
-        asset_type_allocation = {}
+        # Each category stores: {name: {"weight": float, "market_value_eur": float, "positions": [...]}}
+        sector_alloc: Dict[str, Dict] = {}
+        geo_alloc: Dict[str, Dict] = {}
+        asset_alloc: Dict[str, Dict] = {}
+
+        def _add_to_category(
+            store: Dict[str, Dict],
+            category_name: str,
+            weight: float,
+            market_value: float,
+            symbol: str,
+            description: str,
+            is_etf_contribution: bool = False,
+        ):
+            if category_name not in store:
+                store[category_name] = {"weight": 0.0, "market_value_eur": 0.0, "positions": []}
+            store[category_name]["weight"] += weight
+            store[category_name]["market_value_eur"] += market_value
+            # Merge into existing position entry if same symbol already present (ETF contributions)
+            existing = next((p for p in store[category_name]["positions"] if p["symbol"] == symbol), None)
+            if existing:
+                existing["weight"] += weight
+                existing["market_value_eur"] += market_value
+            else:
+                store[category_name]["positions"].append({
+                    "symbol": symbol,
+                    "description": description,
+                    "weight": weight,
+                    "market_value_eur": market_value,
+                    "is_etf_contribution": is_etf_contribution,
+                })
 
         for position in positions:
             security_id = position['security_id']
@@ -205,47 +231,54 @@ class AllocationService:
             if not security:
                 continue
 
-            position_value = position['market_value_eur']
-            position_weight = position_value / total_value if total_value > 0 else 0
+            pos_value = position['market_value_eur']
+            pos_weight = pos_value / total_value if total_value > 0 else 0
+            sym = security.symbol
+            desc = security.description or sym
 
             # Asset type
             asset_type = security.asset_type or 'Unknown'
-            asset_type_allocation[asset_type] = asset_type_allocation.get(asset_type, 0) + position_weight
+            _add_to_category(asset_alloc, asset_type, pos_weight, pos_value, sym, desc)
 
-            # For known ETFs, distribute according to ETF allocation
+            # ETFs: distribute across sectors/regions
             if is_known_etf(security.symbol):
                 etf_data = get_etf_allocation(security.symbol)
 
-                # Distribute sector allocation
                 for sector, pct in etf_data['sector'].items():
-                    weighted_pct = position_weight * (pct / 100)
-                    sector_allocation[sector] = sector_allocation.get(sector, 0) + weighted_pct
+                    w = pos_weight * (pct / 100)
+                    mv = pos_value * (pct / 100)
+                    _add_to_category(sector_alloc, sector, w, mv, sym, desc, is_etf_contribution=True)
 
-                # Distribute geographic allocation
                 for region, pct in etf_data['geographic'].items():
-                    weighted_pct = position_weight * (pct / 100)
-                    geographic_allocation[region] = geographic_allocation.get(region, 0) + weighted_pct
-
-            # For individual stocks, use direct sector/country
+                    w = pos_weight * (pct / 100)
+                    mv = pos_value * (pct / 100)
+                    _add_to_category(geo_alloc, region, w, mv, sym, desc, is_etf_contribution=True)
             else:
                 if security.sector:
-                    sector_allocation[security.sector] = sector_allocation.get(security.sector, 0) + position_weight
-
+                    _add_to_category(sector_alloc, security.sector, pos_weight, pos_value, sym, desc)
                 if security.country:
-                    geographic_allocation[security.country] = geographic_allocation.get(security.country, 0) + position_weight
+                    _add_to_category(geo_alloc, security.country, pos_weight, pos_value, sym, desc)
 
-        # Convert to percentages
-        sector_allocation = {k: v * 100 for k, v in sector_allocation.items()}
-        geographic_allocation = {k: v * 100 for k, v in geographic_allocation.items()}
-        asset_type_allocation = {k: v * 100 for k, v in asset_type_allocation.items()}
-
-        # Sort by percentage descending
-        sector_allocation = dict(sorted(sector_allocation.items(), key=lambda x: x[1], reverse=True))
-        geographic_allocation = dict(sorted(geographic_allocation.items(), key=lambda x: x[1], reverse=True))
-        asset_type_allocation = dict(sorted(asset_type_allocation.items(), key=lambda x: x[1], reverse=True))
+        def _finalize(store: Dict[str, Dict]) -> Dict:
+            """Convert weights to percentages, sort, and round."""
+            out = {}
+            for name, data in sorted(store.items(), key=lambda x: x[1]["weight"], reverse=True):
+                pct = round(data["weight"] * 100, 2)
+                # Sort positions within category by weight descending
+                pos_list = sorted(data["positions"], key=lambda p: p["weight"], reverse=True)
+                for p in pos_list:
+                    p["weight"] = round(p["weight"] * 100, 2)
+                    p["market_value_eur"] = round(p["market_value_eur"], 2)
+                out[name] = {
+                    "percentage": pct,
+                    "market_value_eur": round(data["market_value_eur"], 2),
+                    "positions": pos_list,
+                }
+            return out
 
         return {
-            'sector_allocation': sector_allocation,
-            'geographic_allocation': geographic_allocation,
-            'asset_type_allocation': asset_type_allocation,
+            'sector_allocation': _finalize(sector_alloc),
+            'geographic_allocation': _finalize(geo_alloc),
+            'asset_type_allocation': _finalize(asset_alloc),
+            'total_market_value_eur': round(total_value, 2),
         }

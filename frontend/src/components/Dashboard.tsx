@@ -75,6 +75,13 @@ export function Dashboard() {
     queryFn: () => api.getPositions(),
   })
 
+  // Fetch benchmark comparison (S&P 500)
+  const { data: benchmarkData } = useQuery({
+    queryKey: ['portfolio', 'benchmark', dateRange, 'sp500'],
+    queryFn: () => api.getBenchmarkComparison(dateRange.start, dateRange.end, 'sp500'),
+    enabled: !!dateRange.start && !!dateRange.end,
+  })
+
   // Fetch XIRR annualized return for selected time range
   const { data: annualizedReturn, isLoading: xirrLoading } = useQuery({
     queryKey: ['portfolio', 'annualized-return', dateRange],
@@ -360,7 +367,12 @@ export function Dashboard() {
                 )}
               </CardHeader>
               <CardContent>
-                <PortfolioValueChart data={valueOverTime || []} isLoading={chartLoading} />
+                <PortfolioValueChart
+                  data={valueOverTime || []}
+                  benchmarkData={benchmarkData?.data || []}
+                  benchmarkName={benchmarkData?.benchmark_name}
+                  isLoading={chartLoading}
+                />
               </CardContent>
             </Card>
 

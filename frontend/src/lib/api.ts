@@ -82,6 +82,41 @@ export interface SchedulerStatus {
   message?: string;
 }
 
+export interface BenchmarkValuePoint {
+  date: string;
+  benchmark_value_eur: number;
+  cost_basis_eur: number;
+  gain_loss_eur: number;
+  gain_loss_percent: number;
+}
+
+export interface BenchmarkResponse {
+  benchmark_name: string;
+  benchmark_ticker: string;
+  data: BenchmarkValuePoint[];
+}
+
+export interface AllocationPosition {
+  symbol: string;
+  description: string;
+  weight: number;
+  market_value_eur: number;
+  is_etf_contribution: boolean;
+}
+
+export interface AllocationCategory {
+  percentage: number;
+  market_value_eur: number;
+  positions: AllocationPosition[];
+}
+
+export interface PortfolioAllocationResponse {
+  sector_allocation: Record<string, AllocationCategory>;
+  geographic_allocation: Record<string, AllocationCategory>;
+  asset_type_allocation: Record<string, AllocationCategory>;
+  total_market_value_eur: number;
+}
+
 export interface SyncResponse {
   message: string;
   securities_synced: number;
@@ -149,6 +184,14 @@ class ApiClient {
     return this.request<Position[]>('/api/portfolio/positions');
   }
 
+  async getBenchmarkComparison(
+    startDate: string, endDate: string, benchmark: string = 'sp500'
+  ): Promise<BenchmarkResponse> {
+    return this.request<BenchmarkResponse>(
+      `/api/portfolio/benchmark?start_date=${startDate}&end_date=${endDate}&benchmark=${benchmark}`
+    );
+  }
+
   // Sync endpoint
   async syncIBKRData(): Promise<SyncResponse> {
     return this.request<SyncResponse>('/api/sync/ibkr', {
@@ -174,11 +217,7 @@ class ApiClient {
     });
   }
 
-  async getPortfolioAllocation(): Promise<{
-    sector_allocation: Record<string, number>;
-    geographic_allocation: Record<string, number>;
-    asset_type_allocation: Record<string, number>;
-  }> {
+  async getPortfolioAllocation(): Promise<PortfolioAllocationResponse> {
     return this.request('/api/allocation/portfolio');
   }
 
