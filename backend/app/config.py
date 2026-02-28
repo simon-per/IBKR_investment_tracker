@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./portfolio.db"
 
     # CORS Configuration (comma-separated string to avoid Pydantic JSON-parsing issues with List from env vars)
-    cors_origins: str = "http://localhost:5173,http://localhost:3000"
+    cors_origins: str = "http://localhost:5173,http://localhost:5174,http://localhost:3000"
 
     # Logging
     log_level: str = "INFO"
