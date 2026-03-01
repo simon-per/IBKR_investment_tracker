@@ -13,6 +13,39 @@ interface MonthReturn {
   returnPercent: number
   startValue: number
   endValue: number
+  newInvestment: number
+}
+
+/** Modified Dietz return with daily-weighted cash flows */
+function computeModifiedDietzReturn(points: PortfolioValuePoint[]): MonthReturn | null {
+  if (points.length < 2) return null
+  const startMV = points[0].market_value_eur
+  const endMV = points[points.length - 1].market_value_eur
+  if (startMV === 0) return null
+
+  const totalDays = points.length - 1
+
+  // Detect cash flows from day-over-day cost_basis changes
+  let netCashFlow = 0
+  let weightedCashFlow = 0
+  for (let i = 1; i < points.length; i++) {
+    const cf = points[i].cost_basis_eur - points[i - 1].cost_basis_eur
+    if (cf !== 0) {
+      netCashFlow += cf
+      // Weight: fraction of period remaining after the cash flow
+      weightedCashFlow += cf * ((totalDays - i) / totalDays)
+    }
+  }
+
+  const gain = endMV - startMV - netCashFlow
+  const denominator = startMV + weightedCashFlow
+
+  return {
+    returnPercent: denominator > 0 ? (gain / denominator) * 100 : 0,
+    startValue: startMV,
+    endValue: endMV,
+    newInvestment: netCashFlow,
+  }
 }
 
 interface YearRow {
@@ -63,18 +96,11 @@ export function MonthlyReturnsHeatmap({ data, isLoading }: MonthlyReturnsHeatmap
       }
     }
 
-    // Compute return per month
+    // Compute Modified Dietz return per month
     const monthReturns = new Map<string, MonthReturn>()
     for (const [key, points] of monthGroups) {
-      if (points.length < 2) continue
-      const first = points[0].market_value_eur
-      const last = points[points.length - 1].market_value_eur
-      if (first === 0) continue
-      monthReturns.set(key, {
-        returnPercent: ((last - first) / first) * 100,
-        startValue: first,
-        endValue: last,
-      })
+      const result = computeModifiedDietzReturn(points)
+      if (result) monthReturns.set(key, result)
     }
 
     // Organize into year rows
@@ -88,30 +114,12 @@ export function MonthlyReturnsHeatmap({ data, isLoading }: MonthlyReturnsHeatmap
       yearMap.get(year)![monthIndex] = monthReturns.get(key)!
     }
 
-    // Compute YTD for each year
+    // Compute YTD for each year using Modified Dietz
     const rows: YearRow[] = []
     for (const [year, months] of yearMap) {
-      // Find first and last data points for this year
       const yearPrefix = String(year)
-      let ytdStart: number | null = null
-      let ytdEnd: number | null = null
-
-      for (const point of data) {
-        if (point.date.startsWith(yearPrefix)) {
-          if (ytdStart === null) ytdStart = point.market_value_eur
-          ytdEnd = point.market_value_eur
-        }
-      }
-
-      let ytd: MonthReturn | null = null
-      if (ytdStart !== null && ytdEnd !== null && ytdStart > 0) {
-        ytd = {
-          returnPercent: ((ytdEnd - ytdStart) / ytdStart) * 100,
-          startValue: ytdStart,
-          endValue: ytdEnd,
-        }
-      }
-
+      const yearPoints = data.filter(p => p.date.startsWith(yearPrefix))
+      const ytd = computeModifiedDietzReturn(yearPoints)
       rows.push({ year, months, ytd })
     }
 
@@ -203,7 +211,7 @@ export function MonthlyReturnsHeatmap({ data, isLoading }: MonthlyReturnsHeatmap
                                 'rounded px-1.5 py-1 text-center text-xs font-medium',
                                 getReturnColor(m.returnPercent)
                               )}
-                              title={`${MONTH_LABELS[i]} ${row.year}: ${m.returnPercent >= 0 ? '+' : ''}${m.returnPercent.toFixed(2)}% (€${m.startValue.toLocaleString('en-US', { maximumFractionDigits: 0 })} → €${m.endValue.toLocaleString('en-US', { maximumFractionDigits: 0 })})`}
+                              title={`${MONTH_LABELS[i]} ${row.year}: ${m.returnPercent >= 0 ? '+' : ''}${m.returnPercent.toFixed(2)}% (€${m.startValue.toLocaleString('en-US', { maximumFractionDigits: 0 })} → €${m.endValue.toLocaleString('en-US', { maximumFractionDigits: 0 })})${m.newInvestment > 0 ? ` · +€${m.newInvestment.toLocaleString('en-US', { maximumFractionDigits: 0 })} invested` : ''}`}
                             >
                               {m.returnPercent >= 0 ? '+' : ''}{m.returnPercent.toFixed(1)}%
                             </div>
@@ -219,7 +227,7 @@ export function MonthlyReturnsHeatmap({ data, isLoading }: MonthlyReturnsHeatmap
                               'rounded px-1.5 py-1 text-center text-xs font-medium',
                               getReturnColor(row.ytd.returnPercent)
                             )}
-                            title={`YTD ${row.year}: ${row.ytd.returnPercent >= 0 ? '+' : ''}${row.ytd.returnPercent.toFixed(2)}% (€${row.ytd.startValue.toLocaleString('en-US', { maximumFractionDigits: 0 })} → €${row.ytd.endValue.toLocaleString('en-US', { maximumFractionDigits: 0 })})`}
+                            title={`YTD ${row.year}: ${row.ytd.returnPercent >= 0 ? '+' : ''}${row.ytd.returnPercent.toFixed(2)}% (€${row.ytd.startValue.toLocaleString('en-US', { maximumFractionDigits: 0 })} → €${row.ytd.endValue.toLocaleString('en-US', { maximumFractionDigits: 0 })})${row.ytd.newInvestment > 0 ? ` · +€${row.ytd.newInvestment.toLocaleString('en-US', { maximumFractionDigits: 0 })} invested` : ''}`}
                           >
                             {row.ytd.returnPercent >= 0 ? '+' : ''}{row.ytd.returnPercent.toFixed(1)}%
                           </div>
