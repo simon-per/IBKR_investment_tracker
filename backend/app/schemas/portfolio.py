@@ -102,6 +102,34 @@ class BenchmarkInfo(BaseModel):
     currency: str
 
 
+class SecurityAttribution(BaseModel):
+    """P&L attribution for a single security over a time period"""
+    security_id: int
+    symbol: str
+    description: str
+    start_market_value_eur: float
+    end_market_value_eur: float
+    new_investment_eur: float
+    value_change_eur: float
+    pnl_contribution_eur: float
+    contribution_percent: float
+    weight_percent: float
+
+    class Config:
+        from_attributes = True
+
+
+class PerformanceAttributionResponse(BaseModel):
+    """Response for performance attribution endpoint"""
+    start_date: str
+    end_date: str
+    total_pnl_eur: float
+    attributions: List[SecurityAttribution]
+
+    class Config:
+        from_attributes = True
+
+
 class PortfolioSummary(BaseModel):
     """Current portfolio summary"""
     total_cost_basis_eur: float = Field(..., description="Total amount invested")

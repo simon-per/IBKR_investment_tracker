@@ -348,6 +348,142 @@ class PortfolioService:
             logger.warning(f"XIRR calculation failed: {e}")
             return None, num_cash_flows, effective_start_date, effective_end_date
 
+    async def get_performance_attribution(
+        self,
+        start_date: date,
+        end_date: date
+    ) -> Dict:
+        """
+        Calculate per-security P&L attribution over a time period.
+
+        For each security, computes:
+        - Market value at start and end dates
+        - New investment during the period (tax lots opened)
+        - Pure P&L contribution = value_change - new_investment
+        - Contribution % of total portfolio P&L
+        """
+        # Get all open taxlots with securities
+        result = await self.db.execute(
+            select(TaxLot, Security)
+            .join(Security, TaxLot.security_id == Security.id)
+            .where(TaxLot.is_open == True)
+            .order_by(TaxLot.open_date.asc())
+        )
+        taxlots_with_securities = result.all()
+
+        if not taxlots_with_securities:
+            return {
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "total_pnl_eur": 0.0,
+                "attributions": []
+            }
+
+        # Pre-load caches
+        unique_securities = {security for _, security in taxlots_with_securities}
+        price_cache = await self._preload_market_prices(unique_securities, start_date, end_date)
+        exchange_rate_cache = await self._preload_exchange_rates(unique_securities, start_date, end_date)
+
+        # Find effective dates with actual price data
+        effective_end = self._find_latest_price_date(end_date, price_cache)
+        if effective_end is None or effective_end <= start_date:
+            return {
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "total_pnl_eur": 0.0,
+                "attributions": []
+            }
+
+        effective_start = self._find_latest_price_date(start_date, price_cache)
+        if effective_start is None:
+            effective_start = start_date
+
+        # Group tax lots by security
+        security_map: Dict[int, Dict] = {}
+        securities_by_id: Dict[int, Security] = {}
+
+        for taxlot, security in taxlots_with_securities:
+            if security.id not in security_map:
+                security_map[security.id] = {
+                    "start_market_value": Decimal("0.0"),
+                    "end_market_value": Decimal("0.0"),
+                    "new_investment": Decimal("0.0"),
+                }
+                securities_by_id[security.id] = security
+
+            sid = security.id
+            entry = security_map[sid]
+
+            # Get FX rate helper
+            def get_eur_value(qty, price, sec, target_date):
+                if price is None:
+                    return Decimal("0.0")
+                val = qty * price
+                if sec.currency != "EUR":
+                    rate = self._get_exchange_rate_with_fallback(
+                        sec.currency, target_date, exchange_rate_cache
+                    )
+                    return val * rate if rate else Decimal("0.0")
+                return val
+
+            # Tax lot contributes to start value if opened on or before effective_start
+            if taxlot.open_date <= effective_start:
+                price = self._get_market_price_with_fallback(sid, effective_start, price_cache)
+                entry["start_market_value"] += get_eur_value(taxlot.quantity, price, security, effective_start)
+
+            # Tax lot contributes to end value if opened on or before effective_end
+            if taxlot.open_date <= effective_end:
+                price = self._get_market_price_with_fallback(sid, effective_end, price_cache)
+                entry["end_market_value"] += get_eur_value(taxlot.quantity, price, security, effective_end)
+
+            # New investment: opened during (effective_start, effective_end]
+            if effective_start < taxlot.open_date <= effective_end:
+                entry["new_investment"] += taxlot.cost_basis_eur
+
+        # Calculate totals
+        total_end_mv = sum(float(v["end_market_value"]) for v in security_map.values())
+        attributions = []
+
+        for sid, entry in security_map.items():
+            sec = securities_by_id[sid]
+            start_mv = float(entry["start_market_value"])
+            end_mv = float(entry["end_market_value"])
+            new_inv = float(entry["new_investment"])
+            value_change = end_mv - start_mv
+            pnl = value_change - new_inv
+            weight = (end_mv / total_end_mv * 100) if total_end_mv > 0 else 0.0
+
+            attributions.append({
+                "security_id": sid,
+                "symbol": sec.symbol,
+                "description": sec.description or sec.symbol,
+                "start_market_value_eur": round(start_mv, 2),
+                "end_market_value_eur": round(end_mv, 2),
+                "new_investment_eur": round(new_inv, 2),
+                "value_change_eur": round(value_change, 2),
+                "pnl_contribution_eur": round(pnl, 2),
+                "contribution_percent": 0.0,  # set below
+                "weight_percent": round(weight, 2),
+            })
+
+        total_pnl = sum(a["pnl_contribution_eur"] for a in attributions)
+
+        # Set contribution percentages
+        for a in attributions:
+            a["contribution_percent"] = round(
+                (a["pnl_contribution_eur"] / total_pnl * 100) if total_pnl != 0 else 0.0, 2
+            )
+
+        # Sort by absolute P&L contribution descending
+        attributions.sort(key=lambda a: abs(a["pnl_contribution_eur"]), reverse=True)
+
+        return {
+            "start_date": effective_start.isoformat(),
+            "end_date": effective_end.isoformat(),
+            "total_pnl_eur": round(total_pnl, 2),
+            "attributions": attributions
+        }
+
     def _find_latest_price_date(
         self,
         target_date: date,

@@ -9,6 +9,8 @@ import { PortfolioValueChart } from './PortfolioValueChart'
 import { PortfolioSummaryCards } from './PortfolioSummaryCards'
 import { PerformanceMetricsCards } from './PerformanceMetricsCards'
 import { PositionsList } from './PositionsList'
+import { PerformanceAttribution } from './PerformanceAttribution'
+import { MonthlyReturnsHeatmap } from './MonthlyReturnsHeatmap'
 import { AllocationTab } from './AllocationTab'
 import { ForecastTab } from './ForecastTab'
 import { ThemeToggle } from './ThemeToggle'
@@ -125,6 +127,14 @@ export function Dashboard() {
     staleTime: 30 * 60 * 1000,
   })
 
+  // Fetch performance attribution for selected time range
+  const { data: attribution, isLoading: attributionLoading } = useQuery({
+    queryKey: ['portfolio', 'attribution', dateRange],
+    queryFn: () => api.getPerformanceAttribution(dateRange.start, dateRange.end),
+    enabled: !!dateRange.start && !!dateRange.end,
+    staleTime: 30 * 60 * 1000,
+  })
+
   // Fetch scheduler status (poll every 60s)
   const { data: schedulerStatus } = useQuery({
     queryKey: ['scheduler', 'status'],
@@ -230,6 +240,19 @@ export function Dashboard() {
     const profitablePositions = positions.filter(p => p.gain_loss_eur > 0).length
     const winRate = positions.length > 0 ? (profitablePositions / positions.length) * 100 : 0
 
+    // 5. Calmar Ratio (XIRR / |Max Drawdown|)
+    const calmarRatio = xirr !== null && maxDrawdown < 0
+      ? xirr / Math.abs(maxDrawdown)
+      : null
+
+    // 6. Top 5 Concentration
+    const totalMV = positions.reduce((sum, p) => sum + p.market_value_eur, 0)
+    const top5MV = [...positions]
+      .sort((a, b) => b.market_value_eur - a.market_value_eur)
+      .slice(0, 5)
+      .reduce((sum, p) => sum + p.market_value_eur, 0)
+    const top5Weight = totalMV > 0 ? (top5MV / totalMV) * 100 : 0
+
     return {
       xirr,
       maxDrawdown,
@@ -237,6 +260,8 @@ export function Dashboard() {
       winRate,
       profitablePositions,
       totalPositions: positions.length,
+      calmarRatio,
+      top5Weight,
     }
   }, [valueOverTime, positions, annualizedReturn])
 
@@ -416,6 +441,12 @@ export function Dashboard() {
                 />
               </CardContent>
             </Card>
+
+            {/* Monthly Returns Heatmap */}
+            <MonthlyReturnsHeatmap data={valueOverTime} isLoading={chartLoading} />
+
+            {/* Performance Attribution */}
+            <PerformanceAttribution data={attribution} isLoading={attributionLoading} />
 
             {/* Positions Table */}
             <PositionsList positions={positions || []} isLoading={positionsLoading} />

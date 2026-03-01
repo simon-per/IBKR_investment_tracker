@@ -1,4 +1,4 @@
-import { TrendingUp, TrendingDown, Activity, Target } from 'lucide-react'
+import { TrendingUp, TrendingDown, Activity, Target, Shield, PieChart } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 
 interface PerformanceMetricsCardsProps {
@@ -9,6 +9,8 @@ interface PerformanceMetricsCardsProps {
     winRate: number
     profitablePositions: number
     totalPositions: number
+    calmarRatio: number | null
+    top5Weight: number
   } | null
   isLoading?: boolean
 }
@@ -16,8 +18,8 @@ interface PerformanceMetricsCardsProps {
 export function PerformanceMetricsCards({ metrics, isLoading }: PerformanceMetricsCardsProps) {
   if (isLoading) {
     return (
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-        {[1, 2, 3, 4].map((i) => (
+      <div className="grid gap-4 md:grid-cols-3 lg:grid-cols-6">
+        {[1, 2, 3, 4, 5, 6].map((i) => (
           <Card key={i}>
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
               <CardTitle className="text-sm font-medium">Loading...</CardTitle>
@@ -39,7 +41,7 @@ export function PerformanceMetricsCards({ metrics, isLoading }: PerformanceMetri
   const isPositiveSharpe = metrics.sharpeRatio >= 0
 
   return (
-    <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+    <div className="grid gap-4 md:grid-cols-3 lg:grid-cols-6">
       {/* Annual Return (XIRR) */}
       <Card>
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
@@ -108,6 +110,42 @@ export function PerformanceMetricsCards({ metrics, isLoading }: PerformanceMetri
           </div>
           <p className="text-xs text-muted-foreground">
             {metrics.profitablePositions} of {metrics.totalPositions} profitable
+          </p>
+        </CardContent>
+      </Card>
+
+      {/* Calmar Ratio */}
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+          <CardTitle className="text-sm font-medium">Calmar Ratio</CardTitle>
+          <Shield className="h-4 w-4 text-muted-foreground" />
+        </CardHeader>
+        <CardContent>
+          {metrics.calmarRatio !== null ? (
+            <div className={`text-2xl font-bold ${metrics.calmarRatio >= 1 ? 'text-green-600' : metrics.calmarRatio >= 0 ? 'text-yellow-600' : 'text-red-600'}`}>
+              {metrics.calmarRatio.toFixed(2)}
+            </div>
+          ) : (
+            <div className="text-2xl font-bold text-muted-foreground">N/A</div>
+          )}
+          <p className="text-xs text-muted-foreground">
+            Return / drawdown
+          </p>
+        </CardContent>
+      </Card>
+
+      {/* Top 5 Concentration */}
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+          <CardTitle className="text-sm font-medium">Top 5 Weight</CardTitle>
+          <PieChart className="h-4 w-4 text-muted-foreground" />
+        </CardHeader>
+        <CardContent>
+          <div className={`text-2xl font-bold ${metrics.top5Weight > 70 ? 'text-red-600' : metrics.top5Weight > 50 ? 'text-yellow-600' : 'text-green-600'}`}>
+            {metrics.top5Weight.toFixed(1)}%
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Concentration risk
           </p>
         </CardContent>
       </Card>

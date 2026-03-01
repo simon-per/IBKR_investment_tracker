@@ -17,6 +17,7 @@ from app.schemas.portfolio import (
     AnnualizedReturnResponse,
     BenchmarkResponse,
     BenchmarkInfo,
+    PerformanceAttributionResponse,
 )
 
 
@@ -124,6 +125,30 @@ async def get_annualized_return(
         end_date=eff_end.isoformat(),
         num_cash_flows=num_cash_flows
     )
+
+
+@router.get("/attribution", response_model=PerformanceAttributionResponse)
+async def get_performance_attribution(
+    start_date: date = Query(..., description="Start date for the attribution period"),
+    end_date: date = Query(..., description="End date for the attribution period"),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get per-security P&L attribution for a time period.
+
+    Shows which securities drove portfolio gains/losses by comparing
+    market values at start and end dates, accounting for new investments.
+    """
+    if start_date >= end_date:
+        raise HTTPException(
+            status_code=400,
+            detail="start_date must be before end_date"
+        )
+
+    portfolio_service = PortfolioService(db)
+    result = await portfolio_service.get_performance_attribution(start_date, end_date)
+
+    return PerformanceAttributionResponse(**result)
 
 
 @router.get("/benchmarks", response_model=List[BenchmarkInfo])

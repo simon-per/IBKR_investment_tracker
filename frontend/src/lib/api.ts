@@ -103,6 +103,26 @@ export interface BenchmarkResponse {
   data: BenchmarkValuePoint[];
 }
 
+export interface SecurityAttribution {
+  security_id: number;
+  symbol: string;
+  description: string;
+  start_market_value_eur: number;
+  end_market_value_eur: number;
+  new_investment_eur: number;
+  value_change_eur: number;
+  pnl_contribution_eur: number;
+  contribution_percent: number;
+  weight_percent: number;
+}
+
+export interface PerformanceAttributionResponse {
+  start_date: string;
+  end_date: string;
+  total_pnl_eur: number;
+  attributions: SecurityAttribution[];
+}
+
 export interface AllocationPosition {
   symbol: string;
   description: string;
@@ -189,6 +209,12 @@ class ApiClient {
 
   async getPositions(): Promise<Position[]> {
     return this.request<Position[]>('/api/portfolio/positions');
+  }
+
+  async getPerformanceAttribution(startDate: string, endDate: string): Promise<PerformanceAttributionResponse> {
+    return this.request<PerformanceAttributionResponse>(
+      `/api/portfolio/attribution?start_date=${startDate}&end_date=${endDate}`
+    );
   }
 
   async getAvailableBenchmarks(): Promise<BenchmarkInfo[]> {
