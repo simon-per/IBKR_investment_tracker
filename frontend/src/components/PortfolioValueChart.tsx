@@ -68,9 +68,11 @@ export function PortfolioValueChart({ data, benchmarks = [], isLoading }: Portfo
     }
 
     return data.map(point => {
-      const row: Record<string, unknown> = {
-        ...point,
+      const row: Record<string, number | string | null> = {
+        cost_basis_eur: point.cost_basis_eur,
+        market_value_eur: point.market_value_eur,
         profit_eur: point.market_value_eur - point.cost_basis_eur,
+        date: point.date,
         dateFormatted: formatDate(point.date),
       }
       for (const b of benchmarks) {
@@ -116,9 +118,9 @@ export function PortfolioValueChart({ data, benchmarks = [], isLoading }: Portfo
     // Find the min and max values only from visible lines
     const allValues: number[] = []
     chartData.forEach(point => {
-      if (showCostBasis) allValues.push(point.cost_basis_eur)
-      if (showMarketValue) allValues.push(point.market_value_eur)
-      if (showProfit) allValues.push(point.profit_eur)
+      if (showCostBasis) allValues.push(point.cost_basis_eur as number)
+      if (showMarketValue) allValues.push(point.market_value_eur as number)
+      if (showProfit) allValues.push(point.profit_eur as number)
       for (const b of availableBenchmarks) {
         if (visibleBenchmarks.has(b.key)) {
           const v = point[`bench_${b.key}`] as number | null
