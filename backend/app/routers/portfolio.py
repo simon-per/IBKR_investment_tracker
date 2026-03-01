@@ -4,7 +4,7 @@ API endpoints for portfolio value and positions.
 """
 from typing import List
 from datetime import date, timedelta
-from fastapi import APIRouter, Depends, Query, HTTPException, Response
+from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -16,6 +16,7 @@ from app.schemas.portfolio import (
     PositionResponse,
     AnnualizedReturnResponse,
     BenchmarkResponse,
+    BenchmarkInfo,
 )
 
 
@@ -24,7 +25,6 @@ router = APIRouter()
 
 @router.get("/value-over-time", response_model=List[PortfolioValuePoint])
 async def get_portfolio_value_over_time(
-    response: Response,
     start_date: date = Query(
         default=None,
         description="Start date for the chart (defaults to 1 year ago)"
@@ -74,11 +74,6 @@ async def get_portfolio_value_over_time(
     if timeline:
         print(f"First point: {timeline[0]}")
         print(f"Last point: {timeline[-1]}")
-
-    # Disable caching
-    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-    response.headers["Pragma"] = "no-cache"
-    response.headers["Expires"] = "0"
 
     return timeline
 
@@ -131,9 +126,17 @@ async def get_annualized_return(
     )
 
 
+@router.get("/benchmarks", response_model=List[BenchmarkInfo])
+async def get_available_benchmarks():
+    """Return list of available benchmark indices for comparison."""
+    return [
+        BenchmarkInfo(key=key, name=info["name"], ticker=info["ticker"], currency=info["currency"])
+        for key, info in BENCHMARKS.items()
+    ]
+
+
 @router.get("/benchmark", response_model=BenchmarkResponse)
 async def get_benchmark_comparison(
-    response: Response,
     start_date: date = Query(default=None, description="Start date (defaults to 1 year ago)"),
     end_date: date = Query(default=None, description="End date (defaults to today)"),
     benchmark: str = Query(default="sp500", description="Benchmark: sp500 or nasdaq"),
@@ -166,8 +169,6 @@ async def get_benchmark_comparison(
     bench_info = BENCHMARKS[benchmark]
     service = BenchmarkService(db)
     data = await service.calculate_benchmark_value_over_time(start_date, end_date, benchmark)
-
-    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
 
     return BenchmarkResponse(
         benchmark_name=bench_info["name"],

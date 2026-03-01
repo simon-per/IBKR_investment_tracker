@@ -1,6 +1,7 @@
 import { useState, useMemo } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueries, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
+import type { BenchmarkDataset } from './PortfolioValueChart'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -11,6 +12,7 @@ import { PositionsList } from './PositionsList'
 import { AllocationTab } from './AllocationTab'
 import { ForecastTab } from './ForecastTab'
 import { ThemeToggle } from './ThemeToggle'
+import { BenchmarkPicker, BENCHMARK_COLORS } from './BenchmarkPicker'
 import { RefreshCw, Download, Clock } from 'lucide-react'
 
 type TimeRange = '1W' | '1M' | '3M' | '6M' | '1Y' | '2Y' | '3Y' | '5Y' | 'ALL'
@@ -18,6 +20,19 @@ type TimeRange = '1W' | '1M' | '3M' | '6M' | '1Y' | '2Y' | '3Y' | '5Y' | 'ALL'
 export function Dashboard() {
   const queryClient = useQueryClient()
   const [selectedRange, setSelectedRange] = useState<TimeRange>('1Y')
+  const [selectedBenchmarks, setSelectedBenchmarks] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem('selectedBenchmarks')
+      return saved ? JSON.parse(saved) : []
+    } catch {
+      return []
+    }
+  })
+
+  const handleBenchmarkChange = (keys: string[]) => {
+    setSelectedBenchmarks(keys)
+    localStorage.setItem('selectedBenchmarks', JSON.stringify(keys))
+  }
 
   const dateRange = useMemo(() => {
     const end = new Date().toISOString().split('T')[0]
@@ -61,12 +76,14 @@ export function Dashboard() {
   const { data: summary, isLoading: summaryLoading } = useQuery({
     queryKey: ['portfolio', 'summary'],
     queryFn: () => api.getPortfolioSummary(),
+    staleTime: 30 * 60 * 1000,
   })
 
   // Fetch portfolio value over time
   const { data: valueOverTime, isLoading: chartLoading } = useQuery({
     queryKey: ['portfolio', 'value-over-time', dateRange],
     queryFn: () => api.getPortfolioValueOverTime(dateRange.start, dateRange.end),
+    staleTime: 30 * 60 * 1000,
   })
 
   // Fetch positions
@@ -75,18 +92,37 @@ export function Dashboard() {
     queryFn: () => api.getPositions(),
   })
 
-  // Fetch benchmark comparison (S&P 500)
-  const { data: benchmarkData } = useQuery({
-    queryKey: ['portfolio', 'benchmark', dateRange, 'sp500'],
-    queryFn: () => api.getBenchmarkComparison(dateRange.start, dateRange.end, 'sp500'),
-    enabled: !!dateRange.start && !!dateRange.end,
+  // Fetch benchmark comparisons (dynamic based on selection)
+  const benchmarkQueries = useQueries({
+    queries: selectedBenchmarks.map((key) => ({
+      queryKey: ['portfolio', 'benchmark', dateRange, key],
+      queryFn: () => api.getBenchmarkComparison(dateRange.start, dateRange.end, key),
+      enabled: !!dateRange.start && !!dateRange.end,
+      staleTime: 30 * 60 * 1000,
+    })),
   })
+
+  const benchmarkDatasets: BenchmarkDataset[] = useMemo(() => {
+    return selectedBenchmarks
+      .map((key, i) => {
+        const query = benchmarkQueries[i]
+        if (!query?.data) return null
+        return {
+          key,
+          name: query.data.benchmark_name,
+          color: BENCHMARK_COLORS[i % BENCHMARK_COLORS.length],
+          data: query.data.data,
+        }
+      })
+      .filter((d): d is BenchmarkDataset => d !== null)
+  }, [selectedBenchmarks, benchmarkQueries])
 
   // Fetch XIRR annualized return for selected time range
   const { data: annualizedReturn, isLoading: xirrLoading } = useQuery({
     queryKey: ['portfolio', 'annualized-return', dateRange],
     queryFn: () => api.getAnnualizedReturn(dateRange.start, dateRange.end),
     enabled: !!dateRange.start && !!dateRange.end,
+    staleTime: 30 * 60 * 1000,
   })
 
   // Fetch scheduler status (poll every 60s)
@@ -326,17 +362,23 @@ export function Dashboard() {
                       Cost basis (invested) vs Market value (current worth) in EUR
                     </CardDescription>
                   </div>
-                  <div className="flex gap-1">
-                    {(['1W', '1M', '3M', '6M', '1Y', '2Y', '3Y', '5Y', 'ALL'] as TimeRange[]).map((range) => (
-                      <Button
-                        key={range}
-                        variant={selectedRange === range ? 'default' : 'outline'}
-                        size="sm"
-                        onClick={() => setSelectedRange(range)}
-                      >
-                        {range}
-                      </Button>
-                    ))}
+                  <div className="flex items-center gap-2">
+                    <div className="flex gap-1">
+                      {(['1W', '1M', '3M', '6M', '1Y', '2Y', '3Y', '5Y', 'ALL'] as TimeRange[]).map((range) => (
+                        <Button
+                          key={range}
+                          variant={selectedRange === range ? 'default' : 'outline'}
+                          size="sm"
+                          onClick={() => setSelectedRange(range)}
+                        >
+                          {range}
+                        </Button>
+                      ))}
+                    </div>
+                    <BenchmarkPicker
+                      selected={selectedBenchmarks}
+                      onChange={handleBenchmarkChange}
+                    />
                   </div>
                 </div>
                 {performanceMetrics && (
@@ -369,8 +411,7 @@ export function Dashboard() {
               <CardContent>
                 <PortfolioValueChart
                   data={valueOverTime || []}
-                  benchmarkData={benchmarkData?.data || []}
-                  benchmarkName={benchmarkData?.benchmark_name}
+                  benchmarks={benchmarkDatasets}
                   isLoading={chartLoading}
                 />
               </CardContent>

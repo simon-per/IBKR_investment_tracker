@@ -94,6 +94,14 @@ class BenchmarkResponse(BaseModel):
     data: List[BenchmarkValuePoint]
 
 
+class BenchmarkInfo(BaseModel):
+    """Available benchmark index info"""
+    key: str
+    name: str
+    ticker: str
+    currency: str
+
+
 class PortfolioSummary(BaseModel):
     """Current portfolio summary"""
     total_cost_basis_eur: float = Field(..., description="Total amount invested")

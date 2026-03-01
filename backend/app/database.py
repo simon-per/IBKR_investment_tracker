@@ -1,5 +1,6 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy import event
 from typing import AsyncGenerator
 
 from app.config import settings
@@ -16,6 +17,15 @@ engine = create_async_engine(
     echo=settings.log_level == "DEBUG",
     future=True,
 )
+
+
+# Enable WAL mode and busy timeout for concurrent access
+@event.listens_for(engine.sync_engine, "connect")
+def _set_sqlite_pragma(dbapi_conn, connection_record):
+    cursor = dbapi_conn.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=30000")
+    cursor.close()
 
 # Create async session factory
 AsyncSessionLocal = async_sessionmaker(

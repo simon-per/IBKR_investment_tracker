@@ -18,6 +18,9 @@ from app.services.currency_service import CurrencyService
 from app.repositories.security_repository import SecurityRepository
 from app.repositories.taxlot_repository import TaxLotRepository
 from app.repositories.market_price_repository import MarketPriceRepository
+from app.services.benchmark_service import BenchmarkService, BENCHMARKS
+from app.models.benchmark_price import BenchmarkPrice
+from sqlalchemy import select, distinct
 from decimal import Decimal
 
 # Configure logging
@@ -131,6 +134,11 @@ class SchedulerService:
                     await taxlot_repo.create(taxlot_data)
                     taxlots_count += 1
                     total_cost_basis_eur += cost_basis_eur
+
+                # Invalidate benchmark timeline cache (tax lots changed)
+                bench_service = BenchmarkService(db)
+                cleared = await bench_service.clear_cache()
+                logger.info(f"Cleared {cleared} benchmark timeline cache entries (tax lots changed)")
 
                 # Commit transaction
                 await db.commit()
@@ -317,6 +325,57 @@ class SchedulerService:
                     "timestamp": datetime.now().isoformat()
                 }
 
+    async def sync_benchmark_prices(self) -> dict:
+        """
+        Sync last 7 days of benchmark prices for benchmarks already in the DB.
+        Only syncs benchmarks the user has previously selected (i.e., have cached prices).
+        """
+        logger.info("Starting benchmark price sync...")
+
+        async with AsyncSessionLocal() as db:
+            try:
+                # Find which benchmark tickers already have data in the DB
+                result = await db.execute(
+                    select(distinct(BenchmarkPrice.ticker))
+                )
+                existing_tickers = {row[0] for row in result.all()}
+
+                if not existing_tickers:
+                    logger.info("No benchmarks in DB to refresh")
+                    return {"status": "success", "benchmarks_synced": 0}
+
+                # Map tickers back to benchmark info for currency
+                ticker_to_benchmark = {
+                    info["ticker"]: info for info in BENCHMARKS.values()
+                }
+
+                bench_service = BenchmarkService(db)
+                today = date.today()
+                start = today - timedelta(days=7)
+                synced = 0
+
+                for ticker in existing_tickers:
+                    bench_info = ticker_to_benchmark.get(ticker)
+                    currency = bench_info["currency"] if bench_info else "USD"
+                    try:
+                        count = await bench_service._ensure_prices_available(
+                            ticker, start, today, currency=currency
+                        )
+                        if count > 0:
+                            logger.info(f"Synced {count} benchmark prices for {ticker}")
+                        synced += 1
+                    except Exception as e:
+                        logger.error(f"Failed to sync benchmark {ticker}: {e}")
+
+                await db.commit()
+                logger.info(f"Benchmark price sync completed: {synced} benchmarks refreshed")
+                return {"status": "success", "benchmarks_synced": synced}
+
+            except Exception as e:
+                await db.rollback()
+                logger.error(f"Failed to sync benchmark prices: {e}", exc_info=True)
+                return {"status": "error", "message": str(e)}
+
     async def full_sync_job(self):
         """
         Full sync job that runs once daily at 08:00 Europe/Berlin.
@@ -379,12 +438,27 @@ class SchedulerService:
         market_result = await self.sync_market_data(days_back=7)
         logger.info(f"Market Data Sync Result: {market_result}")
 
+        # Sync benchmark prices (only previously used benchmarks)
+        bench_result = await self.sync_benchmark_prices()
+        logger.info(f"Benchmark Price Sync Result: {bench_result}")
+
+        # Invalidate recent benchmark timeline cache (prices updated for last 7 days)
+        async with AsyncSessionLocal() as db:
+            try:
+                bench_service = BenchmarkService(db)
+                cleared = await bench_service.clear_cache_recent_days(days=7)
+                await db.commit()
+                logger.info(f"Cleared {cleared} recent benchmark timeline cache entries")
+            except Exception as e:
+                logger.error(f"Failed to clear benchmark timeline cache: {e}")
+
         # Track result
         self.last_sync_result = {
             "type": "market_data_only",
             "timestamp": datetime.now().isoformat(),
             "fx_result": fx_result,
             "market_result": market_result,
+            "benchmark_result": bench_result,
             "status": market_result.get("status", "error"),
         }
 

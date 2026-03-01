@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect, useRef } from 'react'
 import {
   LineChart,
   Line,
@@ -11,37 +11,76 @@ import {
 import type { PortfolioValuePoint, BenchmarkValuePoint } from '@/lib/api'
 import { formatCurrency, formatDate } from '@/lib/utils'
 
+export interface BenchmarkDataset {
+  data: BenchmarkValuePoint[]
+  name: string
+  color: string
+  key: string
+}
+
 interface PortfolioValueChartProps {
   data: PortfolioValuePoint[]
-  benchmarkData?: BenchmarkValuePoint[]
-  benchmarkName?: string
+  benchmarks?: BenchmarkDataset[]
   isLoading?: boolean
 }
 
-export function PortfolioValueChart({ data, benchmarkData, benchmarkName, isLoading }: PortfolioValueChartProps) {
+export function PortfolioValueChart({ data, benchmarks = [], isLoading }: PortfolioValueChartProps) {
   const [showCostBasis, setShowCostBasis] = useState(true)
   const [showMarketValue, setShowMarketValue] = useState(true)
   const [showProfit, setShowProfit] = useState(true)
-  const [showBenchmark, setShowBenchmark] = useState(false)
+  const [visibleBenchmarks, setVisibleBenchmarks] = useState<Set<string>>(new Set())
+  const seenBenchmarkKeys = useRef<Set<string>>(new Set())
+
+  // Auto-enable benchmarks when they first appear in the data
+  useEffect(() => {
+    const newKeys = benchmarks
+      .filter(b => b.data.length > 0 && !seenBenchmarkKeys.current.has(b.key))
+      .map(b => b.key)
+
+    if (newKeys.length > 0) {
+      newKeys.forEach(k => seenBenchmarkKeys.current.add(k))
+      setVisibleBenchmarks(prev => {
+        const next = new Set(prev)
+        newKeys.forEach(k => next.add(k))
+        return next
+      })
+    }
+  }, [benchmarks])
+
+  const toggleBenchmark = (key: string) => {
+    setVisibleBenchmarks(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
 
   const chartData = useMemo(() => {
-    // Build a lookup of benchmark values by date
-    const benchmarkByDate: Record<string, number> = {}
-    if (benchmarkData) {
-      for (const bp of benchmarkData) {
-        benchmarkByDate[bp.date] = bp.benchmark_value_eur
+    // Build lookups for each benchmark by date
+    const benchmarkLookups: Record<string, Record<string, number>> = {}
+    for (const b of benchmarks) {
+      const lookup: Record<string, number> = {}
+      for (const bp of b.data) {
+        lookup[bp.date] = bp.benchmark_value_eur
       }
+      benchmarkLookups[b.key] = lookup
     }
 
-    return data.map(point => ({
-      ...point,
-      profit_eur: point.market_value_eur - point.cost_basis_eur,
-      benchmark_value_eur: benchmarkByDate[point.date] ?? null,
-      dateFormatted: formatDate(point.date),
-    }))
-  }, [data, benchmarkData])
+    return data.map(point => {
+      const row: Record<string, unknown> = {
+        ...point,
+        profit_eur: point.market_value_eur - point.cost_basis_eur,
+        dateFormatted: formatDate(point.date),
+      }
+      for (const b of benchmarks) {
+        row[`bench_${b.key}`] = benchmarkLookups[b.key]?.[point.date] ?? null
+      }
+      return row
+    })
+  }, [data, benchmarks])
 
-  const hasBenchmark = benchmarkData && benchmarkData.length > 0
+  const availableBenchmarks = benchmarks.filter(b => b.data.length > 0)
 
   // Custom tick formatter for X axis - show first day of each month
   const formatXAxisTick = (value: string) => {
@@ -80,8 +119,11 @@ export function PortfolioValueChart({ data, benchmarkData, benchmarkName, isLoad
       if (showCostBasis) allValues.push(point.cost_basis_eur)
       if (showMarketValue) allValues.push(point.market_value_eur)
       if (showProfit) allValues.push(point.profit_eur)
-      if (showBenchmark && point.benchmark_value_eur != null) {
-        allValues.push(point.benchmark_value_eur)
+      for (const b of availableBenchmarks) {
+        if (visibleBenchmarks.has(b.key)) {
+          const v = point[`bench_${b.key}`] as number | null
+          if (v != null) allValues.push(v)
+        }
       }
     })
 
@@ -130,7 +172,7 @@ export function PortfolioValueChart({ data, benchmarkData, benchmarkName, isLoad
       domain: [domainMinRounded, domainMaxRounded] as [number, number],
       ticks
     }
-  }, [chartData, showCostBasis, showMarketValue, showProfit, showBenchmark])
+  }, [chartData, showCostBasis, showMarketValue, showProfit, visibleBenchmarks, availableBenchmarks])
 
   if (isLoading) {
     return (
@@ -191,19 +233,21 @@ export function PortfolioValueChart({ data, benchmarkData, benchmarkName, isLoad
           <div className={`w-2.5 h-2.5 rounded-full ${showProfit ? 'bg-[#f59e0b]' : 'bg-muted-foreground/30'}`} />
           Profit/Loss
         </button>
-        {hasBenchmark && (
+        {availableBenchmarks.map(b => (
           <button
-            onClick={() => setShowBenchmark(!showBenchmark)}
+            key={b.key}
+            onClick={() => toggleBenchmark(b.key)}
             className={`flex items-center gap-2 text-sm px-3 py-1.5 rounded-md transition-all ${
-              showBenchmark
-                ? 'bg-[#3b82f6]/10 text-[#3b82f6] font-medium'
+              visibleBenchmarks.has(b.key)
+                ? `font-medium`
                 : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
             }`}
+            style={visibleBenchmarks.has(b.key) ? { backgroundColor: `${b.color}15`, color: b.color } : undefined}
           >
-            <div className={`w-2.5 h-2.5 rounded-full ${showBenchmark ? 'bg-[#3b82f6]' : 'bg-muted-foreground/30'}`} />
-            {benchmarkName || 'S&P 500'}
+            <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: visibleBenchmarks.has(b.key) ? b.color : 'hsl(var(--muted-foreground) / 0.3)' }} />
+            {b.name}
           </button>
-        )}
+        ))}
       </div>
 
       {/* Chart */}
@@ -265,18 +309,21 @@ export function PortfolioValueChart({ data, benchmarkData, benchmarkName, isLoad
               activeDot={{ r: 6 }}
             />
           )}
-          {showBenchmark && (
-            <Line
-              type="monotone"
-              dataKey="benchmark_value_eur"
-              stroke="#3b82f6"
-              strokeWidth={2}
-              strokeDasharray="5 5"
-              name={benchmarkName || 'S&P 500'}
-              dot={false}
-              activeDot={{ r: 6 }}
-              connectNulls
-            />
+          {availableBenchmarks.map(b =>
+            visibleBenchmarks.has(b.key) ? (
+              <Line
+                key={b.key}
+                type="monotone"
+                dataKey={`bench_${b.key}`}
+                stroke={b.color}
+                strokeWidth={2}
+                strokeDasharray="5 5"
+                name={b.name}
+                dot={false}
+                activeDot={{ r: 6 }}
+                connectNulls
+              />
+            ) : null
           )}
         </LineChart>
       </ResponsiveContainer>

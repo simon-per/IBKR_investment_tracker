@@ -82,6 +82,13 @@ export interface SchedulerStatus {
   message?: string;
 }
 
+export interface BenchmarkInfo {
+  key: string;
+  name: string;
+  ticker: string;
+  currency: string;
+}
+
 export interface BenchmarkValuePoint {
   date: string;
   benchmark_value_eur: number;
@@ -182,6 +189,10 @@ class ApiClient {
 
   async getPositions(): Promise<Position[]> {
     return this.request<Position[]>('/api/portfolio/positions');
+  }
+
+  async getAvailableBenchmarks(): Promise<BenchmarkInfo[]> {
+    return this.request<BenchmarkInfo[]>('/api/portfolio/benchmarks');
   }
 
   async getBenchmarkComparison(
