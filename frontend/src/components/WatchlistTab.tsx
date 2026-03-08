@@ -261,7 +261,7 @@ export function WatchlistTab() {
                     <SortHeader column="pct_from_52w_high" label="% 52w High" tooltip={{ description: "How far the current price is below the 52-week high. More negative = bigger drawdown from peak.", formula: "(Price − 52w High) ÷ 52w High × 100" }} />
                     <SortHeader column="rsi14" label="RSI" tooltip={{ description: "Relative Strength Index (14-day). Below 30 = oversold, above 70 = overbought.", formula: "Wilder RSI on 1-year daily closes" }} />
                     <SortHeader column="pct_from_ma200" label="vs MA200" tooltip={{ description: "Distance from the 200-day moving average. Below 0% = bearish trend, above = uptrend.", formula: "(Price − MA200) ÷ MA200 × 100" }} />
-                    <SortHeader column="peg_ratio" label="PEG" tooltip={{ description: "P/E divided by Yahoo Finance's analyst 5-year EPS growth estimate (not the EPS Growth column, which shows trailing annual). A PEG below 1 suggests the stock may be undervalued relative to its long-term growth.", formula: "Trailing P/E ÷ Analyst 5-yr EPS CAGR %" }} />
+                    <SortHeader column="peg_ratio" label="PEG" tooltip={{ description: "Forward P/E divided by forward EPS growth rate. A PEG below 1 suggests the stock may be undervalued relative to its expected earnings growth.", formula: "P/E ÷ Fwd EPS Growth %" }} />
                     <SortHeader column="trailing_pe" label="P/E" tooltip={{ description: "Price divided by earnings per share over the last 12 months.", formula: "Price ÷ TTM EPS" }} />
                     <SortHeader column="forward_pe" label="Fwd P/E" tooltip={{ description: "Price divided by next-12-month analyst consensus EPS. Lower than trailing P/E = earnings expected to grow.", formula: "Price ÷ Next-12M EPS estimate" }} />
                     <SortHeader column="ev_to_ebitda" label="EV/EBITDA" tooltip={{ description: "Enterprise value relative to EBITDA. Below 10 = cheap, above 20 = expensive.", formula: "Enterprise Value ÷ TTM EBITDA" }} />
@@ -344,13 +344,20 @@ export function WatchlistTab() {
                         {formatPercent(item.pct_from_ma200)}
                       </td>
 
-                      {/* PEG */}
+                      {/* PEG — use stored value, fall back to P/E ÷ Fwd EPS growth % */}
                       <td className="px-3 py-2">
-                        {item.peg_ratio !== null ? (
-                          <span className={item.peg_ratio <= 1 ? 'text-green-600 dark:text-green-400' : item.peg_ratio > 2 ? 'text-red-600 dark:text-red-400' : ''}>
-                            {item.peg_ratio.toFixed(2)}
-                          </span>
-                        ) : '-'}
+                        {(() => {
+                          const peg = item.peg_ratio ?? (
+                            item.trailing_pe && item.fwd_eps_growth && item.fwd_eps_growth > 0
+                              ? item.trailing_pe / (item.fwd_eps_growth * 100)
+                              : null
+                          )
+                          return peg !== null ? (
+                            <span className={peg <= 1 ? 'text-green-600 dark:text-green-400' : peg > 2 ? 'text-red-600 dark:text-red-400' : ''}>
+                              {peg.toFixed(2)}
+                            </span>
+                          ) : '-'
+                        })()}
                       </td>
 
                       {/* P/E */}
@@ -369,23 +376,23 @@ export function WatchlistTab() {
                       </td>
 
                       {/* Revenue Growth */}
-                      <td className={`px-3 py-2 ${colorClass(item.revenue_growth !== null ? item.revenue_growth * 100 : null, true)}`}>
-                        {item.revenue_growth !== null ? `${(item.revenue_growth * 100).toFixed(1)}%` : '-'}
+                      <td className={`px-3 py-2 ${colorClass(item.revenue_growth != null ? item.revenue_growth * 100 : null, true)}`}>
+                        {item.revenue_growth != null ? `${(item.revenue_growth * 100).toFixed(1)}%` : '-'}
                       </td>
 
                       {/* EPS Growth */}
-                      <td className={`px-3 py-2 ${colorClass(item.earnings_growth !== null ? item.earnings_growth * 100 : null, true)}`}>
-                        {item.earnings_growth !== null ? `${(item.earnings_growth * 100).toFixed(1)}%` : '-'}
+                      <td className={`px-3 py-2 ${colorClass(item.earnings_growth != null ? item.earnings_growth * 100 : null, true)}`}>
+                        {item.earnings_growth != null ? `${(item.earnings_growth * 100).toFixed(1)}%` : '-'}
                       </td>
 
                       {/* Fwd Revenue Growth */}
-                      <td className={`px-3 py-2 ${colorClass(item.fwd_revenue_growth !== null ? item.fwd_revenue_growth * 100 : null, true)}`}>
-                        {item.fwd_revenue_growth !== null ? `${(item.fwd_revenue_growth * 100).toFixed(1)}%` : '-'}
+                      <td className={`px-3 py-2 ${colorClass(item.fwd_revenue_growth != null ? item.fwd_revenue_growth * 100 : null, true)}`}>
+                        {item.fwd_revenue_growth != null ? `${(item.fwd_revenue_growth * 100).toFixed(1)}%` : '-'}
                       </td>
 
                       {/* Fwd EPS Growth */}
-                      <td className={`px-3 py-2 ${colorClass(item.fwd_eps_growth !== null ? item.fwd_eps_growth * 100 : null, true)}`}>
-                        {item.fwd_eps_growth !== null ? `${(item.fwd_eps_growth * 100).toFixed(1)}%` : '-'}
+                      <td className={`px-3 py-2 ${colorClass(item.fwd_eps_growth != null ? item.fwd_eps_growth * 100 : null, true)}`}>
+                        {item.fwd_eps_growth != null ? `${(item.fwd_eps_growth * 100).toFixed(1)}%` : '-'}
                       </td>
 
                       {/* Margin */}

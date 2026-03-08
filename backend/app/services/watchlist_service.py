@@ -237,17 +237,26 @@ class WatchlistService:
         # Forward estimates from analyst consensus
         fwd_rev = None
         try:
-            if revenue_estimate is not None and '+1y' in revenue_estimate.index:
+            if revenue_estimate is not None and not revenue_estimate.empty and '+1y' in revenue_estimate.index:
                 fwd_rev = self._safe_float(revenue_estimate.loc['+1y', 'growth'])
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"  [WARN] revenue_estimate failed for {yahoo_ticker}: {e}")
 
         fwd_eps = None
         try:
-            if growth_estimates is not None and '+1y' in growth_estimates.index:
+            if growth_estimates is not None and not growth_estimates.empty and '+1y' in growth_estimates.index:
                 fwd_eps = self._safe_float(growth_estimates.loc['+1y', 'stockTrend'])
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"  [WARN] growth_estimates failed for {yahoo_ticker}: {e}")
+
+        # Fallback: derive fwd EPS growth from forwardEps / trailingEps (already in .info, no extra call)
+        if fwd_eps is None:
+            fwd_eps_val = self._safe_float(info.get('forwardEps'))
+            trail_eps_val = self._safe_float(info.get('trailingEps'))
+            if fwd_eps_val and trail_eps_val and trail_eps_val != 0:
+                fwd_eps = self._safe_float((fwd_eps_val - trail_eps_val) / abs(trail_eps_val))
+
+        print(f"  [FWD] {yahoo_ticker}: fwd_rev={fwd_rev}, fwd_eps={fwd_eps}")
 
         current_price = self._safe_float(info.get("currentPrice") or info.get("regularMarketPrice"))
 
@@ -273,8 +282,12 @@ class WatchlistService:
             "last_synced": datetime.now(),
         }
 
-        # If yfinance didn't return pegRatio, compute from trailing PE / 5-year EPS growth
-        # Uses longTermGrowth (analyst 5-yr CAGR) to match Yahoo Finance's PEG methodology.
+        # Fallback 1 (preferred): P/E ÷ Fwd EPS growth %
+        if data["peg_ratio"] is None and data["trailing_pe"] and fwd_eps and fwd_eps > 0:
+            fwd_eps_pct = fwd_eps * 100  # convert decimal (0.30) → percentage (30)
+            data["peg_ratio"] = self._safe_float(data["trailing_pe"] / fwd_eps_pct)
+
+        # Fallback 2 (last resort): Trailing P/E ÷ analyst 5-yr EPS CAGR %
         if data["peg_ratio"] is None and data["trailing_pe"]:
             lt_growth = self._safe_float(info.get("longTermGrowth") or info.get("longTermEpsGrowth"))
             if lt_growth and lt_growth > 0:

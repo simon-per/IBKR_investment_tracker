@@ -173,7 +173,7 @@ function MetricsTable({ data }: { data: FundamentalMetrics[] }) {
               </th>
               <SortHeader label="P/E" sortKey="trailing_pe" currentSort={sortKey} currentDir={sortDir} onSort={handleSort} />
               <SortHeader label="Fwd P/E" sortKey="forward_pe" currentSort={sortKey} currentDir={sortDir} onSort={handleSort} />
-              <SortHeader label="PEG" sortKey="peg_ratio" currentSort={sortKey} currentDir={sortDir} onSort={handleSort} title="P/E divided by Yahoo Finance's analyst 5-year EPS growth estimate (not the EPS Growth column, which shows trailing annual). A PEG below 1 suggests the stock may be undervalued relative to its long-term growth." />
+              <SortHeader label="PEG" sortKey="peg_ratio" currentSort={sortKey} currentDir={sortDir} onSort={handleSort} title="P/E divided by forward EPS growth rate (analyst consensus next-12M estimate). Below 1 = potentially undervalued." />
               <SortHeader label="P/S" sortKey="price_to_sales" currentSort={sortKey} currentDir={sortDir} onSort={handleSort} />
               <SortHeader label="Rev Growth" sortKey="revenue_growth" currentSort={sortKey} currentDir={sortDir} onSort={handleSort} title="TTM (trailing twelve months) revenue growth: sum of 4 most recent quarters vs prior 4 quarters. Falls back to Yahoo Finance revenueGrowth if fewer than 8 quarters available." />
               <SortHeader label="EPS Growth" sortKey="earnings_growth" currentSort={sortKey} currentDir={sortDir} onSort={handleSort} title="TTM (trailing twelve months) EPS growth: sum of 4 most recent quarters vs prior 4 quarters. Falls back to Yahoo Finance earningsGrowth if fewer than 8 quarters available. Note: PEG uses Yahoo's separate 5-year analyst estimate, not this figure." />
@@ -196,8 +196,16 @@ function MetricsTable({ data }: { data: FundamentalMetrics[] }) {
                 <td className={`py-2 px-2 text-right tabular-nums ${peColor(row.forward_pe)}`}>
                   {formatRatio(row.forward_pe)}
                 </td>
-                <td className={`py-2 px-2 text-right tabular-nums ${pegColor(row.peg_ratio)}`}>
-                  {formatRatio(row.peg_ratio)}
+                <td className={`py-2 px-2 text-right tabular-nums ${pegColor(
+                  row.peg_ratio ?? (row.trailing_pe && row.fwd_eps_growth && row.fwd_eps_growth > 0
+                    ? row.trailing_pe / (row.fwd_eps_growth * 100)
+                    : null)
+                )}`}>
+                  {formatRatio(
+                    row.peg_ratio ?? (row.trailing_pe && row.fwd_eps_growth && row.fwd_eps_growth > 0
+                      ? row.trailing_pe / (row.fwd_eps_growth * 100)
+                      : null)
+                  )}
                 </td>
                 <td className="py-2 px-2 text-right tabular-nums">
                   {formatRatio(row.price_to_sales)}

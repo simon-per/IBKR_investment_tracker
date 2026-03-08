@@ -103,6 +103,15 @@ async def sync_watchlist(
     return result
 
 
+def _compute_peg(item):
+    """Derive PEG at read time if not stored: P/E ÷ Fwd EPS growth %."""
+    if item.peg_ratio is not None:
+        return item.peg_ratio
+    if item.trailing_pe and item.fwd_eps_growth and item.fwd_eps_growth > 0:
+        return round(item.trailing_pe / (item.fwd_eps_growth * 100), 4)
+    return None
+
+
 def _item_to_response(item) -> WatchlistItemResponse:
     return WatchlistItemResponse(
         id=item.id,
@@ -129,7 +138,7 @@ def _item_to_response(item) -> WatchlistItemResponse:
         rsi14=item.rsi14,
         data_currency=item.data_currency,
         forward_pe=item.forward_pe,
-        peg_ratio=item.peg_ratio,
+        peg_ratio=_compute_peg(item),
         ev_to_ebitda=item.ev_to_ebitda,
         analyst_target=item.analyst_target,
         analyst_rating=item.analyst_rating,
