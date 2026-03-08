@@ -539,3 +539,41 @@ Critical Reminders:
 ⚠️ DO NOT sync before 30-60 min cooldown period
 ⚠️ Always check yfinance version (must be 1.1.0+)
 ✅ Rate limiting protections are now in place
+
+---
+
+Fundamentals Feature (Implemented & Reviewed)
+New files added:
+- backend/app/models/fundamental_metrics.py - SQLAlchemy model for per-security fundamentals
+- backend/app/models/earnings_event.py - SQLAlchemy model for earnings calendar events
+- backend/app/repositories/fundamentals_repository.py - upsert_metrics, upsert_earnings_event
+- backend/app/routers/fundamentals.py - GET /api/fundamentals/{security_id}, POST /api/fundamentals/sync
+- backend/app/services/fundamentals_service.py - yfinance .info fetch via asyncio.to_thread
+- backend/alembic/versions/b4c8d2e6f7a9_add_fundamentals_tables.py - migration
+- frontend/src/components/FundamentalsTab.tsx - React tab with metrics + earnings calendar
+
+Key implementation decisions:
+- asyncio.to_thread used for yfinance calls (blocking I/O off event loop)
+- Consolidated fetch: single yf.Ticker().info call per security (not separate calls)
+- ETF guard relaxed: ETFs pass through fundamentals sync (PE/EPS stored as null for ETFs)
+- joinedload used for EarningsEvent.security relationship; queries use .unique().scalars().all()
+- 7-day staleness window: fundamentals re-fetched if last_updated > 7 days ago
+- quote_type defaults to 'EQUITY' via info.get('quoteType', 'EQUITY')
+
+Bug review findings (all edge cases reviewed, no fixes needed):
+1. Empty dict from rate-limited yfinance: if not info guard passes empty dicts, stores null metrics,
+   marked as synced — acceptable, 7-day refresh handles it
+2. quoteType: None stored as None (not default 'EQUITY') — minor, frontend handles null gracefully
+3. _extract_earnings DataFrame guard (hasattr .empty): safe — yfinance always returns DataFrame or raises
+4. Thread safety: closure captures immutable string, creates yf.Ticker fresh per thread — thread-safe
+5. SQLAlchemy session: no cross-thread session access — all DB ops on main async event loop
+6. joinedload duplicates: both queries use .unique().scalars().all() — correct
+7. Relationship name EarningsEvent.security: verified matches back_populates at security.py:60-63
+
+Modified existing files:
+- backend/app/main.py - registered fundamentals router
+- backend/app/models/__init__.py - exported new models
+- backend/app/models/security.py - added earnings_events relationship (back_populates)
+- backend/app/schemas/portfolio.py - added FundamentalsResponse schema
+- frontend/src/components/Dashboard.tsx - added Fundamentals tab
+- frontend/src/lib/api.ts - added fetchFundamentals, syncFundamentals API calls

@@ -52,6 +52,15 @@ class Security(Base):
         cascade="all, delete-orphan",
         uselist=False  # One-to-one relationship
     )
+    fundamental_metrics: Mapped[Optional["FundamentalMetrics"]] = relationship(
+        back_populates="security",
+        cascade="all, delete-orphan",
+        uselist=False  # One-to-one relationship
+    )
+    earnings_events: Mapped[List["EarningsEvent"]] = relationship(
+        back_populates="security",
+        cascade="all, delete-orphan"
+    )
 
     # Composite unique constraint for ISIN + exchange
     # and additional indexes for performance

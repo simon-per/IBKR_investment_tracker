@@ -9,6 +9,9 @@ from app.models.exchange_rate import ExchangeRate
 from app.models.market_price import MarketPrice
 from app.models.analyst_rating import AnalystRating
 from app.models.benchmark_price import BenchmarkPrice
+from app.models.fundamental_metrics import FundamentalMetrics
+from app.models.earnings_event import EarningsEvent
+from app.models.watchlist_item import WatchlistItem
 
 __all__ = [
     "Security",
@@ -17,4 +20,7 @@ __all__ = [
     "MarketPrice",
     "AnalystRating",
     "BenchmarkPrice",
+    "FundamentalMetrics",
+    "EarningsEvent",
+    "WatchlistItem",
 ]

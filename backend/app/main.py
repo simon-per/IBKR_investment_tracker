@@ -81,7 +81,7 @@ async def health_check():
 
 
 # Import and include routers
-from app.routers import sync, portfolio, market_data, analyst_ratings, allocation, scheduler
+from app.routers import sync, portfolio, market_data, analyst_ratings, allocation, scheduler, fundamentals, watchlist
 
 app.include_router(sync.router, prefix="/api/sync", tags=["sync"])
 app.include_router(portfolio.router, prefix="/api/portfolio", tags=["portfolio"])
@@ -89,5 +89,7 @@ app.include_router(market_data.router, prefix="/api/market-data", tags=["market-
 app.include_router(analyst_ratings.router, prefix="/api/analyst-ratings", tags=["analyst-ratings"])
 app.include_router(allocation.router, prefix="/api/allocation", tags=["allocation"])
 app.include_router(scheduler.router, prefix="/api/scheduler", tags=["scheduler"])
+app.include_router(fundamentals.router, prefix="/api/fundamentals", tags=["fundamentals"])
+app.include_router(watchlist.router, prefix="/api/watchlist", tags=["watchlist"])
 # app.include_router(securities.router, prefix="/api/securities", tags=["securities"])
 # app.include_router(taxlots.router, prefix="/api/taxlots", tags=["taxlots"])

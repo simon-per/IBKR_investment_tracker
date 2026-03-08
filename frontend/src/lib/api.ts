@@ -151,6 +151,107 @@ export interface SyncResponse {
   warnings?: string[];
 }
 
+export interface FundamentalMetrics {
+  security_id: number;
+  symbol: string;
+  description: string;
+  exchange: string | null;
+  currency: string;
+  quote_type: string | null;
+  trailing_pe: number | null;
+  forward_pe: number | null;
+  peg_ratio: number | null;
+  price_to_sales: number | null;
+  price_to_book: number | null;
+  revenue_growth: number | null;
+  earnings_growth: number | null;
+  fwd_revenue_growth: number | null;
+  fwd_eps_growth: number | null;
+  profit_margins: number | null;
+  gross_margins: number | null;
+  operating_margins: number | null;
+  market_cap: number | null;
+  number_of_analysts: number | null;
+  target_mean_price: number | null;
+  target_high_price: number | null;
+  target_low_price: number | null;
+  data_currency: string | null;
+  last_updated: string | null;
+}
+
+export interface EarningsCalendarItem {
+  security_id: number;
+  symbol: string;
+  description: string;
+  earnings_date: string;
+  eps_estimate: number | null;
+}
+
+export interface EarningsHistoryItem {
+  security_id: number;
+  symbol: string;
+  description: string;
+  earnings_date: string;
+  eps_estimate: number | null;
+  reported_eps: number | null;
+  surprise_percent: number | null;
+  beat_or_miss: string | null;
+}
+
+export interface FundamentalsStatus {
+  total_securities: number;
+  securities_with_data: number;
+  securities_without_data: number;
+  stale_metrics: number;
+  total_earnings_events: number;
+  oldest_update: string | null;
+  newest_update: string | null;
+}
+
+export interface FundamentalsSyncResponse {
+  status: string;
+  securities_processed: number;
+  metrics_updated: number;
+  earnings_updated: number;
+  errors: number;
+  message: string;
+}
+
+export interface WatchlistItem {
+  id: number;
+  yahoo_ticker: string;
+  symbol: string | null;
+  company_name: string | null;
+  notes: string | null;
+  target_price: number | null;
+  current_price: number | null;
+  currency: string | null;
+  trailing_pe: number | null;
+  forward_pe: number | null;
+  peg_ratio: number | null;
+  ev_to_ebitda: number | null;
+  revenue_growth: number | null;
+  earnings_growth: number | null;
+  fwd_revenue_growth: number | null;
+  fwd_eps_growth: number | null;
+  profit_margins: number | null;
+  market_cap: number | null;
+  analyst_target: number | null;
+  analyst_rating: string | null;
+  analyst_count: number | null;
+  week52_high: number | null;
+  week52_low: number | null;
+  pct_from_52w_high: number | null;
+  ma200: number | null;
+  ma50: number | null;
+  pct_from_ma200: number | null;
+  rsi14: number | null;
+  buy_score: number | null;
+  data_currency: string | null;
+  last_synced: string | null;
+  created_at: string | null;
+}
+
 class ApiClient {
   private baseUrl: string;
 
@@ -272,6 +373,63 @@ class ApiClient {
   // Scheduler endpoints
   async getSchedulerStatus(): Promise<SchedulerStatus> {
     return this.request<SchedulerStatus>('/api/scheduler/status');
+  }
+
+  // Fundamentals endpoints
+  async syncFundamentals(forceRefresh: boolean = false): Promise<FundamentalsSyncResponse> {
+    return this.request(`/api/fundamentals/sync?force_refresh=${forceRefresh}`, {
+      method: 'POST',
+    });
+  }
+
+  async getPortfolioFundamentals(): Promise<FundamentalMetrics[]> {
+    return this.request('/api/fundamentals/portfolio');
+  }
+
+  async getUpcomingEarnings(daysAhead: number = 90): Promise<EarningsCalendarItem[]> {
+    return this.request(`/api/fundamentals/earnings/upcoming?days_ahead=${daysAhead}`);
+  }
+
+  async getEarningsHistory(daysBack: number = 365): Promise<EarningsHistoryItem[]> {
+    return this.request(`/api/fundamentals/earnings/history?days_back=${daysBack}`);
+  }
+
+  async getFundamentalsStatus(): Promise<FundamentalsStatus> {
+    return this.request('/api/fundamentals/status');
+  }
+
+  // Watchlist endpoints
+  async getWatchlist(): Promise<WatchlistItem[]> {
+    return this.request('/api/watchlist');
+  }
+
+  async addToWatchlist(yahooTicker: string, notes?: string, targetPrice?: number): Promise<WatchlistItem> {
+    return this.request('/api/watchlist', {
+      method: 'POST',
+      body: JSON.stringify({
+        yahoo_ticker: yahooTicker,
+        notes: notes || null,
+        target_price: targetPrice || null,
+      }),
+    });
+  }
+
+  async updateWatchlistItem(id: number, notes?: string, targetPrice?: number): Promise<WatchlistItem> {
+    return this.request(`/api/watchlist/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        notes: notes ?? null,
+        target_price: targetPrice ?? null,
+      }),
+    });
+  }
+
+  async removeFromWatchlist(id: number): Promise<void> {
+    await this.request(`/api/watchlist/${id}`, { method: 'DELETE' });
+  }
+
+  async syncWatchlist(force: boolean = false): Promise<{ synced: number; errors: number; message: string }> {
+    return this.request(`/api/watchlist/sync?force=${force}`, { method: 'POST' });
   }
 
   // Health check

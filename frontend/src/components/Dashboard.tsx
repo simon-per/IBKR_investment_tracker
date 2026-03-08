@@ -13,6 +13,8 @@ import { PerformanceAttribution } from './PerformanceAttribution'
 import { MonthlyReturnsHeatmap } from './MonthlyReturnsHeatmap'
 import { AllocationTab } from './AllocationTab'
 import { ForecastTab } from './ForecastTab'
+import { FundamentalsTab } from './FundamentalsTab'
+import { WatchlistTab } from './WatchlistTab'
 import { ThemeToggle } from './ThemeToggle'
 import { BenchmarkPicker, BENCHMARK_COLORS } from './BenchmarkPicker'
 import { RefreshCw, Download, Clock } from 'lucide-react'
@@ -360,14 +362,16 @@ export function Dashboard() {
       {/* Main Content */}
       <div className="container mx-auto px-4 py-8">
         <Tabs defaultValue="performance" className="space-y-8">
-          <TabsList className="grid w-full max-w-md grid-cols-3">
+          <TabsList className="grid w-full max-w-2xl grid-cols-5">
             <TabsTrigger value="performance">Performance</TabsTrigger>
             <TabsTrigger value="allocation">Allocation</TabsTrigger>
+            <TabsTrigger value="fundamentals">Fundamentals</TabsTrigger>
+            <TabsTrigger value="watchlist">Watchlist</TabsTrigger>
             <TabsTrigger value="forecast">Forecast</TabsTrigger>
           </TabsList>
 
           {/* Performance Tab */}
-          <TabsContent value="performance" className="space-y-8">
+          <TabsContent value="performance" forceMount className="space-y-8">
             {/* Summary Cards */}
             <PortfolioSummaryCards summary={summary} isLoading={summaryLoading} />
 
@@ -453,12 +457,22 @@ export function Dashboard() {
           </TabsContent>
 
           {/* Allocation Tab */}
-          <TabsContent value="allocation">
+          <TabsContent value="allocation" forceMount>
             <AllocationTab />
           </TabsContent>
 
+          {/* Fundamentals Tab */}
+          <TabsContent value="fundamentals" forceMount>
+            <FundamentalsTab />
+          </TabsContent>
+
+          {/* Watchlist Tab */}
+          <TabsContent value="watchlist" forceMount>
+            <WatchlistTab />
+          </TabsContent>
+
           {/* Forecast Tab */}
-          <TabsContent value="forecast">
+          <TabsContent value="forecast" forceMount>
             <ForecastTab />
           </TabsContent>
         </Tabs>
