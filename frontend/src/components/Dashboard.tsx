@@ -284,7 +284,7 @@ export function Dashboard() {
     <div className="min-h-screen bg-background">
       {/* Header */}
       <div className="border-b">
-        <div className="container mx-auto px-4 py-6">
+        <div className="w-full px-4 py-4">
           <div className="flex items-center justify-between">
             <div>
               <h1 className="text-3xl font-bold tracking-tight">Portfolio Analyzer</h1>
@@ -360,7 +360,7 @@ export function Dashboard() {
       </div>
 
       {/* Main Content */}
-      <div className="container mx-auto px-4 py-8">
+      <div className="w-full px-4 py-6">
         <Tabs defaultValue="performance" className="space-y-8">
           <TabsList className="grid w-full max-w-2xl grid-cols-5">
             <TabsTrigger value="performance">Performance</TabsTrigger>
