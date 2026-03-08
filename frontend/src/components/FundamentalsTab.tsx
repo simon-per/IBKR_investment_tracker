@@ -378,6 +378,8 @@ function EarningsSurpriseHistory({ data, pageSize = 10 }: { data: EarningsHistor
 
 export function FundamentalsTab() {
   const queryClient = useQueryClient()
+  const [syncStartedAt, setSyncStartedAt] = useState<Date | null>(null)
+  const isSyncing = syncStartedAt !== null
 
   const { data: fundamentals, isLoading: metricsLoading } = useQuery({
     queryKey: ['fundamentals', 'portfolio'],
@@ -397,20 +399,35 @@ export function FundamentalsTab() {
   const { data: status } = useQuery({
     queryKey: ['fundamentals', 'status'],
     queryFn: () => api.getFundamentalsStatus(),
+    refetchInterval: isSyncing ? 5000 : false,
   })
+
+  // Detect when background sync completes: newest_update advances past syncStartedAt
+  useEffect(() => {
+    if (!isSyncing || !status || !syncStartedAt) return
+    const newestUpdate = status.newest_update ? new Date(status.newest_update) : null
+    if (newestUpdate && newestUpdate > syncStartedAt) {
+      setSyncStartedAt(null)
+      queryClient.invalidateQueries({ queryKey: ['fundamentals'] })
+    }
+  }, [status, isSyncing, syncStartedAt, queryClient])
+
+  const handleSyncSuccess = (data: { status: string }) => {
+    if (data.status === 'started') {
+      setSyncStartedAt(new Date())
+    } else {
+      queryClient.invalidateQueries({ queryKey: ['fundamentals'] })
+    }
+  }
 
   const syncMutation = useMutation({
     mutationFn: () => api.syncFundamentals(false),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['fundamentals'] })
-    },
+    onSuccess: handleSyncSuccess,
   })
 
   const forceRefreshMutation = useMutation({
     mutationFn: () => api.syncFundamentals(true),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['fundamentals'] })
-    },
+    onSuccess: handleSyncSuccess,
   })
 
   const leftCardRef = useRef<HTMLDivElement>(null)
@@ -455,10 +472,10 @@ export function FundamentalsTab() {
               </div>
               <Button
                 onClick={() => syncMutation.mutate()}
-                disabled={syncMutation.isPending}
+                disabled={syncMutation.isPending || isSyncing}
                 variant="outline"
               >
-                {syncMutation.isPending ? (
+                {syncMutation.isPending || isSyncing ? (
                   <>
                     <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
                     Syncing...
@@ -475,12 +492,15 @@ export function FundamentalsTab() {
         </Card>
       )}
 
-      {syncMutation.isSuccess && (
-        <Card className="border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-950">
+      {isSyncing && (
+        <Card className="border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950">
           <CardContent className="pt-6">
-            <p className="text-sm text-green-800 dark:text-green-200">
-              Sync successful! {syncMutation.data.message}
-            </p>
+            <div className="flex items-center gap-2">
+              <RefreshCw className="h-4 w-4 animate-spin text-blue-600 dark:text-blue-400" />
+              <p className="text-sm text-blue-800 dark:text-blue-200">
+                Sync running in background — data will update automatically when complete.
+              </p>
+            </div>
           </CardContent>
         </Card>
       )}
@@ -508,11 +528,11 @@ export function FundamentalsTab() {
             {!needsSync && (
               <Button
                 onClick={() => forceRefreshMutation.mutate()}
-                disabled={forceRefreshMutation.isPending}
+                disabled={forceRefreshMutation.isPending || isSyncing}
                 variant="outline"
                 size="sm"
               >
-                {forceRefreshMutation.isPending ? (
+                {forceRefreshMutation.isPending || isSyncing ? (
                   <>
                     <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
                     Syncing...

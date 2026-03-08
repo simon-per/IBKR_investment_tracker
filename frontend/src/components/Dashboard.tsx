@@ -371,7 +371,7 @@ export function Dashboard() {
           </TabsList>
 
           {/* Performance Tab */}
-          <TabsContent value="performance" forceMount className="space-y-8">
+          <TabsContent value="performance" className="space-y-8">
             {/* Summary Cards */}
             <PortfolioSummaryCards summary={summary} isLoading={summaryLoading} />
 
@@ -457,22 +457,22 @@ export function Dashboard() {
           </TabsContent>
 
           {/* Allocation Tab */}
-          <TabsContent value="allocation" forceMount>
+          <TabsContent value="allocation">
             <AllocationTab />
           </TabsContent>
 
           {/* Fundamentals Tab */}
-          <TabsContent value="fundamentals" forceMount>
+          <TabsContent value="fundamentals">
             <FundamentalsTab />
           </TabsContent>
 
           {/* Watchlist Tab */}
-          <TabsContent value="watchlist" forceMount>
+          <TabsContent value="watchlist">
             <WatchlistTab />
           </TabsContent>
 
           {/* Forecast Tab */}
-          <TabsContent value="forecast" forceMount>
+          <TabsContent value="forecast">
             <ForecastTab />
           </TabsContent>
         </Tabs>

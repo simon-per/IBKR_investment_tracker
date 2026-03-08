@@ -1,30 +1,37 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_db
+from app.database import AsyncSessionLocal, get_db
 from app.services.fundamentals_service import FundamentalsService
 
 router = APIRouter()
 
 
+async def _run_sync_background(force_refresh: bool) -> None:
+    """Run fundamentals sync in background with its own DB session."""
+    async with AsyncSessionLocal() as db:
+        try:
+            service = FundamentalsService(db)
+            await service.sync_fundamentals_data(force_refresh=force_refresh)
+        except Exception as e:
+            print(f"[ERROR] Background fundamentals sync failed: {e}")
+
+
 @router.post("/sync")
 async def sync_fundamentals(
+    background_tasks: BackgroundTasks,
     force_refresh: bool = Query(False, description="Force refresh all, even fresh data"),
-    db: AsyncSession = Depends(get_db),
 ):
-    """Sync fundamental metrics and earnings for all securities."""
-    try:
-        service = FundamentalsService(db)
-        result = await service.sync_fundamentals_data(force_refresh=force_refresh)
-
-        if result['errors'] > 0:
-            return {"status": "partial_success", **result}
-
-        return {"status": "success", **result}
-
-    except Exception as e:
-        await db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to sync fundamentals: {str(e)}")
+    """Kick off a fundamentals sync in the background and return immediately."""
+    background_tasks.add_task(_run_sync_background, force_refresh)
+    return {
+        "status": "started",
+        "message": "Sync running in background. Data will appear within a few minutes.",
+        "securities_processed": 0,
+        "metrics_updated": 0,
+        "earnings_updated": 0,
+        "errors": 0,
+    }
 
 
 @router.post("/sync-stale")
