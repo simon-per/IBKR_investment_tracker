@@ -133,3 +133,15 @@ class TaxLotRepository:
             await self.session.delete(taxlot)
         await self.session.flush()
         return count
+
+    async def delete_open_by_security_id(self, security_id: int) -> int:
+        """
+        Delete only OPEN tax lots for a security, preserving closed (historical) lots.
+        Returns count of deleted lots.
+        """
+        taxlots = await self.get_by_security_id(security_id, is_open=True)
+        count = len(taxlots)
+        for taxlot in taxlots:
+            await self.session.delete(taxlot)
+        await self.session.flush()
+        return count

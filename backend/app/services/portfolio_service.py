@@ -41,12 +41,12 @@ class PortfolioService:
         """
         Calculate portfolio value (cost basis and market value) for each day in range.
         Uses optimized caching for fast performance.
+        Includes both open AND closed tax lots for correct historical values.
         """
-        # Get all open taxlots
+        # Get ALL taxlots (open + closed) for historical accuracy
         result = await self.db.execute(
             select(TaxLot, Security)
             .join(Security, TaxLot.security_id == Security.id)
-            .where(TaxLot.is_open == True)
             .order_by(TaxLot.open_date.asc())
         )
         taxlots_with_securities = result.all()
@@ -56,8 +56,8 @@ class PortfolioService:
 
         # Pre-load all data once
         unique_securities = {security for _, security in taxlots_with_securities}
-        price_cache = await self._preload_market_prices(unique_securities, start_date, end_date)
-        exchange_rate_cache = await self._preload_exchange_rates(unique_securities, start_date, end_date)
+        price_cache, price_currency_cache = await self._preload_market_prices(unique_securities, start_date, end_date)
+        exchange_rate_cache = await self._preload_exchange_rates(unique_securities, start_date, end_date, price_currency_cache=price_currency_cache)
 
         # Calculate portfolio value for each business day
         portfolio_timeline = []
@@ -67,7 +67,8 @@ class PortfolioService:
             # Skip weekends
             if current_date.weekday() < 5:
                 daily_value = self._calculate_daily_value(
-                    current_date, taxlots_with_securities, price_cache, exchange_rate_cache
+                    current_date, taxlots_with_securities, price_cache, exchange_rate_cache,
+                    price_currency_cache=price_currency_cache
                 )
                 portfolio_timeline.append(daily_value)
 
@@ -100,11 +101,12 @@ class PortfolioService:
 
         # Use optimized method
         unique_securities = {security for _, security in taxlots_with_securities}
-        price_cache = await self._preload_market_prices(unique_securities, today, today)
-        exchange_rate_cache = await self._preload_exchange_rates(unique_securities, today, today)
+        price_cache, price_currency_cache = await self._preload_market_prices(unique_securities, today, today)
+        exchange_rate_cache = await self._preload_exchange_rates(unique_securities, today, today, price_currency_cache=price_currency_cache)
 
         daily_value = self._calculate_daily_value(
-            today, taxlots_with_securities, price_cache, exchange_rate_cache
+            today, taxlots_with_securities, price_cache, exchange_rate_cache,
+            price_currency_cache=price_currency_cache
         )
 
         return {
@@ -133,8 +135,8 @@ class PortfolioService:
 
         # Pre-load all market prices and exchange rates
         unique_securities = {security for _, security in taxlots_with_securities}
-        price_cache = await self._preload_market_prices(unique_securities, today, today)
-        exchange_rate_cache = await self._preload_exchange_rates(unique_securities, today, today)
+        price_cache, price_currency_cache = await self._preload_market_prices(unique_securities, today, today)
+        exchange_rate_cache = await self._preload_exchange_rates(unique_securities, today, today, price_currency_cache=price_currency_cache)
 
         # Pre-load analyst ratings
         from app.repositories.analyst_rating_repository import AnalystRatingRepository
@@ -183,16 +185,19 @@ class PortfolioService:
             if market_price:
                 market_value = position["quantity"] * market_price
 
+                # Use actual price currency if available
+                price_currency = price_currency_cache.get(security_id, security.currency)
+
                 # Convert to EUR with forward-fill fallback
-                if security.currency != "EUR":
+                if price_currency != "EUR":
                     rate = self._get_exchange_rate_with_fallback(
-                        security.currency, today, exchange_rate_cache
+                        price_currency, today, exchange_rate_cache
                     )
                     if rate:
                         market_value_eur = market_value * rate
                     else:
                         logger.warning(
-                            f"No exchange rate for {security.currency} on {today}, "
+                            f"No exchange rate for {price_currency} on {today}, "
                             f"cannot calculate market value for {security.symbol}"
                         )
                         market_value_eur = Decimal("0.0")
@@ -263,11 +268,10 @@ class PortfolioService:
         """
         import pyxirr
 
-        # Get all open taxlots
+        # Get ALL taxlots (open + closed) for correct historical XIRR
         result = await self.db.execute(
             select(TaxLot, Security)
             .join(Security, TaxLot.security_id == Security.id)
-            .where(TaxLot.is_open == True)
             .order_by(TaxLot.open_date.asc())
         )
         taxlots_with_securities = result.all()
@@ -277,8 +281,8 @@ class PortfolioService:
 
         # Pre-load caches for start and end dates
         unique_securities = {security for _, security in taxlots_with_securities}
-        price_cache = await self._preload_market_prices(unique_securities, start_date, end_date)
-        exchange_rate_cache = await self._preload_exchange_rates(unique_securities, start_date, end_date)
+        price_cache, price_currency_cache = await self._preload_market_prices(unique_securities, start_date, end_date)
+        exchange_rate_cache = await self._preload_exchange_rates(unique_securities, start_date, end_date, price_currency_cache=price_currency_cache)
 
         # Find the effective end date: latest date with actual market prices
         # This handles stale price data (e.g., prices only go up to Feb 2 but end_date is Feb 27)
@@ -294,10 +298,12 @@ class PortfolioService:
 
         # Get portfolio market values on effective start and end dates
         start_value = self._calculate_daily_value(
-            effective_start_date, taxlots_with_securities, price_cache, exchange_rate_cache
+            effective_start_date, taxlots_with_securities, price_cache, exchange_rate_cache,
+            price_currency_cache=price_currency_cache
         )
         end_value = self._calculate_daily_value(
-            effective_end_date, taxlots_with_securities, price_cache, exchange_rate_cache
+            effective_end_date, taxlots_with_securities, price_cache, exchange_rate_cache,
+            price_currency_cache=price_currency_cache
         )
 
         start_mv = start_value["market_value_eur"]
@@ -362,11 +368,10 @@ class PortfolioService:
         - Pure P&L contribution = value_change - new_investment
         - Contribution % of total portfolio P&L
         """
-        # Get all open taxlots with securities
+        # Get ALL taxlots (open + closed) for correct historical attribution
         result = await self.db.execute(
             select(TaxLot, Security)
             .join(Security, TaxLot.security_id == Security.id)
-            .where(TaxLot.is_open == True)
             .order_by(TaxLot.open_date.asc())
         )
         taxlots_with_securities = result.all()
@@ -381,8 +386,8 @@ class PortfolioService:
 
         # Pre-load caches
         unique_securities = {security for _, security in taxlots_with_securities}
-        price_cache = await self._preload_market_prices(unique_securities, start_date, end_date)
-        exchange_rate_cache = await self._preload_exchange_rates(unique_securities, start_date, end_date)
+        price_cache, price_currency_cache = await self._preload_market_prices(unique_securities, start_date, end_date)
+        exchange_rate_cache = await self._preload_exchange_rates(unique_securities, start_date, end_date, price_currency_cache=price_currency_cache)
 
         # Find effective dates with actual price data
         effective_end = self._find_latest_price_date(end_date, price_cache)
@@ -414,27 +419,32 @@ class PortfolioService:
             sid = security.id
             entry = security_map[sid]
 
-            # Get FX rate helper
+            # Get FX rate helper — uses actual price currency, not security currency
             def get_eur_value(qty, price, sec, target_date):
                 if price is None:
                     return Decimal("0.0")
                 val = qty * price
-                if sec.currency != "EUR":
+                price_currency = price_currency_cache.get(sec.id, sec.currency)
+                if price_currency != "EUR":
                     rate = self._get_exchange_rate_with_fallback(
-                        sec.currency, target_date, exchange_rate_cache
+                        price_currency, target_date, exchange_rate_cache
                     )
                     return val * rate if rate else Decimal("0.0")
                 return val
 
             # Tax lot contributes to start value if opened on or before effective_start
+            # AND not already closed by effective_start
             if taxlot.open_date <= effective_start:
-                price = self._get_market_price_with_fallback(sid, effective_start, price_cache)
-                entry["start_market_value"] += get_eur_value(taxlot.quantity, price, security, effective_start)
+                if not (taxlot.close_date and taxlot.close_date <= effective_start):
+                    price = self._get_market_price_with_fallback(sid, effective_start, price_cache)
+                    entry["start_market_value"] += get_eur_value(taxlot.quantity, price, security, effective_start)
 
             # Tax lot contributes to end value if opened on or before effective_end
+            # AND not already closed by effective_end
             if taxlot.open_date <= effective_end:
-                price = self._get_market_price_with_fallback(sid, effective_end, price_cache)
-                entry["end_market_value"] += get_eur_value(taxlot.quantity, price, security, effective_end)
+                if not (taxlot.close_date and taxlot.close_date <= effective_end):
+                    price = self._get_market_price_with_fallback(sid, effective_end, price_cache)
+                    entry["end_market_value"] += get_eur_value(taxlot.quantity, price, security, effective_end)
 
             # New investment: opened during (effective_start, effective_end]
             if effective_start < taxlot.open_date <= effective_end:
@@ -507,14 +517,17 @@ class PortfolioService:
         start_date: date,
         end_date: date,
         lookback_days: int = 14
-    ) -> Dict:
+    ) -> Tuple[Dict, Dict]:
         """
         Pre-load all market prices for securities in date range.
 
         Extends the date range backwards by lookback_days to support
         forward-fill fallback logic when prices are missing.
 
-        Returns: {security_id: {date: price}}
+        Returns: (
+            {security_id: {date: price}},
+            {security_id: currency}  -- actual price currency from DB
+        )
         """
         from app.models.market_price import MarketPrice
 
@@ -538,19 +551,23 @@ class PortfolioService:
 
         # Build nested dict: {security_id: {date: price}}
         price_cache = {}
+        price_currency_cache = {}
         for price in all_prices:
             if price.security_id not in price_cache:
                 price_cache[price.security_id] = {}
             price_cache[price.security_id][price.date] = price.close_price
+            # Track actual price currency per security
+            price_currency_cache[price.security_id] = price.currency
 
-        return price_cache
+        return price_cache, price_currency_cache
 
     async def _preload_exchange_rates(
         self,
         securities: set,
         start_date: date,
         end_date: date,
-        lookback_days: int = 14
+        lookback_days: int = 14,
+        price_currency_cache: Optional[Dict] = None
     ) -> Dict:
         """
         Pre-load all exchange rates for currencies in date range.
@@ -558,11 +575,22 @@ class PortfolioService:
         Extends the date range backwards by lookback_days to support
         forward-fill fallback logic when rates are missing.
 
+        Args:
+            price_currency_cache: Optional {security_id: currency} from _preload_market_prices.
+                If provided, also loads FX rates for price currencies (which may differ
+                from security.currency for cross-listed securities).
+
         Returns: {(from_currency, date): rate}
         """
         from app.models.exchange_rate import ExchangeRate
 
         currencies = {s.currency for s in securities if s.currency != 'EUR'}
+
+        # Also include actual price currencies (may differ from security.currency)
+        if price_currency_cache:
+            for sec_id, price_curr in price_currency_cache.items():
+                if price_curr != 'EUR':
+                    currencies.add(price_curr)
 
         if not currencies:
             return {}
@@ -686,11 +714,12 @@ class PortfolioService:
         target_date: date,
         taxlots_with_securities: List,
         price_cache: Dict,
-        exchange_rate_cache: Dict
+        exchange_rate_cache: Dict,
+        price_currency_cache: Optional[Dict] = None
     ) -> Dict:
         """
         Calculate portfolio value for a specific date using cached data.
-        Simple and fast.
+        Includes both open and closed lots — filters by open_date/close_date window.
         """
         total_cost_basis = Decimal("0.0")
         total_market_value = Decimal("0.0")
@@ -698,6 +727,10 @@ class PortfolioService:
         for taxlot, security in taxlots_with_securities:
             # Only include taxlots opened on or before this date
             if taxlot.open_date > target_date:
+                continue
+
+            # Exclude taxlots that were closed on or before this date
+            if taxlot.close_date and taxlot.close_date <= target_date:
                 continue
 
             total_cost_basis += taxlot.cost_basis_eur
@@ -710,10 +743,13 @@ class PortfolioService:
             if market_price:
                 position_value = taxlot.quantity * market_price
 
+                # Use actual price currency if available, fall back to security currency
+                price_currency = price_currency_cache.get(security.id, security.currency) if price_currency_cache else security.currency
+
                 # Convert to EUR with forward-fill fallback
-                if security.currency != "EUR":
+                if price_currency != "EUR":
                     rate = self._get_exchange_rate_with_fallback(
-                        security.currency, target_date, exchange_rate_cache
+                        price_currency, target_date, exchange_rate_cache
                     )
                     if rate:
                         position_value_eur = position_value * rate
@@ -722,7 +758,7 @@ class PortfolioService:
                         # Log but skip this position if no exchange rate available
                         logger.warning(
                             f"Skipping position for security {security.id} on {target_date}: "
-                            f"no exchange rate for {security.currency}"
+                            f"no exchange rate for {price_currency}"
                         )
                 else:
                     position_value_eur = position_value

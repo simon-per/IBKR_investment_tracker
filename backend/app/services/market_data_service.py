@@ -422,7 +422,7 @@ class MarketDataService:
                     'security_id': security.id,
                     'date': price_info['date'],
                     'close_price': price_info['close_price'],
-                    'currency': security.currency,
+                    'currency': price_info['currency'],
                     'source': 'yahoo_finance'  # or 'alpha_vantage' if from fallback
                 })
 

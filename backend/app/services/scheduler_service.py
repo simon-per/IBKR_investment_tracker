@@ -15,6 +15,7 @@ from app.database import AsyncSessionLocal
 from app.services.ibkr_service import IBKRService
 from app.services.market_data_service import MarketDataService
 from app.services.currency_service import CurrencyService
+from app.services.sync_helper import reconcile_taxlots
 from app.repositories.security_repository import SecurityRepository
 from app.repositories.taxlot_repository import TaxLotRepository
 from app.repositories.market_price_repository import MarketPriceRepository
@@ -85,55 +86,19 @@ class SchedulerService:
                 logger.info("Extracting tax lots from Flex Query response...")
                 taxlots_data = await ibkr_service.extract_taxlots(flex_data)
 
-                # Step 5: Process and store tax lots
-                taxlots_count = 0
-                taxlots_skipped = 0
-                skipped_currencies = set()
-                total_cost_basis_eur = Decimal('0')
+                # Step 5: Reconcile tax lots (preserves closed lot history)
+                recon = await reconcile_taxlots(
+                    taxlot_repo=taxlot_repo,
+                    currency_service=currency_service,
+                    conid_to_security_id=conid_to_security_id,
+                    taxlots_data=taxlots_data,
+                    report_to_date=flex_data['to_date'],
+                )
 
-                # Delete existing taxlots before syncing fresh data
-                logger.info("Deleting existing taxlots before sync...")
-                for conid, security_id in conid_to_security_id.items():
-                    await taxlot_repo.delete_by_security_id(security_id)
-
-                for lot_data in taxlots_data:
-                    conid = lot_data['conid']
-
-                    # Get the security ID from our database
-                    security_id = conid_to_security_id.get(conid)
-                    if not security_id:
-                        logger.warning(f"Security with conid {conid} not found, skipping taxlot")
-                        taxlots_skipped += 1
-                        continue
-
-                    # Convert cost basis to EUR
-                    try:
-                        cost_basis_eur = await currency_service.convert_to_eur(
-                            amount=lot_data['cost_basis'],
-                            from_currency=lot_data['currency'],
-                            target_date=lot_data['open_date']
-                        )
-                    except ValueError as e:
-                        logger.warning(f"Skipping taxlot with unsupported currency {lot_data['currency']}: {str(e)}")
-                        skipped_currencies.add(lot_data['currency'])
-                        taxlots_skipped += 1
-                        continue
-
-                    # Create new taxlot
-                    taxlot_data = {
-                        'security_id': security_id,
-                        'open_date': lot_data['open_date'],
-                        'quantity': lot_data['quantity'],
-                        'cost_basis': lot_data['cost_basis'],
-                        'price_per_unit': lot_data['price_per_unit'],
-                        'currency': lot_data['currency'],
-                        'cost_basis_eur': cost_basis_eur,
-                        'is_open': lot_data['is_open'],
-                    }
-
-                    await taxlot_repo.create(taxlot_data)
-                    taxlots_count += 1
-                    total_cost_basis_eur += cost_basis_eur
+                taxlots_count = recon["taxlots_synced"]
+                taxlots_skipped = recon["taxlots_skipped"]
+                skipped_currencies = recon["skipped_currencies"]
+                total_cost_basis_eur = recon["total_cost_basis_eur"]
 
                 # Invalidate benchmark timeline cache (tax lots changed)
                 bench_service = BenchmarkService(db)

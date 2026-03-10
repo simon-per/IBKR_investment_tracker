@@ -309,11 +309,10 @@ class BenchmarkService:
             f"{len(missing_dates)} to compute"
         )
 
-        # ── Step 1: Load all open tax lots ───────────────────────────
+        # ── Step 1: Load ALL tax lots (open + closed) for historical accuracy
         result = await self.db.execute(
             select(TaxLot, Security)
             .join(Security, TaxLot.security_id == Security.id)
-            .where(TaxLot.is_open == True)
             .order_by(TaxLot.open_date.asc())
         )
         taxlots_with_securities = result.all()
@@ -345,7 +344,10 @@ class BenchmarkService:
             fx_rates = await self._preload_fx_rates(currency, price_start, end_date)
 
         # ── Step 5: Compute hypothetical shares for each tax lot ─────
-        lot_shares: List[Tuple[date, Decimal]] = []
+        # Build event lists: each lot generates an open event (+shares, +cost)
+        # and optionally a close event (-shares, -cost) if the lot is closed.
+        share_events: List[Tuple[date, Decimal]] = []
+        cost_events: List[Tuple[date, Decimal]] = []
 
         for taxlot, _security in taxlots_with_securities:
             lot_date = taxlot.open_date
@@ -368,19 +370,21 @@ class BenchmarkService:
                 cost_foreign = taxlot.cost_basis_eur / fx_rate
                 shares = cost_foreign / index_price
 
-            lot_shares.append((lot_date, shares))
+            # Open event: add shares and cost basis
+            share_events.append((lot_date, shares))
+            cost_events.append((lot_date, taxlot.cost_basis_eur))
 
-        if not lot_shares:
+            # Close event: subtract shares and cost basis when lot was sold
+            if taxlot.close_date:
+                share_events.append((taxlot.close_date, -shares))
+                cost_events.append((taxlot.close_date, -taxlot.cost_basis_eur))
+
+        if not share_events:
             return []
 
-        # Sort lot_shares by date
-        lot_shares.sort(key=lambda x: x[0])
-
-        # Also keep original tax lots for cost basis tracking
-        sorted_lots = sorted(
-            [(tl.open_date, tl.cost_basis_eur) for tl, _ in taxlots_with_securities],
-            key=lambda x: x[0],
-        )
+        # Sort events by date
+        share_events.sort(key=lambda x: x[0])
+        cost_events.sort(key=lambda x: x[0])
 
         # ── Step 6: Walk only MISSING business days ──────────────────
         # We need cumulative state, so walk ALL days from start_date but
@@ -388,8 +392,8 @@ class BenchmarkService:
         new_points: List[Dict] = []
         current_date = start_date
         running_cost_basis = Decimal("0.0")
-        lot_cost_idx = 0
-        lot_shares_idx = 0  # cumulative pointer for shares (O(n) instead of O(n²))
+        cost_event_idx = 0
+        share_event_idx = 0
         running_shares = Decimal("0.0")
 
         while current_date <= end_date:
@@ -397,15 +401,15 @@ class BenchmarkService:
                 current_date += timedelta(days=1)
                 continue
 
-            # Accumulate cost basis for lots opened on or before this date
-            while lot_cost_idx < len(sorted_lots) and sorted_lots[lot_cost_idx][0] <= current_date:
-                running_cost_basis += sorted_lots[lot_cost_idx][1]
-                lot_cost_idx += 1
+            # Accumulate cost basis events on or before this date
+            while cost_event_idx < len(cost_events) and cost_events[cost_event_idx][0] <= current_date:
+                running_cost_basis += cost_events[cost_event_idx][1]
+                cost_event_idx += 1
 
-            # Accumulate shares for lots opened on or before this date (O(n) fix)
-            while lot_shares_idx < len(lot_shares) and lot_shares[lot_shares_idx][0] <= current_date:
-                running_shares += lot_shares[lot_shares_idx][1]
-                lot_shares_idx += 1
+            # Accumulate share events on or before this date
+            while share_event_idx < len(share_events) and share_events[share_event_idx][0] <= current_date:
+                running_shares += share_events[share_event_idx][1]
+                share_event_idx += 1
 
             # Only compute for missing dates
             if current_date in missing_dates:
