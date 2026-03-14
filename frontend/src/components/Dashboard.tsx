@@ -11,6 +11,7 @@ import { PerformanceMetricsCards } from './PerformanceMetricsCards'
 import { PositionsList } from './PositionsList'
 import { PerformanceAttribution } from './PerformanceAttribution'
 import { MonthlyReturnsHeatmap } from './MonthlyReturnsHeatmap'
+import { DividendSummary } from './DividendSummary'
 import { AllocationTab } from './AllocationTab'
 import { ForecastTab } from './ForecastTab'
 import { FundamentalsTab } from './FundamentalsTab'
@@ -187,31 +188,42 @@ export function Dashboard() {
     // 1. Annual Return (XIRR) - from backend, fallback to null
     const xirr = annualizedReturn?.annualized_return_pct ?? null
 
-    // 2. Maximum Drawdown
+    // 2. Maximum Drawdown (deposit-adjusted using cumulative investment returns)
+    // Track deposit-adjusted portfolio value so deposits don't mask real drawdowns
     let maxDrawdown = 0
-    let peak = valueOverTime[0].market_value_eur
+    let adjustedValue = valueOverTime[0].market_value_eur
+    let adjustedPeak = adjustedValue
 
-    for (const point of valueOverTime) {
-      const value = point.market_value_eur
-      if (value > peak) {
-        peak = value
+    for (let i = 1; i < valueOverTime.length; i++) {
+      const prevMV = valueOverTime[i - 1].market_value_eur
+      const currMV = valueOverTime[i].market_value_eur
+      const cf = valueOverTime[i].cost_basis_eur - valueOverTime[i - 1].cost_basis_eur
+      // Grow adjusted value by the investment return (excluding cash flows)
+      const denominator = prevMV + cf * 0.5
+      if (denominator > 0) {
+        const dailyReturn = (currMV - prevMV - cf) / denominator
+        adjustedValue *= (1 + dailyReturn)
       }
-      if (peak > 0) {
-        const drawdown = ((value - peak) / peak) * 100
+      if (adjustedValue > adjustedPeak) {
+        adjustedPeak = adjustedValue
+      }
+      if (adjustedPeak > 0) {
+        const drawdown = ((adjustedValue - adjustedPeak) / adjustedPeak) * 100
         if (drawdown < maxDrawdown) {
           maxDrawdown = drawdown
         }
       }
     }
 
-    // 3. Sharpe Ratio
-    // Calculate daily returns (need at least 2 data points for returns)
+    // 3. Sharpe Ratio (Modified Dietz daily returns to exclude cash flow effects)
     const returns: number[] = []
     for (let i = 1; i < valueOverTime.length; i++) {
-      const prevValue = valueOverTime[i - 1].market_value_eur
-      const currValue = valueOverTime[i].market_value_eur
-      if (prevValue > 0) {
-        const dailyReturn = (currValue - prevValue) / prevValue
+      const prevMV = valueOverTime[i - 1].market_value_eur
+      const currMV = valueOverTime[i].market_value_eur
+      const cf = valueOverTime[i].cost_basis_eur - valueOverTime[i - 1].cost_basis_eur
+      const denominator = prevMV + cf * 0.5
+      if (denominator > 0) {
+        const dailyReturn = (currMV - prevMV - cf) / denominator
         returns.push(dailyReturn)
       }
     }
@@ -448,6 +460,9 @@ export function Dashboard() {
 
             {/* Monthly Returns Heatmap */}
             <MonthlyReturnsHeatmap data={valueOverTime} isLoading={chartLoading} />
+
+            {/* Dividend Income Heatmap */}
+            <DividendSummary />
 
             {/* Performance Attribution */}
             <PerformanceAttribution data={attribution} isLoading={attributionLoading} />

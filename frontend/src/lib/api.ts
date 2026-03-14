@@ -252,6 +252,19 @@ export interface WatchlistItem {
   created_at: string | null;
 }
 
+export interface DividendMonthlyItem {
+  month: string;
+  amount_eur: number;
+}
+
+export interface DividendSummaryResponse {
+  monthly: DividendMonthlyItem[];
+  ytd_eur: number;
+  total_eur: number;
+  last_updated: string | null;
+  sync_in_progress: boolean;
+}
+
 class ApiClient {
   private baseUrl: string;
 
@@ -430,6 +443,15 @@ class ApiClient {
 
   async syncWatchlist(force: boolean = false): Promise<{ synced: number; errors: number; message: string }> {
     return this.request(`/api/watchlist/sync?force=${force}`, { method: 'POST' });
+  }
+
+  // Dividend endpoints
+  async getDividendSummary(): Promise<DividendSummaryResponse> {
+    return this.request<DividendSummaryResponse>('/api/dividends/summary');
+  }
+
+  async syncDividends(): Promise<{ status: string; message: string }> {
+    return this.request('/api/dividends/sync', { method: 'POST' });
   }
 
   // Health check

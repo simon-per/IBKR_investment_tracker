@@ -7,11 +7,14 @@ from typing import List, Dict, Optional
 from datetime import datetime, date
 from decimal import Decimal
 import asyncio
+import logging
 import xml.etree.ElementTree as ET
 
 from ibflex import client, parser, Types, AssetClass
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class IBKRService:
@@ -88,11 +91,11 @@ class IBKRService:
                             'open_date': open_dt
                         })
                     except ValueError:
-                        print(f"WARNING: Could not parse openDateTime '{open_dt_str}' for conid {conid}")
+                        logger.warning(f"Could not parse openDateTime '{open_dt_str}' for conid {conid}")
         except Exception as e:
-            print(f"WARNING: Error extracting openDateTime from XML: {e}")
+            logger.warning(f"Error extracting openDateTime from XML: {e}")
 
-        print(f"Extracted {len(positions)} openDateTime values from XML")
+        logger.info(f"Extracted {len(positions)} openDateTime values from XML")
         return positions
 
     async def fetch_flex_data(self) -> Dict:
@@ -123,20 +126,18 @@ class IBKRService:
         # Parse the XML response
         try:
             response_obj = parser.parse(fixed_response)
-            print(f"\nDEBUG fetch_flex_data: Response type: {type(response_obj)}")
-            print(f"DEBUG fetch_flex_data: Response attributes: {[attr for attr in dir(response_obj) if not attr.startswith('_')]}")
+            logger.debug(f"Response type: {type(response_obj)}")
 
             # The response is a FlexQueryResponse, we need to get the FlexStatement from it
             if hasattr(response_obj, 'FlexStatements'):
                 flex_statements = response_obj.FlexStatements
-                print(f"DEBUG fetch_flex_data: FlexStatements found, count: {len(flex_statements) if flex_statements else 0}")
+                logger.debug(f"FlexStatements found, count: {len(flex_statements) if flex_statements else 0}")
                 statement = flex_statements[0] if flex_statements else None
             else:
                 # Fallback: maybe response_obj is already a FlexStatement
                 statement = response_obj
 
-            print(f"DEBUG fetch_flex_data: Final statement type: {type(statement)}")
-            print(f"DEBUG fetch_flex_data: Statement has OpenPositions: {hasattr(statement, 'OpenPositions')}\n")
+            logger.debug(f"Final statement type: {type(statement)}, has OpenPositions: {hasattr(statement, 'OpenPositions')}")
 
         except Exception as e:
             # The ibflex library can be strict about currency codes
@@ -174,11 +175,7 @@ class IBKRService:
         statement = flex_data['statement']
         securities = {}
 
-        print(f"\n=== DEBUGGING STATEMENT ===")
-        print(f"DEBUG: Statement type: {type(statement)}")
-        print(f"DEBUG: Statement attributes: {[attr for attr in dir(statement) if not attr.startswith('_')]}")
-        print(f"DEBUG: Statement has OpenPositions: {hasattr(statement, 'OpenPositions')}")
-        print("===========================\n")
+        logger.debug(f"Statement type: {type(statement)}, has OpenPositions: {hasattr(statement, 'OpenPositions')}")
 
         # Get securities info from the SecuritiesInfo section
         if hasattr(statement, 'SecuritiesInfo') and statement.SecuritiesInfo:
@@ -204,35 +201,27 @@ class IBKRService:
                 }
 
         # Also check open positions for any securities not in SecuritiesInfo
-        print(f"DEBUG: Checking OpenPositions - has attr: {hasattr(statement, 'OpenPositions')}")
-        if hasattr(statement, 'OpenPositions'):
-            print(f"DEBUG: OpenPositions value type: {type(statement.OpenPositions)}")
-            print(f"DEBUG: OpenPositions truthy: {bool(statement.OpenPositions)}")
-            if statement.OpenPositions:
-                positions_list = list(statement.OpenPositions)
-                print(f"DEBUG: Found {len(positions_list)} positions in OpenPositions")
-                for position in statement.OpenPositions:
-                    # Debug first position
-                    if hasattr(position, 'symbol'):
-                        print(f"DEBUG: Processing position - symbol: {position.symbol}, assetCategory: {getattr(position, 'assetCategory', 'N/A')}")
+        if hasattr(statement, 'OpenPositions') and statement.OpenPositions:
+            positions_list = list(statement.OpenPositions)
+            logger.debug(f"Found {len(positions_list)} positions in OpenPositions")
+            for position in statement.OpenPositions:
+                # Only process stocks - assetCategory is an enum (AssetClass.STOCK)
+                if not hasattr(position, 'assetCategory') or position.assetCategory != AssetClass.STOCK:
+                    continue
 
-                    # Only process stocks - assetCategory is an enum (AssetClass.STOCK)
-                    if not hasattr(position, 'assetCategory') or position.assetCategory != AssetClass.STOCK:
-                        continue
+                conid = position.conid if hasattr(position, 'conid') else None
+                if not conid or conid in securities:
+                    continue
 
-                    conid = position.conid if hasattr(position, 'conid') else None
-                    if not conid or conid in securities:
-                        continue
-
-                    securities[conid] = {
-                        'conid': conid,
-                        'isin': position.isin if hasattr(position, 'isin') else None,
-                        'symbol': position.symbol if hasattr(position, 'symbol') else '',
-                        'description': position.description if hasattr(position, 'description') else '',
-                        'currency': position.currency if hasattr(position, 'currency') else 'USD',
-                        'asset_category': 'STK',
-                        'exchange': position.listingExchange if hasattr(position, 'listingExchange') else None,
-                    }
+                securities[conid] = {
+                    'conid': conid,
+                    'isin': position.isin if hasattr(position, 'isin') else None,
+                    'symbol': position.symbol if hasattr(position, 'symbol') else '',
+                    'description': position.description if hasattr(position, 'description') else '',
+                    'currency': position.currency if hasattr(position, 'currency') else 'USD',
+                    'asset_category': 'STK',
+                    'exchange': position.listingExchange if hasattr(position, 'listingExchange') else None,
+                }
 
         return list(securities.values())
 
@@ -280,19 +269,19 @@ class IBKRService:
                     # Verify conid matches (safety check)
                     if extracted['conid'] == str(conid):
                         open_date = extracted['open_date']
-                        print(f"Matched openDateTime for {symbol} (index {idx}): {open_date}")
+                        logger.debug(f"Matched openDateTime for {symbol} (index {idx}): {open_date}")
                     else:
-                        print(f"WARNING: Index mismatch at {idx}: expected conid {conid}, got {extracted['conid']}")
+                        logger.warning(f"Index mismatch at {idx}: expected conid {conid}, got {extracted['conid']}")
 
                 if not open_date:
                     # Fallback to reportDate if openDateTime not found
                     report_date = position.reportDate if hasattr(position, 'reportDate') and position.reportDate else None
                     if report_date:
                         open_date = report_date if isinstance(report_date, date) else date.today()
-                        print(f"WARNING: No openDateTime for {symbol} (index {idx}), using reportDate: {open_date}")
+                        logger.warning(f"No openDateTime for {symbol} (index {idx}), using reportDate: {open_date}")
                     else:
                         open_date = date.today()
-                        print(f"WARNING: No openDateTime or reportDate for {symbol} (conid: {conid}), using today's date")
+                        logger.warning(f"No openDateTime or reportDate for {symbol} (conid: {conid}), using today's date")
 
                 if not conid or quantity == 0:
                     continue

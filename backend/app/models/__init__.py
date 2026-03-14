@@ -12,6 +12,7 @@ from app.models.benchmark_price import BenchmarkPrice
 from app.models.fundamental_metrics import FundamentalMetrics
 from app.models.earnings_event import EarningsEvent
 from app.models.watchlist_item import WatchlistItem
+from app.models.dividend_payment import DividendPayment
 
 __all__ = [
     "Security",
@@ -23,4 +24,5 @@ __all__ = [
     "FundamentalMetrics",
     "EarningsEvent",
     "WatchlistItem",
+    "DividendPayment",
 ]

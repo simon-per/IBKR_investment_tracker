@@ -5,8 +5,8 @@ Updates ratings twice weekly to avoid excessive API calls.
 """
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta
+import logging
 import yfinance as yf
-import time
 import random
 import asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +15,8 @@ from sqlalchemy import select
 from app.repositories.analyst_rating_repository import AnalystRatingRepository
 from app.models.security import Security
 from app.models.analyst_rating import AnalystRating
+
+logger = logging.getLogger(__name__)
 
 
 class AnalystRatingService:
@@ -52,17 +54,20 @@ class AnalystRatingService:
         """
         try:
             yahoo_ticker = await self._get_yahoo_ticker(security)
-            print(f"Fetching analyst rating for {security.symbol} ({yahoo_ticker})...")
+            logger.info(f"Fetching analyst rating for {security.symbol} ({yahoo_ticker})...")
 
             # Add random delay to avoid rate limiting (1-3 seconds)
             await asyncio.sleep(random.uniform(1.0, 3.0))
 
-            # Fetch recommendations using yfinance
-            ticker = yf.Ticker(yahoo_ticker)
-            recommendations = ticker.recommendations
+            # Fetch recommendations using yfinance (in thread to avoid blocking event loop)
+            def _fetch():
+                t = yf.Ticker(yahoo_ticker)
+                return t.recommendations
+
+            recommendations = await asyncio.to_thread(_fetch)
 
             if recommendations is None or recommendations.empty:
-                print(f"  No analyst ratings available for {security.symbol}")
+                logger.info(f"No analyst ratings available for {security.symbol}")
                 return None
 
             # Get the most recent period (0m = current month)
@@ -81,11 +86,11 @@ class AnalystRatingService:
                         rating_data['hold'], rating_data['sell'],
                         rating_data['strong_sell']])
 
-            print(f"  [OK] Found {total} analyst ratings for {security.symbol}")
+            logger.info(f"Found {total} analyst ratings for {security.symbol}")
             return rating_data
 
         except Exception as e:
-            print(f"  [ERROR] Error fetching rating for {security.symbol}: {str(e)}")
+            logger.error(f"Error fetching rating for {security.symbol}: {e}")
             return None
 
     async def sync_ratings_for_securities(self, security_ids: Optional[List[int]] = None) -> Dict:
@@ -116,15 +121,13 @@ class AnalystRatingService:
                 'message': 'No securities found'
             }
 
-        print(f"\n{'='*60}")
-        print(f"Syncing analyst ratings for {len(securities)} securities")
-        print(f"{'='*60}\n")
+        logger.info(f"Syncing analyst ratings for {len(securities)} securities")
 
         ratings_updated = 0
         errors = 0
 
         for i, security in enumerate(securities, 1):
-            print(f"\n[{i}/{len(securities)}] Processing {security.symbol} ({security.description[:50]}...)")
+            logger.info(f"[{i}/{len(securities)}] Processing {security.symbol} ({security.description[:50]}...)")
 
             try:
                 rating_data = await self.fetch_rating_for_security(security)
@@ -135,26 +138,24 @@ class AnalystRatingService:
                     ratings_updated += 1
                     await self.db.commit()
                 else:
-                    print(f"  [WARN] Skipping {security.symbol} - no ratings available")
+                    logger.warning(f"Skipping {security.symbol} - no ratings available")
 
                 # Add delay between securities to avoid rate limiting (2-4 seconds)
                 if i < len(securities):
                     delay = random.uniform(2.0, 4.0)
-                    print(f"  Waiting {delay:.1f}s before next security...")
+                    logger.debug(f"Waiting {delay:.1f}s before next security...")
                     await asyncio.sleep(delay)
 
             except Exception as e:
-                print(f"  [ERROR] Error processing {security.symbol}: {str(e)}")
+                logger.error(f"Error processing {security.symbol}: {e}")
                 errors += 1
                 await self.db.rollback()
                 continue
 
-        print(f"\n{'='*60}")
-        print(f"Analyst Rating Sync Complete")
-        print(f"  Securities Processed: {len(securities)}")
-        print(f"  Ratings Updated: {ratings_updated}")
-        print(f"  Errors: {errors}")
-        print(f"{'='*60}\n")
+        logger.info(
+            f"Analyst Rating Sync Complete: "
+            f"processed={len(securities)}, updated={ratings_updated}, errors={errors}"
+        )
 
         return {
             'securities_processed': len(securities),
@@ -186,7 +187,7 @@ class AnalystRatingService:
             }
 
         security_ids = [rating.security_id for rating in stale_ratings]
-        print(f"Found {len(security_ids)} stale ratings to refresh")
+        logger.info(f"Found {len(security_ids)} stale ratings to refresh")
 
         return await self.sync_ratings_for_securities(security_ids)
 

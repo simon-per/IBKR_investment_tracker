@@ -3,6 +3,7 @@ Market Data Router
 API endpoints for syncing and managing market price data.
 """
 import asyncio
+import logging
 import random
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,6 +12,7 @@ from app.database import get_db
 from app.services.market_data_service import MarketDataService
 from app.repositories.security_repository import SecurityRepository
 
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -51,11 +53,11 @@ async def sync_market_data(days_back: int = 730, db: AsyncSession = Depends(get_
         total_prices = 0
         errors = []
 
-        print(f"\n=== SYNCING MARKET DATA FOR {len(securities)} SECURITIES ===")
+        logger.info(f"Syncing market data for {len(securities)} securities")
 
         for idx, security in enumerate(securities):
             try:
-                print(f"Fetching prices for {security.symbol} ({security.exchange})...")
+                logger.info(f"Fetching prices for {security.symbol} ({security.exchange})...")
 
                 # Fetch historical data
                 prices_count = await market_data_service.sync_security_prices(
@@ -64,18 +66,18 @@ async def sync_market_data(days_back: int = 730, db: AsyncSession = Depends(get_
                 )
 
                 total_prices += prices_count
-                print(f"  [OK] Fetched {prices_count} price points")
+                logger.info(f"  Fetched {prices_count} price points for {security.symbol}")
 
                 # Add delay between securities to avoid overwhelming Yahoo Finance
                 # Skip delay after the last security
                 if idx < len(securities) - 1:
                     delay = random.uniform(2.0, 4.0)
-                    print(f"  [WAIT] Waiting {delay:.1f}s before next security...")
+                    logger.debug(f"  Waiting {delay:.1f}s before next security...")
                     await asyncio.sleep(delay)
 
             except Exception as e:
                 error_msg = f"Failed to fetch prices for {security.symbol}: {str(e)}"
-                print(f"  [ERROR] {error_msg}")
+                logger.error(f"  {error_msg}")
                 errors.append(error_msg)
 
         # Commit all price data

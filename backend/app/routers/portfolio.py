@@ -2,6 +2,7 @@
 Portfolio Router
 API endpoints for portfolio value and positions.
 """
+import logging
 from typing import List
 from datetime import date, timedelta
 from fastapi import APIRouter, Depends, Query, HTTPException
@@ -20,6 +21,7 @@ from app.schemas.portfolio import (
     PerformanceAttributionResponse,
 )
 
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -69,12 +71,12 @@ async def get_portfolio_value_over_time(
 
     portfolio_service = PortfolioService(db)
 
-    print(f"API CALL: start_date={start_date}, end_date={end_date}")
+    logger.debug(f"API CALL: start_date={start_date}, end_date={end_date}")
     timeline = await portfolio_service.get_portfolio_value_over_time(start_date, end_date)
-    print(f"API RESULT: {len(timeline)} data points")
+    logger.debug(f"API RESULT: {len(timeline)} data points")
     if timeline:
-        print(f"First point: {timeline[0]}")
-        print(f"Last point: {timeline[-1]}")
+        logger.debug(f"First point: {timeline[0]}")
+        logger.debug(f"Last point: {timeline[-1]}")
 
     return timeline
 

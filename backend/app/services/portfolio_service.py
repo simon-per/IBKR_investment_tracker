@@ -435,14 +435,14 @@ class PortfolioService:
             # Tax lot contributes to start value if opened on or before effective_start
             # AND not already closed by effective_start
             if taxlot.open_date <= effective_start:
-                if not (taxlot.close_date and taxlot.close_date <= effective_start):
+                if not (taxlot.close_date and taxlot.close_date < effective_start):
                     price = self._get_market_price_with_fallback(sid, effective_start, price_cache)
                     entry["start_market_value"] += get_eur_value(taxlot.quantity, price, security, effective_start)
 
             # Tax lot contributes to end value if opened on or before effective_end
             # AND not already closed by effective_end
             if taxlot.open_date <= effective_end:
-                if not (taxlot.close_date and taxlot.close_date <= effective_end):
+                if not (taxlot.close_date and taxlot.close_date < effective_end):
                     price = self._get_market_price_with_fallback(sid, effective_end, price_cache)
                     entry["end_market_value"] += get_eur_value(taxlot.quantity, price, security, effective_end)
 
@@ -729,8 +729,8 @@ class PortfolioService:
             if taxlot.open_date > target_date:
                 continue
 
-            # Exclude taxlots that were closed on or before this date
-            if taxlot.close_date and taxlot.close_date <= target_date:
+            # Exclude taxlots that were closed before this date (lot is still active on its close date)
+            if taxlot.close_date and taxlot.close_date < target_date:
                 continue
 
             total_cost_basis += taxlot.cost_basis_eur

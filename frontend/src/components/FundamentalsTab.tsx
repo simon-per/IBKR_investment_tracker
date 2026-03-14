@@ -242,6 +242,9 @@ function EarningsCalendar({ data }: { data: EarningsCalendarItem[] }) {
   const PAGE_SIZE = 10
   const [page, setPage] = useState(0)
 
+  // Reset to first page when data changes
+  useEffect(() => { setPage(0) }, [data])
+
   if (data.length === 0) {
     return (
       <p className="text-sm text-muted-foreground py-4 text-center">

@@ -1,5 +1,6 @@
 from typing import Dict, Optional, List
 from datetime import datetime, timedelta
+import logging
 import yfinance as yf
 import random
 import asyncio
@@ -8,6 +9,8 @@ import numpy as np
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.repositories.watchlist_repository import WatchlistRepository
+
+logger = logging.getLogger(__name__)
 
 
 class WatchlistService:
@@ -153,7 +156,7 @@ class WatchlistService:
 
     def _ttm_growth_from_quarterly(self, quarterly_financials, row_candidates: list) -> Optional[float]:
         """TTM YoY growth with tiered fallback:
-        ≥8 quarters: sum(Q1-4) vs sum(Q5-8)
+        >=8 quarters: sum(Q1-4) vs sum(Q5-8)
         5-7 quarters: same-quarter YoY (Q[0] vs Q[4])
         <5 quarters: returns None (caller falls back to .info)
         """
@@ -218,16 +221,16 @@ class WatchlistService:
         if not force and item.last_synced:
             age = datetime.now() - item.last_synced
             if age < timedelta(hours=self.CACHE_TTL_HOURS):
-                print(f"  [CACHE] {yahoo_ticker} is fresh ({age} old), skipping")
+                logger.debug(f"{yahoo_ticker} is fresh ({age} old), skipping")
                 return {}
 
-        print(f"  Fetching data for {yahoo_ticker}...")
+        logger.info(f"Fetching data for {yahoo_ticker}...")
         await asyncio.sleep(random.uniform(1.0, 3.0))
 
         try:
             info, quarterly_financials, history, revenue_estimate, growth_estimates = await self._fetch_ticker_data(yahoo_ticker)
         except Exception as e:
-            print(f"  [ERROR] Failed to fetch {yahoo_ticker}: {e}")
+            logger.error(f"Failed to fetch {yahoo_ticker}: {e}")
             return {"error": str(e)}
 
         # TTM growth from quarterly financials (always current, no annual lag)
@@ -240,14 +243,14 @@ class WatchlistService:
             if revenue_estimate is not None and not revenue_estimate.empty and '+1y' in revenue_estimate.index:
                 fwd_rev = self._safe_float(revenue_estimate.loc['+1y', 'growth'])
         except Exception as e:
-            print(f"  [WARN] revenue_estimate failed for {yahoo_ticker}: {e}")
+            logger.warning(f"revenue_estimate failed for {yahoo_ticker}: {e}")
 
         fwd_eps = None
         try:
             if growth_estimates is not None and not growth_estimates.empty and '+1y' in growth_estimates.index:
                 fwd_eps = self._safe_float(growth_estimates.loc['+1y', 'stockTrend'])
         except Exception as e:
-            print(f"  [WARN] growth_estimates failed for {yahoo_ticker}: {e}")
+            logger.warning(f"growth_estimates failed for {yahoo_ticker}: {e}")
 
         # Fallback: derive fwd EPS growth from forwardEps / trailingEps (already in .info, no extra call)
         if fwd_eps is None:
@@ -256,7 +259,7 @@ class WatchlistService:
             if fwd_eps_val and trail_eps_val and trail_eps_val != 0:
                 fwd_eps = self._safe_float((fwd_eps_val - trail_eps_val) / abs(trail_eps_val))
 
-        print(f"  [FWD] {yahoo_ticker}: fwd_rev={fwd_rev}, fwd_eps={fwd_eps}")
+        logger.debug(f"{yahoo_ticker}: fwd_rev={fwd_rev}, fwd_eps={fwd_eps}")
 
         current_price = self._safe_float(info.get("currentPrice") or info.get("regularMarketPrice"))
 
@@ -282,12 +285,12 @@ class WatchlistService:
             "last_synced": datetime.now(),
         }
 
-        # Fallback 1 (preferred): P/E ÷ Fwd EPS growth %
+        # Fallback 1 (preferred): P/E / Fwd EPS growth %
         if data["peg_ratio"] is None and data["trailing_pe"] and fwd_eps and fwd_eps > 0:
-            fwd_eps_pct = fwd_eps * 100  # convert decimal (0.30) → percentage (30)
+            fwd_eps_pct = fwd_eps * 100  # convert decimal (0.30) -> percentage (30)
             data["peg_ratio"] = self._safe_float(data["trailing_pe"] / fwd_eps_pct)
 
-        # Fallback 2 (last resort): Trailing P/E ÷ analyst 5-yr EPS CAGR %
+        # Fallback 2 (last resort): Trailing P/E / analyst 5-yr EPS CAGR %
         if data["peg_ratio"] is None and data["trailing_pe"]:
             lt_growth = self._safe_float(info.get("longTermGrowth") or info.get("longTermEpsGrowth"))
             if lt_growth and lt_growth > 0:
@@ -320,7 +323,7 @@ class WatchlistService:
                 if len(closes) >= 15:
                     data["rsi14"] = self._compute_rsi(closes, period=14)
         except Exception as e:
-            print(f"  [WARN] Failed to compute RSI ({yahoo_ticker}): {e}")
+            logger.warning(f"Failed to compute RSI ({yahoo_ticker}): {e}")
 
         # Compute composite buy score
         data["buy_score"] = self._compute_buy_score(data)
@@ -328,8 +331,10 @@ class WatchlistService:
         await self.repo.update_cached_data(item.id, data)
         await self.db.commit()
 
-        print(f"  [OK] Synced {yahoo_ticker}: price={data.get('current_price')}, "
-              f"score={data.get('buy_score')}, RSI={data.get('rsi14')}, %52wH={data.get('pct_from_52w_high')}")
+        logger.info(
+            f"Synced {yahoo_ticker}: price={data.get('current_price')}, "
+            f"score={data.get('buy_score')}, RSI={data.get('rsi14')}, %52wH={data.get('pct_from_52w_high')}"
+        )
         return data
 
     async def sync_all(self, force: bool = False) -> Dict:
@@ -338,15 +343,13 @@ class WatchlistService:
         if not items:
             return {"synced": 0, "errors": 0, "message": "Watchlist is empty"}
 
-        print(f"\n{'='*60}")
-        print(f"Syncing {len(items)} watchlist items")
-        print(f"{'='*60}\n")
+        logger.info(f"Syncing {len(items)} watchlist items")
 
         synced = 0
         errors = 0
 
         for i, item in enumerate(items, 1):
-            print(f"[{i}/{len(items)}] {item.yahoo_ticker}")
+            logger.info(f"[{i}/{len(items)}] {item.yahoo_ticker}")
             result = await self.sync_item(item.yahoo_ticker, force=force)
             if "error" in result:
                 errors += 1

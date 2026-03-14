@@ -6,10 +6,9 @@ Handles exchange-specific ticker symbols for international stocks.
 from typing import List, Dict, Optional, Tuple
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+import logging
 import httpx
 import yfinance as yf
-import requests
-import time
 import random
 import asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,6 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.repositories.market_price_repository import MarketPriceRepository
 from app.models.security import Security
+
+logger = logging.getLogger(__name__)
 
 
 class MarketDataService:
@@ -97,7 +98,7 @@ class MarketDataService:
         # First, check for custom ticker mapping in database
         mapping = await self.ticker_mapping_repo.get_mapping(symbol, exchange)
         if mapping:
-            print(f"DEBUG: Using custom ticker mapping: {symbol}@{exchange} -> {mapping.yahoo_ticker}")
+            logger.debug(f"Using custom ticker mapping: {symbol}@{exchange} -> {mapping.yahoo_ticker}")
             return mapping.yahoo_ticker
 
         # Fall back to exchange suffix logic
@@ -164,29 +165,29 @@ class MarketDataService:
 
         # If we hit rate limit, stop immediately - don't try variations
         if rate_limited:
-            print(f"[RATE LIMIT] Rate limit hit on {ticker}, stopping variations to avoid further blocking")
+            logger.warning(f"Rate limit hit on {ticker}, stopping variations to avoid further blocking")
             return []
 
         # If primary fails (but not rate limited), try variations
         if not prices:
-            print(f"Primary ticker {ticker} failed, trying variations...")
+            logger.info(f"Primary ticker {ticker} failed, trying variations...")
             variations = self._get_yahoo_ticker_variations(security)
 
             for alt_ticker in variations:
                 if alt_ticker == ticker:
                     continue  # Already tried this one
 
-                print(f"Trying alternative ticker: {alt_ticker}")
+                logger.info(f"Trying alternative ticker: {alt_ticker}")
                 prices, rate_limited = await self._try_fetch_yahoo(alt_ticker, security, start_date, end_date)
 
                 # If we hit rate limit during variations, stop immediately
                 if rate_limited:
-                    print(f"[RATE LIMIT] Rate limit hit on variation {alt_ticker}, stopping")
+                    logger.warning(f"Rate limit hit on variation {alt_ticker}, stopping")
                     return []
 
                 if prices:
                     # Success! Save this mapping for future use
-                    print(f"Success with {alt_ticker}, saving mapping")
+                    logger.info(f"Success with {alt_ticker}, saving mapping")
                     await self.ticker_mapping_repo.upsert_mapping(
                         ibkr_symbol=security.symbol,
                         ibkr_exchange=security.exchange,
@@ -246,16 +247,19 @@ class MarketDataService:
         try:
             # Random delay between 2-5 seconds to look more human
             delay = random.uniform(2.0, 5.0)
-            time.sleep(delay)
+            await asyncio.sleep(delay)
 
-            # Download data from Yahoo Finance
+            # Download data from Yahoo Finance (in thread to avoid blocking event loop)
             # Note: yfinance 1.1.0+ handles sessions and User-Agent internally
-            yf_ticker = yf.Ticker(ticker)
-            hist = yf_ticker.history(
-                start=start_date,
-                end=end_date + timedelta(days=1),  # yfinance end is exclusive
-                auto_adjust=False  # Get actual close prices, not adjusted
-            )
+            def _fetch_history():
+                yf_ticker = yf.Ticker(ticker)
+                return yf_ticker.history(
+                    start=start_date,
+                    end=end_date + timedelta(days=1),  # yfinance end is exclusive
+                    auto_adjust=False  # Get actual close prices, not adjusted
+                )
+
+            hist = await asyncio.to_thread(_fetch_history)
 
             if hist.empty:
                 return [], False  # No data, but not rate limited
@@ -283,7 +287,7 @@ class MarketDataService:
             # Detect rate limiting errors
             # Yahoo returns various errors when rate limited: 404, 429, connection errors
             if any(keyword in error_msg for keyword in ['429', 'too many requests', 'rate limit', 'blocked']):
-                print(f"[WARNING] Rate limit detected for {ticker}: {error_msg}")
+                logger.warning(f"Rate limit detected for {ticker}: {error_msg}")
                 return [], True  # Rate limited - stop trying variations
 
             # For other errors (invalid ticker, etc.), continue trying variations
@@ -325,11 +329,11 @@ class MarketDataService:
                 data = response.json()
 
                 if "Error Message" in data:
-                    print(f"Alpha Vantage error: {data['Error Message']}")
+                    logger.error(f"Alpha Vantage error: {data['Error Message']}")
                     return []
 
                 if "Note" in data:
-                    print(f"Alpha Vantage rate limit: {data['Note']}")
+                    logger.warning(f"Alpha Vantage rate limit: {data['Note']}")
                     return []
 
                 if "Time Series (Daily)" not in data:
@@ -351,7 +355,7 @@ class MarketDataService:
                 return prices
 
         except Exception as e:
-            print(f"Error fetching Alpha Vantage data: {str(e)}")
+            logger.error(f"Error fetching Alpha Vantage data: {e}")
             return []
 
     async def fetch_and_cache_prices(
@@ -389,12 +393,12 @@ class MarketDataService:
         )
 
         if not missing_dates:
-            print(f"All prices already cached for {security.symbol} ({start_date} to {end_date})")
+            logger.debug(f"All prices already cached for {security.symbol} ({start_date} to {end_date})")
             # Add delay even when skipping to maintain consistent pacing
             await asyncio.sleep(random.uniform(2.0, 4.0))
             return 0
 
-        print(f"Fetching {len(missing_dates)} missing prices for {security.symbol} on {security.exchange}")
+        logger.info(f"Fetching {len(missing_dates)} missing prices for {security.symbol} on {security.exchange}")
 
         # Try Yahoo Finance first (primary source)
         prices_data = await self.fetch_prices_from_yahoo(
@@ -403,11 +407,11 @@ class MarketDataService:
 
         # If Yahoo Finance fails or returns nothing, try Alpha Vantage (US stocks only)
         if not prices_data and security.exchange in ['NASDAQ', 'NYSE', 'ARCA', 'AMEX']:
-            print(f"Yahoo Finance failed for {security.symbol}, trying Alpha Vantage...")
+            logger.info(f"Yahoo Finance failed for {security.symbol}, trying Alpha Vantage...")
             prices_data = await self.fetch_prices_from_alpha_vantage(security)
 
         if not prices_data:
-            print(f"Warning: Could not fetch any price data for {security.symbol}")
+            logger.warning(f"Could not fetch any price data for {security.symbol}")
             # Add delay before moving to next security
             await asyncio.sleep(random.uniform(3.0, 6.0))
             return 0
@@ -430,12 +434,12 @@ class MarketDataService:
         if prices_to_cache:
             count = await self.market_price_repo.bulk_create(prices_to_cache)
             await self.db.commit()
-            print(f"Cached {count} new prices for {security.symbol}")
+            logger.info(f"Cached {count} new prices for {security.symbol}")
 
             # Add delay between securities to be polite to Yahoo Finance
             # 3-6 seconds feels human and keeps us well under rate limits
             delay = random.uniform(3.0, 6.0)
-            print(f"Waiting {delay:.1f}s before next security...")
+            logger.debug(f"Waiting {delay:.1f}s before next security...")
             await asyncio.sleep(delay)
 
             return count

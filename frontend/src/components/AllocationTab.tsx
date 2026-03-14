@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -275,6 +275,9 @@ function AllocationTreemap({
   isLoading: boolean
 }) {
   const [selected, setSelected] = useState<string | null>(null)
+
+  // Reset selection when allocation data changes
+  useEffect(() => { setSelected(null) }, [allocation])
 
   const entries = Object.entries(allocation)
   if (isLoading) {

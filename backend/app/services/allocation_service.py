@@ -2,6 +2,7 @@
 Allocation service for fetching and caching sector/geographic data for securities.
 """
 import asyncio
+import logging
 import random
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List
@@ -12,6 +13,8 @@ import yfinance as yf
 from app.models.security import Security
 from app.repositories.ticker_mapping_repository import TickerMappingRepository
 from app.etf_mappings import get_etf_allocation, is_known_etf
+
+logger = logging.getLogger(__name__)
 
 
 class AllocationService:
@@ -41,12 +44,12 @@ class AllocationService:
         Fetch allocation data for a single security.
         Uses ETF mappings for known ETFs, yfinance for stocks.
         """
-        print(f"[OK] Fetching allocation for {security.symbol}...")
+        logger.info(f"Fetching allocation for {security.symbol}...")
 
         # Check if it's a known ETF
         if is_known_etf(security.symbol):
             etf_data = get_etf_allocation(security.symbol)
-            print(f"  Using ETF mapping for {security.symbol}")
+            logger.info(f"Using ETF mapping for {security.symbol}")
             return {
                 'success': True,
                 'asset_type': 'ETF',
@@ -59,19 +62,22 @@ class AllocationService:
         # Get Yahoo ticker
         yahoo_ticker = await self._get_yahoo_ticker(security)
         if not yahoo_ticker:
-            print(f"  [WARN] No Yahoo ticker mapping for {security.symbol}")
+            logger.warning(f"No Yahoo ticker mapping for {security.symbol}")
             return {'success': False, 'error': 'No ticker mapping'}
 
         # Rate limiting: 1-3 second delay
         await asyncio.sleep(random.uniform(1.0, 3.0))
 
         try:
-            # Fetch data from yfinance
-            ticker = yf.Ticker(yahoo_ticker)
-            info = ticker.info
+            # Fetch data from yfinance (in thread to avoid blocking event loop)
+            def _fetch():
+                ticker = yf.Ticker(yahoo_ticker)
+                return ticker.info
+
+            info = await asyncio.to_thread(_fetch)
 
             if not info:
-                print(f"  [WARN] No info data for {yahoo_ticker}")
+                logger.warning(f"No info data for {yahoo_ticker}")
                 return {'success': False, 'error': 'No data'}
 
             sector = info.get('sector')
@@ -85,7 +91,7 @@ class AllocationService:
             else:
                 asset_type = 'Stock'
 
-            print(f"  [OK] {yahoo_ticker}: {sector}, {country}")
+            logger.info(f"{yahoo_ticker}: {sector}, {country}")
 
             return {
                 'success': True,
@@ -96,7 +102,7 @@ class AllocationService:
             }
 
         except Exception as e:
-            print(f"  [ERROR] Failed to fetch {yahoo_ticker}: {str(e)}")
+            logger.error(f"Failed to fetch {yahoo_ticker}: {e}")
             return {'success': False, 'error': str(e)}
 
     async def sync_allocation_data(self, force_refresh: bool = False) -> Dict:
@@ -104,9 +110,7 @@ class AllocationService:
         Sync allocation data for all securities.
         Only fetches data that's older than 7 days unless force_refresh=True.
         """
-        print("\n" + "=" * 60)
-        print("Syncing allocation data for securities")
-        print("=" * 60 + "\n")
+        logger.info("Syncing allocation data for securities")
 
         # Get all securities
         result = await self.db.execute(select(Security))
@@ -125,7 +129,7 @@ class AllocationService:
                 securities_to_update.append(security)
 
         if not securities_to_update:
-            print("All securities have fresh allocation data")
+            logger.info("All securities have fresh allocation data")
             return {
                 'securities_processed': 0,
                 'securities_updated': 0,
@@ -133,13 +137,13 @@ class AllocationService:
                 'message': 'All allocation data is up to date'
             }
 
-        print(f"Updating {len(securities_to_update)} securities...\n")
+        logger.info(f"Updating {len(securities_to_update)} securities...")
 
         updated_count = 0
         error_count = 0
 
         for i, security in enumerate(securities_to_update, 1):
-            print(f"[{i}/{len(securities_to_update)}] Processing {security.symbol}...")
+            logger.info(f"[{i}/{len(securities_to_update)}] Processing {security.symbol}...")
 
             result = await self.fetch_allocation_for_security(security)
 
@@ -161,7 +165,7 @@ class AllocationService:
         # Commit changes
         await self.db.commit()
 
-        print(f"\n[OK] Allocation sync complete: {updated_count} updated, {error_count} errors")
+        logger.info(f"Allocation sync complete: {updated_count} updated, {error_count} errors")
 
         return {
             'securities_processed': len(securities_to_update),

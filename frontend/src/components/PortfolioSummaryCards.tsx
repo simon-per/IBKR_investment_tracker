@@ -27,7 +27,13 @@ export function PortfolioSummaryCards({ summary, isLoading }: PortfolioSummaryCa
   }
 
   if (!summary) {
-    return null
+    return (
+      <Card>
+        <CardContent className="py-8 text-center text-muted-foreground">
+          No portfolio data yet — click "Sync IBKR Data" to get started.
+        </CardContent>
+      </Card>
+    )
   }
 
   const isProfit = summary.total_gain_loss_eur >= 0

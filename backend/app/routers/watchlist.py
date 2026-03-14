@@ -74,6 +74,7 @@ async def update_watchlist_item(
         if "target_price" in update_kwargs:
             item.target_price = update_kwargs["target_price"]
         await db.flush()
+        await db.commit()
         await db.refresh(item)
 
     return _item_to_response(item)
@@ -89,6 +90,7 @@ async def remove_from_watchlist(
     removed = await repo.remove(item_id)
     if not removed:
         raise HTTPException(status_code=404, detail="Watchlist item not found")
+    await db.commit()
     return {"message": "Removed from watchlist"}
 
 

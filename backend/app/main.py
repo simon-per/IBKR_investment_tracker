@@ -1,9 +1,13 @@
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from app.config import settings
 from app.database import init_db
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -14,7 +18,7 @@ async def lifespan(app: FastAPI):
     """
     # Startup: Initialize database
     await init_db()
-    print("Database initialized successfully")
+    logger.info("Database initialized successfully")
 
     # Initialize default ticker mappings
     from app.database import AsyncSessionLocal
@@ -26,25 +30,25 @@ async def lifespan(app: FastAPI):
             count = await mapping_repo.initialize_default_mappings()
             if count > 0:
                 await db.commit()
-                print(f"Initialized {count} default ticker mappings")
+                logger.info(f"Initialized {count} default ticker mappings")
             else:
-                print("Default ticker mappings already exist")
+                logger.info("Default ticker mappings already exist")
         except Exception as e:
-            print(f"Warning: Could not initialize ticker mappings: {str(e)}")
+            logger.info(f"Warning: Could not initialize ticker mappings: {str(e)}")
             await db.rollback()
 
     # Start the scheduler for daily automatic syncs
     from app.services.scheduler_service import get_scheduler
     scheduler = get_scheduler()
     scheduler.start()
-    print("Scheduler started - Syncs at 08:00, 15:00, 22:00 Europe/Berlin")
+    logger.info("Scheduler started - Syncs at 08:00, 15:00, 22:00 Europe/Berlin")
 
     yield
 
     # Shutdown: Clean up resources
-    print("Application shutting down")
+    logger.info("Application shutting down")
     scheduler.shutdown()
-    print("Scheduler shut down successfully")
+    logger.info("Scheduler shut down successfully")
 
 
 # Create FastAPI application
@@ -81,7 +85,7 @@ async def health_check():
 
 
 # Import and include routers
-from app.routers import sync, portfolio, market_data, analyst_ratings, allocation, scheduler, fundamentals, watchlist
+from app.routers import sync, portfolio, market_data, analyst_ratings, allocation, scheduler, fundamentals, watchlist, dividends
 
 app.include_router(sync.router, prefix="/api/sync", tags=["sync"])
 app.include_router(portfolio.router, prefix="/api/portfolio", tags=["portfolio"])
@@ -91,5 +95,6 @@ app.include_router(allocation.router, prefix="/api/allocation", tags=["allocatio
 app.include_router(scheduler.router, prefix="/api/scheduler", tags=["scheduler"])
 app.include_router(fundamentals.router, prefix="/api/fundamentals", tags=["fundamentals"])
 app.include_router(watchlist.router, prefix="/api/watchlist", tags=["watchlist"])
+app.include_router(dividends.router, prefix="/api/dividends", tags=["dividends"])
 # app.include_router(securities.router, prefix="/api/securities", tags=["securities"])
 # app.include_router(taxlots.router, prefix="/api/taxlots", tags=["taxlots"])

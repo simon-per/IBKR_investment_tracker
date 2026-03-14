@@ -156,6 +156,26 @@ export function ForecastTab() {
       })
     }
 
+    // Ensure the final data point reaches the exact endpoint
+    if (data.length > 0 && data[data.length - 1].month !== months) {
+      const portfolioGrowth = currentValue * Math.pow(1 + monthlyRate, months)
+      let contributionsGrowth = 0
+      if (monthlyRate === 0) {
+        contributionsGrowth = monthlyContribution * months
+      } else {
+        contributionsGrowth = monthlyContribution * ((Math.pow(1 + monthlyRate, months) - 1) / monthlyRate)
+      }
+      const futureValue = portfolioGrowth + contributionsGrowth
+      const totalContributions = currentValue + (monthlyContribution * months)
+      const safeValue = (val: number) => (!isFinite(val) || isNaN(val)) ? 0 : val
+      data.push({
+        month: months,
+        year: (months / 12).toFixed(1),
+        value: Math.round(safeValue(futureValue)),
+        contributions: Math.round(safeValue(totalContributions)),
+      })
+    }
+
     return data
   }, [currentValue, monthlyContribution, expectedReturn, forecastYears])
 

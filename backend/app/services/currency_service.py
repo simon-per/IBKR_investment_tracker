@@ -7,11 +7,14 @@ from typing import Dict, Optional
 from datetime import date
 from decimal import Decimal
 import httpx
+import logging
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.exchange_rate import ExchangeRate
+
+logger = logging.getLogger(__name__)
 
 
 class CurrencyService:
@@ -160,19 +163,19 @@ class CurrencyService:
 
         async with httpx.AsyncClient() as client:
             try:
-                print(f"DEBUG CurrencyService: Batch fetching {url} with params {params}")
+                logger.debug(f"Batch fetching {url} with params {params}")
                 response = await client.get(url, params=params, timeout=10.0)
-                print(f"DEBUG CurrencyService: Batch response status: {response.status_code}")
+                logger.debug(f"Batch response status: {response.status_code}")
 
                 if response.status_code >= 400:
-                    print(f"DEBUG CurrencyService: Batch fetch failed, will try individual dates")
+                    logger.warning(f"Batch fetch failed (status {response.status_code}), will try individual dates")
                     return
 
                 data = response.json()
 
                 # Response format: {"amount": 1, "base": "USD", "start_date": "...", "end_date": "...", "rates": {"2024-01-01": {"EUR": 0.9}, ...}}
                 rates_by_date = data.get('rates', {})
-                print(f"DEBUG CurrencyService: Received {len(rates_by_date)} rates")
+                logger.debug(f"Received {len(rates_by_date)} rates")
 
                 # Cache all rates
                 for date_str, rate_data in rates_by_date.items():
@@ -186,10 +189,10 @@ class CurrencyService:
                         if not existing:
                             await self._cache_rate(from_currency, to_currency, rate_date, rate_decimal)
 
-                print(f"DEBUG CurrencyService: Cached {len(rates_by_date)} rates")
+                logger.debug(f"Cached {len(rates_by_date)} rates")
 
             except Exception as e:
-                print(f"DEBUG CurrencyService: Batch fetch error: {str(e)}")
+                logger.error(f"Batch fetch error: {e}")
                 # Don't raise - we'll fall back to individual fetches if needed
 
     async def _fetch_from_api(
@@ -214,17 +217,17 @@ class CurrencyService:
 
         async with httpx.AsyncClient() as client:
             try:
-                print(f"DEBUG CurrencyService: Fetching {url} with params {params}")
+                logger.debug(f"Fetching {url} with params {params}")
                 response = await client.get(url, params=params, timeout=10.0)
-                print(f"DEBUG CurrencyService: Response status: {response.status_code}")
+                logger.debug(f"Response status: {response.status_code}")
 
                 # If 404, the date might not be available yet (too recent or weekend)
                 # Fall back to latest available rate
                 if response.status_code == 404:
-                    print(f"DEBUG CurrencyService: Date {target_date} not available, using latest rate")
+                    logger.debug(f"Date {target_date} not available, using latest rate")
                     url_latest = f"{self.FRANKFURTER_API_URL}/latest"
                     response = await client.get(url_latest, params=params, timeout=10.0)
-                    print(f"DEBUG CurrencyService: Latest rate response status: {response.status_code}")
+                    logger.debug(f"Latest rate response status: {response.status_code}")
 
                 # Check for unsupported currency error (400 status)
                 if response.status_code >= 400:

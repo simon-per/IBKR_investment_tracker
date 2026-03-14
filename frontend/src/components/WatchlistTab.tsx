@@ -3,7 +3,8 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
-import { RefreshCw, Plus, Trash2, ArrowDown, ArrowUp } from 'lucide-react'
+import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
+import { RefreshCw, Plus, Trash2, ArrowDown, ArrowUp, Pencil } from 'lucide-react'
 
 
 type SortColumn =
@@ -128,6 +129,20 @@ export function WatchlistTab() {
     },
   })
 
+  // Inline editing state
+  const [editingId, setEditingId] = useState<number | null>(null)
+  const [editNotes, setEditNotes] = useState('')
+  const [editTargetPrice, setEditTargetPrice] = useState('')
+
+  const updateMutation = useMutation({
+    mutationFn: ({ id, notes, targetPrice }: { id: number; notes: string; targetPrice: number | undefined }) =>
+      api.updateWatchlistItem(id, notes || undefined, targetPrice),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['watchlist'] })
+      setEditingId(null)
+    },
+  })
+
   const handleAdd = (e: React.FormEvent) => {
     e.preventDefault()
     const ticker = tickerInput.trim().toUpperCase()
@@ -227,6 +242,11 @@ export function WatchlistTab() {
               {addMutation.error.message}
             </p>
           )}
+          {syncMutation.isError && (
+            <p className="text-sm text-red-600 dark:text-red-400 mt-2">
+              Failed to sync watchlist. Please try again.
+            </p>
+          )}
           {syncMutation.isSuccess && (
             <p className="text-sm text-green-600 dark:text-green-400 mt-2">
               {syncMutation.data.message}
@@ -248,6 +268,11 @@ export function WatchlistTab() {
         </Card>
       ) : (
         <Card>
+          {removeMutation.isError && (
+            <div className="px-4 pt-3">
+              <p className="text-sm text-red-600 dark:text-red-400">Failed to remove item. Please try again.</p>
+            </div>
+          )}
           <CardContent className="p-0">
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
@@ -296,6 +321,12 @@ export function WatchlistTab() {
                           <div className="text-xs text-muted-foreground truncate max-w-[140px]">
                             {item.company_name || item.yahoo_ticker}
                           </div>
+                          {(item.notes || item.target_price !== null) && (
+                            <div className="text-[10px] text-muted-foreground/70 mt-0.5 space-x-2">
+                              {item.notes && <span className="truncate inline-block max-w-[100px] align-bottom">{item.notes}</span>}
+                              {item.target_price !== null && <span>TP: {formatCurrency(item.target_price, item.data_currency)}</span>}
+                            </div>
+                          )}
                         </div>
                       </td>
 
@@ -404,17 +435,87 @@ export function WatchlistTab() {
                         {formatMarketCap(item.market_cap)}
                       </td>
 
-                      {/* Remove */}
+                      {/* Actions */}
                       <td className="px-3 py-2">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => removeMutation.mutate(item.id)}
-                          disabled={removeMutation.isPending}
-                          className="h-7 w-7 p-0 text-muted-foreground hover:text-red-600"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </Button>
+                        <div className="flex items-center gap-0.5">
+                          <Popover
+                            open={editingId === item.id}
+                            onOpenChange={(open) => {
+                              if (open) {
+                                setEditNotes(item.notes || '')
+                                setEditTargetPrice(item.target_price !== null ? String(item.target_price) : '')
+                                setEditingId(item.id)
+                              } else {
+                                setEditingId(null)
+                              }
+                            }}
+                          >
+                            <PopoverTrigger asChild>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
+                              >
+                                <Pencil className="h-3.5 w-3.5" />
+                              </Button>
+                            </PopoverTrigger>
+                            <PopoverContent className="w-72" align="end">
+                              <div className="space-y-3">
+                                <div className="text-sm font-medium">{item.symbol || item.yahoo_ticker}</div>
+                                <div className="space-y-1.5">
+                                  <label className="text-xs text-muted-foreground">Notes</label>
+                                  <textarea
+                                    rows={3}
+                                    value={editNotes}
+                                    onChange={(e) => setEditNotes(e.target.value)}
+                                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm resize-none"
+                                    placeholder="Add notes..."
+                                  />
+                                </div>
+                                <div className="space-y-1.5">
+                                  <label className="text-xs text-muted-foreground">
+                                    Target Price {item.data_currency ? `(${item.data_currency})` : ''}
+                                  </label>
+                                  <input
+                                    type="number"
+                                    step="0.01"
+                                    value={editTargetPrice}
+                                    onChange={(e) => setEditTargetPrice(e.target.value)}
+                                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                                    placeholder="0.00"
+                                  />
+                                </div>
+                                {updateMutation.isError && (
+                                  <p className="text-xs text-red-600 dark:text-red-400">Failed to save. Please try again.</p>
+                                )}
+                                <div className="flex justify-end gap-2">
+                                  <Button variant="ghost" size="sm" onClick={() => setEditingId(null)}>
+                                    Cancel
+                                  </Button>
+                                  <Button
+                                    size="sm"
+                                    disabled={updateMutation.isPending}
+                                    onClick={() => {
+                                      const tp = editTargetPrice.trim() ? parseFloat(editTargetPrice) : undefined
+                                      updateMutation.mutate({ id: item.id, notes: editNotes, targetPrice: tp })
+                                    }}
+                                  >
+                                    {updateMutation.isPending ? 'Saving...' : 'Save'}
+                                  </Button>
+                                </div>
+                              </div>
+                            </PopoverContent>
+                          </Popover>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => removeMutation.mutate(item.id)}
+                            disabled={removeMutation.isPending}
+                            className="h-7 w-7 p-0 text-muted-foreground hover:text-red-600"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
+                        </div>
                       </td>
                     </tr>
                     )

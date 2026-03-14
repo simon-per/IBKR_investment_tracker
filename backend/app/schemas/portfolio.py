@@ -254,6 +254,18 @@ class UpdateWatchlistItemRequest(BaseModel):
     target_price: Optional[float] = None
 
 
+class DividendMonthlyItem(BaseModel):
+    month: str  # "YYYY-MM"
+    amount_eur: float
+
+class DividendSummaryResponse(BaseModel):
+    monthly: List[DividendMonthlyItem]
+    ytd_eur: float
+    total_eur: float
+    last_updated: Optional[str] = None
+    sync_in_progress: bool = False
+
+
 class FundamentalsStatus(BaseModel):
     """Status of fundamentals data cache"""
     total_securities: int

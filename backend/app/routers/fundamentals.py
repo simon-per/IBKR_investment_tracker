@@ -1,8 +1,12 @@
+import logging
+
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal, get_db
 from app.services.fundamentals_service import FundamentalsService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -14,7 +18,7 @@ async def _run_sync_background(force_refresh: bool) -> None:
             service = FundamentalsService(db)
             await service.sync_fundamentals_data(force_refresh=force_refresh)
         except Exception as e:
-            print(f"[ERROR] Background fundamentals sync failed: {e}")
+            logger.error(f"Background fundamentals sync failed: {e}")
 
 
 @router.post("/sync")

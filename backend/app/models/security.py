@@ -61,6 +61,10 @@ class Security(Base):
         back_populates="security",
         cascade="all, delete-orphan"
     )
+    dividend_payments: Mapped[List["DividendPayment"]] = relationship(
+        back_populates="security",
+        cascade="all, delete-orphan"
+    )
 
     # Composite unique constraint for ISIN + exchange
     # and additional indexes for performance

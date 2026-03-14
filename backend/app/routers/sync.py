@@ -2,6 +2,8 @@
 Sync Router
 Handles syncing data from IBKR Flex Query to local database.
 """
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Dict
@@ -15,6 +17,7 @@ from app.services.benchmark_service import BenchmarkService
 from app.repositories.security_repository import SecurityRepository
 from app.repositories.taxlot_repository import TaxLotRepository
 
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -76,7 +79,7 @@ async def sync_ibkr_data(db: AsyncSession = Depends(get_db)):
         # Invalidate benchmark timeline cache (tax lots changed)
         bench_service = BenchmarkService(db)
         cleared = await bench_service.clear_cache()
-        print(f"Cleared {cleared} benchmark timeline cache entries (tax lots changed)")
+        logger.info(f"Cleared {cleared} benchmark timeline cache entries (tax lots changed)")
 
         # Commit transaction
         await db.commit()

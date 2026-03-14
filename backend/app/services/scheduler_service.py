@@ -24,11 +24,6 @@ from app.models.benchmark_price import BenchmarkPrice
 from sqlalchemy import select, distinct
 from decimal import Decimal
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
 
 

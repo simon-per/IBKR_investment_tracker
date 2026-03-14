@@ -1,5 +1,6 @@
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta
+import logging
 import yfinance as yf
 import random
 import asyncio
@@ -11,6 +12,8 @@ from app.repositories.fundamentals_repository import FundamentalsRepository
 from app.models.security import Security
 from app.models.fundamental_metrics import FundamentalMetrics
 from app.models.earnings_event import EarningsEvent
+
+logger = logging.getLogger(__name__)
 
 
 class FundamentalsService:
@@ -93,7 +96,7 @@ class FundamentalsService:
                          growth_estimates=None, revenue_estimate=None) -> Optional[Dict]:
         """Extract fundamental metrics from a Yahoo Finance info dict."""
         if not info:
-            print(f"  No fundamental data available for {security.symbol}")
+            logger.info(f"No fundamental data available for {security.symbol}")
             return None
 
         # TTM growth from quarterly financials (always current, no lag)
@@ -147,13 +150,13 @@ class FundamentalsService:
                 lt_pct = lt_growth * 100 if lt_growth < 1 else lt_growth  # normalise if already a %
                 metrics_data['peg_ratio'] = round(metrics_data['trailing_pe'] / lt_pct, 4)
 
-        print(f"  [OK] Got fundamentals for {security.symbol} (type={metrics_data['quote_type']})")
+        logger.info(f"Got fundamentals for {security.symbol} (type={metrics_data['quote_type']})")
         return metrics_data
 
     def _extract_earnings(self, security: Security, earnings_dates) -> List[Dict]:
         """Extract earnings events from a Yahoo Finance earnings_dates DataFrame."""
         if earnings_dates is None or (hasattr(earnings_dates, 'empty') and earnings_dates.empty):
-            print(f"  No earnings dates for {security.symbol}")
+            logger.info(f"No earnings dates for {security.symbol}")
             return []
 
         now = datetime.now()
@@ -184,10 +187,10 @@ class FundamentalsService:
                     'is_upcoming': is_upcoming,
                 })
             except Exception as e:
-                print(f"  [WARN] Skipping earnings row for {security.symbol}: {e}")
+                logger.warning(f"Skipping earnings row for {security.symbol}: {e}")
                 continue
 
-        print(f"  [OK] Got {len(events)} earnings events for {security.symbol}")
+        logger.info(f"Got {len(events)} earnings events for {security.symbol}")
         return events
 
     async def sync_fundamentals_data(self, force_refresh: bool = False) -> Dict:
@@ -204,9 +207,7 @@ class FundamentalsService:
                 'message': 'No securities found',
             }
 
-        print(f"\n{'='*60}")
-        print(f"Syncing fundamentals for {len(securities)} securities")
-        print(f"{'='*60}\n")
+        logger.info(f"Syncing fundamentals for {len(securities)} securities")
 
         metrics_updated = 0
         earnings_updated = 0
@@ -223,7 +224,7 @@ class FundamentalsService:
                 if s.id not in existing_ids or s.id in stale_ids
             ]
             if not needs_update:
-                print("All fundamentals are fresh (< 1 day old)")
+                logger.info("All fundamentals are fresh (< 1 day old)")
                 return {
                     'securities_processed': 0,
                     'metrics_updated': 0,
@@ -239,12 +240,12 @@ class FundamentalsService:
         market_service = MarketDataService(self.db)
 
         for i, security in enumerate(needs_update, 1):
-            print(f"\n[{i}/{len(needs_update)}] Processing {security.symbol}")
+            logger.info(f"[{i}/{len(needs_update)}] Processing {security.symbol}")
 
             try:
                 # Resolve ticker once
                 yahoo_ticker = await self._get_yahoo_ticker(security, market_service)
-                print(f"  Fetching data for {security.symbol} ({yahoo_ticker})...")
+                logger.info(f"Fetching data for {security.symbol} ({yahoo_ticker})...")
 
                 # Rate limit before API call
                 await asyncio.sleep(random.uniform(1.0, 3.0))
@@ -269,22 +270,20 @@ class FundamentalsService:
                 # Rate limit between securities
                 if i < len(needs_update):
                     delay = random.uniform(2.0, 4.0)
-                    print(f"  Waiting {delay:.1f}s before next security...")
+                    logger.debug(f"Waiting {delay:.1f}s before next security...")
                     await asyncio.sleep(delay)
 
             except Exception as e:
-                print(f"  [ERROR] Error processing {security.symbol}: {str(e)}")
+                logger.error(f"Error processing {security.symbol}: {e}")
                 errors += 1
                 await self.db.rollback()
                 continue
 
-        print(f"\n{'='*60}")
-        print(f"Fundamentals Sync Complete")
-        print(f"  Securities Processed: {len(needs_update)}")
-        print(f"  Metrics Updated: {metrics_updated}")
-        print(f"  Earnings Events: {earnings_updated}")
-        print(f"  Errors: {errors}")
-        print(f"{'='*60}\n")
+        logger.info(
+            f"Fundamentals Sync Complete: "
+            f"processed={len(needs_update)}, metrics={metrics_updated}, "
+            f"earnings={earnings_updated}, errors={errors}"
+        )
 
         return {
             'securities_processed': len(needs_update),
