@@ -199,11 +199,22 @@ class MarketDataService:
 
         return prices
 
+    # Tickers where the suffix-based currency guess is wrong
+    # e.g. SMH.L trades in USD on London, not GBP
+    TICKER_CURRENCY_OVERRIDES = {
+        'SMH.L': 'USD',
+    }
+
     def _get_currency_from_ticker(self, ticker: str, security: Security) -> str:
         """
         Determine the currency for a Yahoo Finance ticker.
-        Uses exchange suffix to infer currency, falls back to security currency.
+        Checks explicit overrides first, then uses exchange suffix to infer
+        currency, falls back to security currency.
         """
+        # Check explicit overrides first
+        if ticker in self.TICKER_CURRENCY_OVERRIDES:
+            return self.TICKER_CURRENCY_OVERRIDES[ticker]
+
         # Map of Yahoo Finance suffixes to currencies
         suffix_currency_map = {
             '.DE': 'EUR',  # Germany (Xetra)
