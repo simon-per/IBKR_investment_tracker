@@ -56,8 +56,13 @@ async def reconcile_taxlots(
     lots_closed_partial = 0
 
     # --- Phase A: Snapshot existing open lots ---
+    # Include securities with open lots in the DB but not in the incoming query
+    # (fully-sold securities), so they get reconciled into closed lots.
     snapshot: Dict[Tuple, Dict] = {}
-    all_security_ids = set(conid_to_security_id.values())
+    existing_open_lots = await taxlot_repo.get_open_taxlots()
+    all_security_ids = set(conid_to_security_id.values()) | {
+        lot.security_id for lot in existing_open_lots
+    }
 
     for security_id in all_security_ids:
         open_lots = await taxlot_repo.get_by_security_id(security_id, is_open=True)
