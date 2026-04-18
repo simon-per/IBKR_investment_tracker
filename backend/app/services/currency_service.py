@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 class CurrencyService:
     """Service for currency conversion and exchange rate caching"""
 
-    FRANKFURTER_API_URL = "https://api.frankfurter.app"
+    FRANKFURTER_API_URL = "https://api.frankfurter.dev/v1"
     BASE_CURRENCY = "EUR"
 
     # Currencies supported by Frankfurter API (as of 2024)
