@@ -22,6 +22,8 @@ requests==2.31.0
 
 # Market Data
 yfinance>=1.1.0
+# lxml: required by yfinance>=1.3 for `Ticker.earnings_dates` (uses pandas.read_html)
+lxml>=5.0.0
 
 # Financial calculations
 pyxirr>=0.10.0

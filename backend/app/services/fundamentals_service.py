@@ -60,19 +60,23 @@ class FundamentalsService:
             info = ticker.info
             try:
                 earnings = ticker.earnings_dates
-            except Exception:
+            except Exception as e:
+                logger.warning(f"earnings_dates failed for {yahoo_ticker}: {type(e).__name__}: {e}")
                 earnings = None
             try:
                 quarterly_financials = ticker.quarterly_financials
-            except Exception:
+            except Exception as e:
+                logger.warning(f"quarterly_financials failed for {yahoo_ticker}: {type(e).__name__}: {e}")
                 quarterly_financials = None
             try:
                 growth_estimates = ticker.growth_estimates
-            except Exception:
+            except Exception as e:
+                logger.warning(f"growth_estimates failed for {yahoo_ticker}: {type(e).__name__}: {e}")
                 growth_estimates = None
             try:
                 revenue_estimate = ticker.revenue_estimate
-            except Exception:
+            except Exception as e:
+                logger.warning(f"revenue_estimate failed for {yahoo_ticker}: {type(e).__name__}: {e}")
                 revenue_estimate = None
             return info, earnings, quarterly_financials, growth_estimates, revenue_estimate
 
