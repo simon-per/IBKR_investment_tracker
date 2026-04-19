@@ -1,277 +1,254 @@
 # IBKR Portfolio Analyzer
 
-A comprehensive portfolio tracking application for Interactive Brokers accounts, focusing on securities and tax lots with dual-line chart visualization (cost basis vs. market value).
+A full-stack portfolio tracking and analytics application for Interactive Brokers accounts. Imports securities and tax lots from IBKR Flex Queries, fetches market data, and renders a multi-tab dashboard with cost-basis vs. market-value charts, benchmark comparison, fundamentals, dividends, and allocation analytics. All values normalized to EUR.
 
 ## Features
 
-- 📊 **Dual-Line Portfolio Chart** - Track cost basis (invested) and market value (current worth) over time
-- 💰 **Multi-Currency Support** - All values converted to EUR as base currency
-- 🌍 **Multi-Exchange Tracking** - Same securities on different exchanges (e.g., Amazon on NASDAQ vs XETRA) tracked separately using ISIN codes
-- 📈 **Real-Time Market Data** - Yahoo Finance integration for international stocks with exchange-specific pricing
-- 💼 **Position Breakdown** - Detailed view of all holdings with gain/loss analysis
-- 🔄 **IBKR Flex Query Integration** - Import your portfolio data directly from Interactive Brokers
+### Portfolio Tracking
+- **Dual-Line Portfolio Chart** — Cost basis (invested) vs. market value (current worth) over time, with MTD / YTD / 1Y / ALL timeframes.
+- **Benchmark Comparison** — Overlay S&P 500 or other benchmarks, cached server-side for fast switching.
+- **Summary Cards** — Total value, unrealized gain/loss, realized gain/loss, XIRR (money-weighted return), Modified Dietz returns.
+- **Positions List** — All holdings with per-security gain/loss and currency breakdown.
+- **Multi-Currency** — Everything converted to EUR via Frankfurter API.
+- **Multi-Exchange** — Same stock on different exchanges (e.g., Amazon NASDAQ vs. XETRA) tracked as separate securities keyed on `(ISIN, exchange)`.
+
+### Analytics
+- **Allocation Tab** — Treemap visualization by sector, geography, or asset class.
+- **Performance Attribution** — Contribution to return by holding.
+- **Monthly Returns Heatmap** — Year-over-month performance grid.
+- **Fundamentals Tab** — PE, EPS, PEG (derived), forward growth, earnings calendar per security.
+- **Watchlist** — Track non-held tickers alongside the portfolio.
+- **Dividend Summary** — Historical dividend income by year.
+- **Forecast Tab** — Projected portfolio trajectory.
+
+### Automation
+- **IBKR Flex Query Sync** — Import securities, tax lots, and reconcile closed positions.
+- **Scheduled Jobs** — Daily auto-sync for IBKR, market data, and exchange rates (APScheduler).
+- **Ticker Mapping System** — Auto-discovery for international ETFs (German, UK, etc.), with persistent mappings.
 
 ## Tech Stack
 
 ### Backend
-- **FastAPI** - Modern async Python web framework
-- **SQLAlchemy 2.0** - Async ORM with SQLite database
-- **Alembic** - Database migrations
-- **ibflex** - IBKR Flex Query XML parsing
-- **yfinance** - Market data (primary, free)
-- **Alpha Vantage** - Market data (fallback, requires API key)
-- **Frankfurter API** - Currency conversion (free, EUR-based)
+- **FastAPI** — async Python web framework
+- **SQLAlchemy 2.0** + **aiosqlite** — async ORM, SQLite storage
+- **Alembic** — database migrations
+- **ibflex** — IBKR Flex Query XML parsing
+- **yfinance** ≥1.1.0 — market data, fundamentals, earnings (requires `lxml` for earnings dates)
+- **Frankfurter API** — currency conversion (free, EUR-based)
+- **APScheduler** — daily sync jobs
+- **pyxirr** — money-weighted return calculation
 
 ### Frontend
-- **React 18** + **TypeScript**
-- **Vite** - Fast build tool
-- **TanStack Query** - Data fetching and caching
-- **Recharts** - Chart visualization
-- **Tailwind CSS** - Styling
-- **shadcn/ui** - UI components
+- **React 18** + **TypeScript** + **Vite**
+- **TanStack Query** — data fetching & caching
+- **Recharts** — charts, treemaps, heatmaps
+- **Tailwind CSS** + **shadcn/ui**
+
+### Deployment
+- **Docker Compose** — backend + frontend containers
+- **Traefik** — reverse proxy with automatic HTTPS
 
 ## Architecture
 
 ```
-┌─────────────────┐
-│  IBKR Flex Query │
-└────────┬────────┘
-         │
-         ▼
+┌─────────────────┐        ┌──────────────────┐
+│ IBKR Flex Query │        │  Yahoo Finance   │
+└────────┬────────┘        │  Frankfurter API │
+         │                 └────────┬─────────┘
+         ▼                          ▼
 ┌─────────────────────────────────────────────────────┐
-│              Backend (FastAPI)                       │
+│                 Backend (FastAPI)                   │
 ├─────────────────────────────────────────────────────┤
-│  • IBKRService: Parse Flex Query (STK only)         │
-│  • SecurityRepository: ISIN + Exchange composite key │
-│  • TaxLotRepository: Purchase tracking               │
-│  • CurrencyService: Frankfurter API + caching        │
-│  • MarketDataService: Yahoo Finance + caching        │
-│  • PortfolioService: Cost basis & market value calc  │
-└────────┬────────────────────────────────────────────┘
-         │
-         ▼
+│  Services                                           │
+│   • IBKRService        — Flex Query parsing (STK)   │
+│   • MarketDataService  — yfinance + ticker mapping  │
+│   • CurrencyService    — batch FX with carry-fwd    │
+│   • PortfolioService   — cost basis & market value  │
+│   • FundamentalsService — PE/EPS + earnings         │
+│   • DividendsService   — distribution history       │
+│   • BenchmarkService   — S&P 500 / custom indices   │
+│   • SchedulerService   — daily APScheduler jobs     │
+│                                                     │
+│  Repositories                                       │
+│   Security · TaxLot · MarketPrice · ExchangeRate    │
+│   Fundamental · EarningsEvent · TickerMapping       │
+│   Dividend · Watchlist · BenchmarkCache             │
+└────────────────────┬────────────────────────────────┘
+                     ▼
 ┌─────────────────────────────────────────────────────┐
-│            Frontend (React)                          │
+│              Frontend (React + Vite)                │
 ├─────────────────────────────────────────────────────┤
-│  • Dashboard: Main view with charts & cards          │
-│  • PortfolioValueChart: Dual-line Recharts visual   │
-│  • PortfolioSummaryCards: Metrics overview           │
-│  • PositionsList: Holdings table with gain/loss      │
+│   Dashboard (tabs): Overview · Allocation ·         │
+│   Fundamentals · Watchlist · Forecast               │
+│   Charts: PortfolioValueChart · MonthlyReturnsHeat  │
+│   Widgets: SummaryCards · PositionsList · Dividends │
 └─────────────────────────────────────────────────────┘
 ```
 
 ## Prerequisites
 
 - Python 3.12+
-- Node.js 18+
-- IBKR Flex Query configured (see setup below)
-- (Optional) Alpha Vantage API key for US stocks fallback
+- Node.js 20+
+- IBKR Flex Query configured (see below)
 
 ## Installation
 
-### 1. Clone and Setup Backend
+### 1. Backend
 
 ```bash
 cd backend
 
-# Create virtual environment
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
+source venv/bin/activate          # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
-# Run database migrations
 alembic upgrade head
 ```
 
-### 2. Configure Environment Variables
+### 2. Environment Variables
 
-Create `.env` file in the project root:
+Create `backend/.env`:
 
 ```env
-# IBKR Configuration (REQUIRED)
 IBKR_TOKEN=your_flex_query_token
 IBKR_QUERY_ID=your_flex_query_id
-
-# Alpha Vantage API (OPTIONAL - for US stocks fallback)
-ALPHA_VANTAGE_API_KEY=your_api_key_here
-
-# Database (default is SQLite)
 DATABASE_URL=sqlite+aiosqlite:///./portfolio.db
+CORS_ORIGINS=http://localhost:5173,http://localhost:5174
 ```
 
-### 3. Setup Frontend
+### 3. Frontend
 
 ```bash
 cd frontend
-
-# Install dependencies
 npm install
+npm run build                     # production
+```
 
-# Build (optional, for production)
-npm run build
+Create `frontend/.env.development`:
+
+```env
+VITE_API_URL=http://localhost:8000/api
 ```
 
 ## IBKR Flex Query Configuration
 
-Configure your Interactive Brokers Flex Query with these fields:
+**Open Positions** section — required fields:
 
-### Open Positions Section
-**Required Fields:**
-- ✅ Currency
-- ✅ Asset Class
-- ✅ Symbol
-- ✅ Quantity
-- ✅ Cost Basis Price
-- ✅ Cost Basis Money
-- ✅ Open Date Time
-- ✅ Description
-- ✅ Listing Exchange
-- ✅ Conid
-- ✅ ISIN
-- ✅ Report Date
+Currency, Asset Class, Symbol, Quantity, Cost Basis Price, Cost Basis Money, Open Date Time, Description, Listing Exchange, Conid, ISIN, Report Date.
 
-### Filters
-- **Asset Category**: Stocks (STK) only
-- **Exclude**: Securities with non-standard currency codes (e.g., RUS)
+**Also recommended:** Trades (for closed-position reconciliation), CashTransactions (for dividend tracking).
 
-### Format Settings
-- **Format**: XML
-- **Period**: Last Business Day (or your preferred range)
-- **Date Format**: yyyyMMdd
-- **Time Format**: HHmmss
+**Settings:**
+- Format: XML
+- Asset Category: Stocks (STK) only
+- Period: Last Business Day (or custom range)
+- Date format: `yyyyMMdd`
+- Time format: `HHmmss`
 
-## Running the Application
-
-### Start Backend (Terminal 1)
+## Running Locally
 
 ```bash
+# Terminal 1 — backend
 cd backend
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+source venv/bin/activate
 uvicorn app.main:app --reload --port 8000
-```
 
-Backend will be available at: `http://localhost:8000`
-API docs at: `http://localhost:8000/docs`
-
-### Start Frontend (Terminal 2)
-
-```bash
+# Terminal 2 — frontend
 cd frontend
 npm run dev
 ```
 
-Frontend will be available at: `http://localhost:5173`
+- Frontend: http://localhost:5173
+- Backend API: http://localhost:8000
+- API docs: http://localhost:8000/docs
+
+## Deployment
+
+The repo ships a `deploy.sh` script that pulls from GitHub, rebuilds the frontend bundle, and rebuilds the Docker stack. On a configured server:
+
+```bash
+cd /root/IBKR_investment_tracker
+./deploy.sh
+```
+
+Docker Compose manages the backend FastAPI container and an nginx container serving the built frontend. Traefik handles TLS and routing (coexists with other services on the same host).
 
 ## Usage
 
-1. **Sync IBKR Data**
-   - Click "Sync IBKR Data" button in the dashboard
-   - This fetches your portfolio from Interactive Brokers
-   - Securities and tax lots are stored in the database
-
-2. **View Portfolio Value**
-   - The dual-line chart shows:
-     - **Purple line**: Cost Basis (total invested over time)
-     - **Green line**: Market Value (current worth)
-   - Automatically fetches market prices from Yahoo Finance
-
-3. **Analyze Positions**
-   - View all holdings in the positions table
-   - See gain/loss for each security
-   - Track holdings across different exchanges
+1. **Sync IBKR Data** — click the sync button; securities and tax lots are fetched and reconciled (closed positions marked `is_open = false`).
+2. **Sync Market Data** — fetches historical prices from Yahoo Finance into the local cache. ⚠️ Rate-limited; only run when needed.
+3. **Explore the dashboard** — switch between Overview, Allocation, Fundamentals, Watchlist, and Forecast tabs.
 
 ## API Endpoints
 
-### Portfolio
-- `GET /api/portfolio/value-over-time` - Portfolio value timeline
-- `GET /api/portfolio/summary` - Current portfolio summary
-- `GET /api/portfolio/positions` - Detailed positions breakdown
-
 ### Sync
-- `POST /api/sync/ibkr` - Sync data from IBKR Flex Query
+- `POST /api/sync/ibkr` — import from IBKR Flex Query
+- `GET  /api/sync/status`
+- `POST /api/market-data/sync` — fetch historical prices
+- `GET  /api/market-data/status`
+- `GET  /api/scheduler/status`
 
-## Database Schema
+### Portfolio
+- `GET /api/portfolio/value-over-time`
+- `GET /api/portfolio/summary`
+- `GET /api/portfolio/positions`
+- `GET /api/portfolio/performance-attribution`
+- `GET /api/portfolio/monthly-returns`
+- `GET /api/portfolio/benchmark` — with `?benchmark=SPY` etc.
 
-```sql
--- Securities: ISIN + Exchange composite key
-CREATE TABLE securities (
-    id INTEGER PRIMARY KEY,
-    isin VARCHAR(12) NOT NULL,
-    symbol VARCHAR(20) NOT NULL,
-    description VARCHAR(200),
-    currency VARCHAR(3) NOT NULL,
-    conid INTEGER UNIQUE NOT NULL,
-    exchange VARCHAR(20),
-    UNIQUE(isin, exchange)
-);
+### Fundamentals & Analytics
+- `GET  /api/fundamentals/{security_id}`
+- `POST /api/fundamentals/sync`
+- `GET  /api/allocation` — sector / geography / asset class breakdown
+- `GET  /api/dividends/summary`
+- `GET  /api/analyst-ratings/{security_id}`
+- `GET  /api/watchlist` · `POST /api/watchlist` · `DELETE /api/watchlist/{id}`
 
--- Tax Lots: Purchase tracking
-CREATE TABLE taxlots (
-    id INTEGER PRIMARY KEY,
-    security_id INTEGER REFERENCES securities(id),
-    open_date DATE NOT NULL,
-    quantity NUMERIC(18,6) NOT NULL,
-    cost_basis NUMERIC(18,6) NOT NULL,
-    cost_basis_eur NUMERIC(18,6) NOT NULL,
-    is_open BOOLEAN DEFAULT TRUE
-);
+## Database Schema (high level)
 
--- Market Prices: Cached price data
-CREATE TABLE market_prices (
-    id INTEGER PRIMARY KEY,
-    security_id INTEGER REFERENCES securities(id),
-    date DATE NOT NULL,
-    close_price NUMERIC(18,6) NOT NULL,
-    currency VARCHAR(3) NOT NULL,
-    source VARCHAR(50) DEFAULT 'yahoo_finance',
-    UNIQUE(security_id, date)
-);
+Core tables: `securities`, `taxlots`, `market_prices`, `exchange_rates`, `ticker_mappings`, `fundamental_metrics`, `earnings_events`, `dividends`, `watchlist`, `benchmark_cache`.
 
--- Exchange Rates: Cached currency conversions
-CREATE TABLE exchange_rates (
-    id INTEGER PRIMARY KEY,
-    date DATE NOT NULL,
-    from_currency VARCHAR(3) NOT NULL,
-    to_currency VARCHAR(3) NOT NULL,
-    rate NUMERIC(18,8) NOT NULL,
-    UNIQUE(date, from_currency, to_currency)
-);
-```
+`securities` uses a composite unique key on `(isin, exchange)` so the same ISIN on multiple venues stays distinct.
 
 ## Key Design Decisions
 
-### ISIN + Exchange Tracking
-The same stock traded on different exchanges (e.g., Amazon on NASDAQ in USD vs. XETRA in EUR) is tracked as **separate securities** because:
-- Different trading prices
-- Different currencies
-- Different tax lot purchases
+### ISIN + Exchange as composite key
+Same ISIN on different exchanges = separate securities — different prices, currencies, and tax lots.
 
-Example:
-```python
-# Amazon US
-Security(isin="US0231351067", exchange="NASDAQ", symbol="AMZN", currency="USD")
+### Batch FX fetching with carry-forward
+`CurrencyService` pulls 30-day windows from Frankfurter in a single call, caches everything, and carries the most recent rate forward for weekends/holidays.
 
-# Amazon DE
-Security(isin="US0231351067", exchange="XETRA", symbol="AMZ", currency="EUR")
+### Ticker mapping with auto-discovery
+IBKR symbols don't always match Yahoo Finance tickers (e.g., `DBPG@IBIS2` → `DBPG.DE`, `SMH@LSEETF` → `SMH.L`). The service checks custom mappings first, then applies exchange suffixes (`XETRA/IBIS2 → .DE`, `LSEETF → .L`, `AEB → .AS`), then tries variations. Successful discoveries are persisted.
+
+### Yahoo Finance rate limiting
+- yfinance ≥ 1.1.0 with Chrome User-Agent headers
+- 1–3 s random delay per request, 2–4 s between securities
+- Incremental caching — only missing dates are fetched
+- ⚠️ Always get user permission before running `/api/market-data/sync`. Burst limits trigger ~1 hour cooldowns.
+
+### Modified Dietz + XIRR
+Returns are computed both as cash-flow-adjusted Modified Dietz (for monthly bars) and XIRR (for the headline annualized figure).
+
+## Troubleshooting
+
+**IBKR sync returns 0 securities**
+Check backend logs for the `AssetClass` enum debug; verify the XML has `assetCategory="STK"`.
+
+**Currency conversion failing**
+Confirm the base URL is `https://api.frankfurter.app` (not `.dev`). Recent same-day rates may not be published yet — carry-forward should handle it.
+
+**Market prices missing for a security**
+Inspect ticker mapping debug output; add a manual mapping via `TickerMappingRepository`; ensure the exchange suffix is registered in `EXCHANGE_SUFFIXES`.
+
+**Yahoo Finance 404 / 429 errors**
+Rate limit hit — stop all market-data requests and wait 30–60 minutes. Confirm `yfinance >= 1.1.0` and that delays are active.
+
+**Reset database**
+```bash
+rm backend/portfolio.db
+cd backend && alembic upgrade head
 ```
-
-### Market Data Sources
-1. **Yahoo Finance** (Primary)
-   - Free, no API key required
-   - Excellent international coverage
-   - Exchange-specific tickers (e.g., "AMZN", "AMZ.DE")
-
-2. **Alpha Vantage** (Fallback)
-   - Requires API key
-   - Primarily US stocks
-   - Used if Yahoo Finance fails
-
-### Currency Conversion
-- **Frankfurter API** for historical exchange rates
-- All rates cached in database
-- Base currency: EUR
 
 ## Project Structure
 
@@ -284,75 +261,29 @@ IBKR Investment Tracker/
 │   │   ├── services/        # Business logic
 │   │   ├── routers/         # API endpoints
 │   │   ├── schemas/         # Pydantic models
-│   │   ├── config.py        # Settings
-│   │   ├── database.py      # DB setup
-│   │   └── main.py          # FastAPI app
-│   ├── alembic/             # Database migrations
-│   ├── requirements.txt
-│   └── portfolio.db         # SQLite database (generated)
+│   │   └── main.py
+│   ├── alembic/             # Migrations
+│   ├── Dockerfile
+│   ├── docker-compose.yml
+│   ├── frontend-nginx.conf
+│   └── requirements.txt
 ├── frontend/
 │   ├── src/
-│   │   ├── components/      # React components
-│   │   ├── lib/             # API client & utilities
-│   │   ├── App.tsx          # Main app
-│   │   └── main.tsx         # Entry point
-│   ├── package.json
-│   └── vite.config.ts
-├── .env                     # Environment variables
+│   │   ├── components/      # Dashboard, charts, tabs
+│   │   └── lib/             # API client
+│   └── package.json
+├── deploy.sh                # Server deployment script
 └── README.md
 ```
 
-## Troubleshooting
+## Roadmap
 
-### Backend Issues
-
-**"Unknown currency 'RUS'" error**
-- Exclude Russian securities from your IBKR Flex Query
-- Or update Flex Query to exclude non-standard currency codes
-
-**"Alpha Vantage API key not configured"**
-- Yahoo Finance will be used instead (recommended)
-- Add `ALPHA_VANTAGE_API_KEY` to `.env` if you want US stocks fallback
-
-**Database errors**
-```bash
-# Reset database
-rm portfolio.db
-alembic upgrade head
-```
-
-### Frontend Issues
-
-**"Cannot connect to backend"**
-- Ensure backend is running on port 8000
-- Check `.env` file has `VITE_API_URL=http://localhost:8000`
-
-**Build errors**
-```bash
-cd frontend
-rm -rf node_modules package-lock.json
-npm install
-```
-
-## Future Enhancements
-
-- [ ] Tax lot sale tracking (currently only tracks open positions)
-- [ ] Dividend and cash transaction tracking
-- [ ] Portfolio allocation pie chart
-- [ ] Custom date range selector for charts
-- [ ] Dark mode toggle
-- [ ] Export to CSV/Excel
+- [ ] Tax-lot-level sale tracking with cost-basis methods (FIFO, LIFO, specific ID)
+- [ ] Corporate actions (splits, spin-offs)
 - [ ] Multi-portfolio support
-- [ ] Performance attribution analysis
+- [ ] Dark mode polish across all tabs
+- [ ] CSV / Excel export
 
 ## License
 
-Private project - Not licensed for distribution
-
-## Support
-
-For issues or questions, please check:
-1. IBKR Flex Query configuration
-2. Backend logs (`uvicorn` output)
-3. Frontend console (browser DevTools)
-4. Database integrity (`portfolio.db`)
+Private project — not licensed for distribution.
