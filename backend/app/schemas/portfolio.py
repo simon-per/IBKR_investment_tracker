@@ -138,6 +138,10 @@ class PortfolioSummary(BaseModel):
     total_gain_loss_percent: float = Field(..., description="Total percentage gain/loss")
     num_positions: int = Field(..., description="Number of unique securities held")
     date: Optional[str] = Field(None, description="Date of the summary")
+    total_realized_gain_loss_eur: float = Field(0.0, description="Realized gain/loss from closed positions")
+    total_realized_proceeds_eur: float = Field(0.0, description="Approximate proceeds from closed positions (qty × close-date price × FX)")
+    total_realized_cost_basis_eur: float = Field(0.0, description="Cost basis of closed positions")
+    num_closed_positions: int = Field(0, description="Number of unique securities with closed lots")
 
     class Config:
         from_attributes = True

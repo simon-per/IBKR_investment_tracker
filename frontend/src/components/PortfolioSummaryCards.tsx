@@ -11,8 +11,8 @@ interface PortfolioSummaryCardsProps {
 export function PortfolioSummaryCards({ summary, isLoading }: PortfolioSummaryCardsProps) {
   if (isLoading) {
     return (
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-        {[1, 2, 3, 4].map((i) => (
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
+        {[1, 2, 3, 4, 5].map((i) => (
           <Card key={i}>
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
               <CardTitle className="text-sm font-medium">Loading...</CardTitle>
@@ -37,9 +37,10 @@ export function PortfolioSummaryCards({ summary, isLoading }: PortfolioSummaryCa
   }
 
   const isProfit = summary.total_gain_loss_eur >= 0
+  const isRealizedProfit = summary.total_realized_gain_loss_eur >= 0
 
   return (
-    <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+    <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
       <Card>
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
           <CardTitle className="text-sm font-medium">Market Value</CardTitle>
@@ -85,6 +86,27 @@ export function PortfolioSummaryCards({ summary, isLoading }: PortfolioSummaryCa
           </div>
           <p className="text-xs text-muted-foreground">
             {formatPercent(summary.total_gain_loss_percent)}
+          </p>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+          <CardTitle className="text-sm font-medium">Realized Gain/Loss</CardTitle>
+          {isRealizedProfit ? (
+            <TrendingUp className="h-4 w-4 text-green-600" />
+          ) : (
+            <TrendingDown className="h-4 w-4 text-red-600" />
+          )}
+        </CardHeader>
+        <CardContent>
+          <div className={`text-2xl font-bold ${isRealizedProfit ? 'text-green-600' : 'text-red-600'}`}>
+            {formatCurrency(summary.total_realized_gain_loss_eur, 'EUR')}
+          </div>
+          <p className="text-xs text-muted-foreground">
+            {summary.num_closed_positions === 0
+              ? 'No closed positions yet'
+              : `From ${summary.num_closed_positions} closed position${summary.num_closed_positions === 1 ? '' : 's'}`}
           </p>
         </CardContent>
       </Card>

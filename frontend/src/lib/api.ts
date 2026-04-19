@@ -19,6 +19,10 @@ export interface PortfolioSummary {
   total_gain_loss_percent: number;
   num_positions: number;
   date?: string;
+  total_realized_gain_loss_eur: number;
+  total_realized_proceeds_eur: number;
+  total_realized_cost_basis_eur: number;
+  num_closed_positions: number;
 }
 
 export interface TaxLotInfo {

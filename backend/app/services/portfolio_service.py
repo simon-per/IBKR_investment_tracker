@@ -91,12 +91,14 @@ class PortfolioService:
         taxlots_with_securities = result.all()
 
         if not taxlots_with_securities:
+            realized = await self.get_realized_totals()
             return {
                 "total_cost_basis_eur": 0.0,
                 "total_market_value_eur": 0.0,
                 "total_gain_loss_eur": 0.0,
                 "total_gain_loss_percent": 0.0,
-                "num_positions": 0
+                "num_positions": 0,
+                **realized,
             }
 
         # Use optimized method
@@ -109,13 +111,90 @@ class PortfolioService:
             price_currency_cache=price_currency_cache
         )
 
+        realized = await self.get_realized_totals()
+
         return {
             "total_cost_basis_eur": daily_value["cost_basis_eur"],
             "total_market_value_eur": daily_value["market_value_eur"],
             "total_gain_loss_eur": daily_value["gain_loss_eur"],
             "total_gain_loss_percent": daily_value["gain_loss_percent"],
             "num_positions": len(set(security.id for _, security in taxlots_with_securities)),
-            "date": daily_value["date"]
+            "date": daily_value["date"],
+            **realized,
+        }
+
+    async def get_realized_totals(self) -> Dict:
+        """
+        Aggregate realized gain/loss from closed tax lots.
+
+        Proceeds are approximated as quantity × market_price × fx_rate on close_date
+        (we don't persist actual sale proceeds from IBKR <Trades> yet). Lots that can't
+        be priced within the 14-day fallback window are skipped and not counted.
+        """
+        result = await self.db.execute(
+            select(TaxLot, Security)
+            .join(Security, TaxLot.security_id == Security.id)
+            .where(and_(TaxLot.is_open == False, TaxLot.close_date.isnot(None)))
+        )
+        closed_lots = result.all()
+
+        if not closed_lots:
+            return {
+                "total_realized_gain_loss_eur": 0.0,
+                "total_realized_proceeds_eur": 0.0,
+                "total_realized_cost_basis_eur": 0.0,
+                "num_closed_positions": 0,
+            }
+
+        close_dates = [lot.close_date for lot, _ in closed_lots]
+        unique_securities = {security for _, security in closed_lots}
+        price_cache, price_currency_cache = await self._preload_market_prices(
+            unique_securities, min(close_dates), max(close_dates)
+        )
+        exchange_rate_cache = await self._preload_exchange_rates(
+            unique_securities, min(close_dates), max(close_dates),
+            price_currency_cache=price_currency_cache,
+        )
+
+        total_proceeds_eur = Decimal("0")
+        total_cost_basis_eur = Decimal("0")
+        priced_security_ids: set = set()
+
+        for lot, security in closed_lots:
+            price = self._get_market_price_with_fallback(
+                security.id, lot.close_date, price_cache
+            )
+            if price is None:
+                logger.warning(
+                    f"Skipping realized calc for closed lot {lot.id} "
+                    f"({security.symbol}): no price near {lot.close_date}"
+                )
+                continue
+
+            price_currency = price_currency_cache.get(security.id, security.currency)
+            if price_currency == "EUR":
+                fx_rate = Decimal("1")
+            else:
+                fx_rate = self._get_exchange_rate_with_fallback(
+                    price_currency, lot.close_date, exchange_rate_cache
+                )
+                if fx_rate is None:
+                    logger.warning(
+                        f"Skipping realized calc for closed lot {lot.id} "
+                        f"({security.symbol}): no FX rate for {price_currency} near {lot.close_date}"
+                    )
+                    continue
+
+            proceeds_eur = lot.quantity * price * fx_rate
+            total_proceeds_eur += proceeds_eur
+            total_cost_basis_eur += lot.cost_basis_eur
+            priced_security_ids.add(security.id)
+
+        return {
+            "total_realized_gain_loss_eur": float(total_proceeds_eur - total_cost_basis_eur),
+            "total_realized_proceeds_eur": float(total_proceeds_eur),
+            "total_realized_cost_basis_eur": float(total_cost_basis_eur),
+            "num_closed_positions": len(priced_security_ids),
         }
 
     async def get_positions_breakdown(self) -> List[Dict]:
