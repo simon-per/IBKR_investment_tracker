@@ -20,7 +20,7 @@ import { ThemeToggle } from './ThemeToggle'
 import { BenchmarkPicker, BENCHMARK_COLORS } from './BenchmarkPicker'
 import { RefreshCw, Download, Clock } from 'lucide-react'
 
-type TimeRange = '1W' | '1M' | '3M' | '6M' | '1Y' | '2Y' | '3Y' | '5Y' | 'ALL'
+type TimeRange = '1W' | 'MTD' | '1M' | '3M' | '6M' | 'YTD' | '1Y' | '2Y' | 'ALL'
 
 export function Dashboard() {
   const queryClient = useQueryClient()
@@ -47,6 +47,11 @@ export function Dashboard() {
       case '1W':
         start = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
         break
+      case 'MTD': {
+        const now = new Date()
+        start = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0]
+        break
+      }
       case '1M':
         start = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
         break
@@ -56,17 +61,16 @@ export function Dashboard() {
       case '6M':
         start = new Date(Date.now() - 180 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
         break
+      case 'YTD': {
+        const now = new Date()
+        start = new Date(now.getFullYear(), 0, 1).toISOString().split('T')[0]
+        break
+      }
       case '1Y':
         start = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
         break
       case '2Y':
         start = new Date(Date.now() - 2 * 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
-        break
-      case '3Y':
-        start = new Date(Date.now() - 3 * 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
-        break
-      case '5Y':
-        start = new Date(Date.now() - 5 * 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
         break
       case 'ALL':
         // First tax lot opened on 2024-05-28
@@ -405,7 +409,7 @@ export function Dashboard() {
                   </div>
                   <div className="flex items-center gap-2">
                     <div className="flex gap-1">
-                      {(['1W', '1M', '3M', '6M', '1Y', '2Y', '3Y', '5Y', 'ALL'] as TimeRange[]).map((range) => (
+                      {(['1W', 'MTD', '1M', '3M', '6M', 'YTD', '1Y', '2Y', 'ALL'] as TimeRange[]).map((range) => (
                         <Button
                           key={range}
                           variant={selectedRange === range ? 'default' : 'outline'}
