@@ -1,4 +1,27 @@
 services:
+  traefik:
+    image: traefik:v2.11
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik_data:/letsencrypt
+    restart: unless-stopped
+    command:
+      - --api.dashboard=false
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --certificatesresolvers.mytlschallenge.acme.tlschallenge=true
+      - --certificatesresolvers.mytlschallenge.acme.email=user@srv1211053.hstgr.cloud
+      - --certificatesresolvers.mytlschallenge.acme.storage=/letsencrypt/acme.json
+    networks:
+      - proxy
+
   portfolio-backend:
     build: .
     ports:
@@ -15,10 +38,10 @@ services:
       - traefik.http.routers.portfolio-api.entrypoints=websecure
       - traefik.http.routers.portfolio-api.tls.certresolver=mytlschallenge
       - traefik.http.services.portfolio-api.loadbalancer.server.port=8000
-      - traefik.docker.network=n8n_default
+      - traefik.docker.network=proxy
     networks:
       - default
-      - n8n_default
+      - proxy
 
   portfolio-frontend:
     image: nginx:alpine
@@ -33,11 +56,15 @@ services:
       - traefik.http.routers.portfolio-frontend.entrypoints=websecure
       - traefik.http.routers.portfolio-frontend.tls.certresolver=mytlschallenge
       - traefik.http.services.portfolio-frontend.loadbalancer.server.port=80
-      - traefik.docker.network=n8n_default
+      - traefik.docker.network=proxy
     networks:
       - default
-      - n8n_default
+      - proxy
+
+volumes:
+  traefik_data:
+    external: true
 
 networks:
-  n8n_default:
+  proxy:
     external: true
