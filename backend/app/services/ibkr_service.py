@@ -11,10 +11,23 @@ import logging
 import xml.etree.ElementTree as ET
 
 from ibflex import client, parser, Types, AssetClass
+from ibflex.client import ResponseCodeError, BadResponseError
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+# IBKR Flex "…try again shortly" error codes worth retrying. These are transient
+# (statement still generating / server busy / throttled). ibflex 0.15 only retries
+# 1009/1019/1018 internally, so 1001 in particular surfaces immediately without it.
+# Permanent errors (1010-1017, 1020 token/query/account invalid, etc.) are NOT retried.
+_RETRYABLE_FLEX_CODES = {
+    "1001", "1003", "1004", "1005", "1006", "1007", "1008", "1009", "1018", "1019", "1021"
+}
+# Escalating backoff between attempts (seconds). Worst case ~30s of waiting, kept
+# under typical reverse-proxy read timeouts since POST /api/sync/ibkr is synchronous.
+_FLEX_RETRY_DELAYS = [3, 6, 9, 12]
+_MAX_FLEX_ATTEMPTS = len(_FLEX_RETRY_DELAYS) + 1  # 5 attempts total
 
 
 class IBKRService:
@@ -108,14 +121,42 @@ class IBKRService:
         Raises:
             Exception: If API request fails or parsing errors occur
         """
-        # Run the blocking ibflex download in a thread pool to avoid blocking async event loop
+        # Run the blocking ibflex download in a thread pool to avoid blocking async event loop.
+        # IBKR generates Flex statements asynchronously and frequently returns transient
+        # errors (e.g. Code=1001 "Statement could not be generated at this time") that
+        # ibflex 0.15 does not retry on its own. Retry the whole download with backoff so
+        # both the manual sync endpoint and the scheduled job survive these.
         loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
-            None,
-            client.download,
-            self.token,
-            self.query_id
-        )
+        response = None
+        for attempt in range(_MAX_FLEX_ATTEMPTS):
+            try:
+                response = await loop.run_in_executor(
+                    None,
+                    client.download,
+                    self.token,
+                    self.query_id
+                )
+                break
+            except ResponseCodeError as e:
+                is_retryable = e.code in _RETRYABLE_FLEX_CODES
+                if not is_retryable or attempt == _MAX_FLEX_ATTEMPTS - 1:
+                    raise
+                delay = _FLEX_RETRY_DELAYS[attempt]
+                logger.warning(
+                    f"IBKR Flex transient error Code={e.code} ({e.msg}); "
+                    f"attempt {attempt + 1}/{_MAX_FLEX_ATTEMPTS}, retrying in {delay}s"
+                )
+                await asyncio.sleep(delay)
+            except BadResponseError as e:
+                # Malformed/empty response — typically the server being busy. Treat as transient.
+                if attempt == _MAX_FLEX_ATTEMPTS - 1:
+                    raise
+                delay = _FLEX_RETRY_DELAYS[attempt]
+                logger.warning(
+                    f"IBKR Flex bad/empty response ({e}); "
+                    f"attempt {attempt + 1}/{_MAX_FLEX_ATTEMPTS}, retrying in {delay}s"
+                )
+                await asyncio.sleep(delay)
 
         # Fix non-standard currency codes before parsing
         fixed_response = self._fix_currency_codes(response)

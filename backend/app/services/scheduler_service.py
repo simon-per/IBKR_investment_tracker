@@ -336,6 +336,44 @@ class SchedulerService:
                 logger.error(f"Failed to sync benchmark prices: {e}", exc_info=True)
                 return {"status": "error", "message": str(e)}
 
+    async def sync_dividends(self) -> dict:
+        """
+        Sync dividend ex-dates from Yahoo Finance and compute EUR income.
+
+        Independent of IBKR (yfinance-based); computes against existing tax lots.
+        Cheap to run daily: DividendService applies a 7-day per-security staleness
+        guard that skips already-fetched securities before any network call.
+
+        Returns:
+            Summary of the dividend sync + compute steps
+        """
+        logger.info("Starting scheduled dividend sync...")
+
+        async with AsyncSessionLocal() as db:
+            try:
+                # Imported here to avoid any import cycle at module load
+                from app.services.dividend_service import DividendService
+
+                service = DividendService(db)
+                sync_res = await service.sync_dividend_data()
+                compute_res = await service.compute_dividend_income()
+
+                logger.info(f"Dividend sync completed: {sync_res}; compute: {compute_res}")
+                return {
+                    "status": "success",
+                    "sync": sync_res,
+                    "compute": compute_res,
+                    "timestamp": datetime.now().isoformat()
+                }
+
+            except Exception as e:
+                logger.error(f"Failed to sync dividends: {str(e)}", exc_info=True)
+                return {
+                    "status": "error",
+                    "message": f"Failed to sync dividends: {str(e)}",
+                    "timestamp": datetime.now().isoformat()
+                }
+
     async def full_sync_job(self):
         """
         Full sync job that runs once daily at 08:00 Europe/Berlin.
@@ -343,6 +381,7 @@ class SchedulerService:
         Executes in sequence:
         1. IBKR data sync (securities and tax lots)
         2. Market data sync (prices for all securities)
+        3. Dividend sync (Yahoo Finance ex-dates + EUR income)
         """
         logger.info("=" * 80)
         logger.info("STARTING FULL SYNC JOB (IBKR + MARKET DATA)")
@@ -367,6 +406,11 @@ class SchedulerService:
         else:
             logger.error("IBKR sync failed, skipping market data sync")
 
+        # Step 4: Sync dividends (always — yfinance-based, computes against existing tax lots)
+        logger.info("Syncing dividends...")
+        div_result = await self.sync_dividends()
+        logger.info(f"Dividend Sync Result: {div_result}")
+
         # Track result
         self.last_sync_result = {
             "type": "full_sync",
@@ -374,6 +418,7 @@ class SchedulerService:
             "ibkr_result": ibkr_result,
             "fx_result": fx_result,
             "market_result": market_result,
+            "dividend_result": div_result,
             "status": ibkr_result.get("status", "error"),
         }
 
