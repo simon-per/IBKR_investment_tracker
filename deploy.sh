@@ -45,9 +45,6 @@ echo ""
 echo "--- Rebuilding Docker containers ---"
 cd "$REPO_DIR/backend"
 
-docker network inspect proxy >/dev/null 2>&1 || docker network create proxy
-docker volume inspect traefik_data >/dev/null 2>&1 || docker volume create traefik_data
-
 # Ensure portfolio.db exists as a FILE before the bind mount — otherwise Docker
 # creates a directory at ./portfolio.db and SQLite cannot open it. On a fresh install
 # the app auto-creates the schema; to keep your data, restore the backup db here first.
