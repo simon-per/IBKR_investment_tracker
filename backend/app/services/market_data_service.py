@@ -60,13 +60,30 @@ class MarketDataService:
 
         # Asian Exchanges
         'SEHK': '.HK',       # Hong Kong
-        'TSE': '.T',         # Tokyo
+        'TSE': '.T',         # Tokyo by default; CAD listings use Toronto (.TO)
         'KRX': '.KS',        # Korea
 
         # Other
         'TSX': '.TO',        # Toronto
         'ASX': '.AX',        # Australia
     }
+
+    def _get_exchange_suffix(self, security: Security) -> str:
+        """
+        Resolve an IBKR exchange to a Yahoo Finance suffix.
+
+        IBKR may report Toronto Stock Exchange listings as TSE, which conflicts
+        with Yahoo's Tokyo suffix. Use the security currency to disambiguate.
+        """
+        exchange = security.exchange
+
+        if exchange == 'TSE':
+            if security.currency == 'CAD':
+                return '.TO'
+            if security.currency == 'JPY':
+                return '.T'
+
+        return self.EXCHANGE_SUFFIXES.get(exchange, '')
 
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -102,7 +119,7 @@ class MarketDataService:
             return mapping.yahoo_ticker
 
         # Fall back to exchange suffix logic
-        suffix = self.EXCHANGE_SUFFIXES.get(exchange, '')
+        suffix = self._get_exchange_suffix(security)
         ticker = f"{symbol}{suffix}"
 
         return ticker
@@ -123,7 +140,7 @@ class MarketDataService:
         variations = []
 
         # Primary ticker (using suffix logic)
-        suffix = self.EXCHANGE_SUFFIXES.get(exchange, '')
+        suffix = self._get_exchange_suffix(security)
         primary = f"{symbol}{suffix}"
         variations.append(primary)
 
@@ -133,6 +150,10 @@ class MarketDataService:
                 variations.append(f"{symbol}.DE")
             if '.F' not in primary:
                 variations.append(f"{symbol}.F")
+
+        # IBKR can use TSE for Toronto listings; Yahoo uses .TO.
+        if exchange == 'TSE' and security.currency == 'CAD' and primary != f"{symbol}.TO":
+            variations.append(f"{symbol}.TO")
 
         # Try symbol without suffix (works for some securities)
         if suffix and symbol not in variations:
