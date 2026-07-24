@@ -9,7 +9,8 @@ import {
   ResponsiveContainer,
 } from 'recharts'
 import type { PortfolioValuePoint, BenchmarkValuePoint } from '@/lib/api'
-import { formatCurrency, formatDate } from '@/lib/utils'
+import { formatDate } from '@/lib/utils'
+import { useFormatCurrency, useCurrencySymbol } from '@/lib/CurrencyContext'
 
 export interface BenchmarkDataset {
   data: BenchmarkValuePoint[]
@@ -25,6 +26,8 @@ interface PortfolioValueChartProps {
 }
 
 export function PortfolioValueChart({ data, benchmarks = [], isLoading }: PortfolioValueChartProps) {
+  const formatCurrency = useFormatCurrency()
+  const curSym = useCurrencySymbol()
   const [showCostBasis, setShowCostBasis] = useState(true)
   const [showMarketValue, setShowMarketValue] = useState(true)
   const [showProfit, setShowProfit] = useState(true)
@@ -98,12 +101,12 @@ export function PortfolioValueChart({ data, benchmarks = [], isLoading }: Portfo
 
   // Custom tick formatter for Y axis
   const formatYAxisTick = (value: number) => {
-    if (value === 0) return '€0'
+    if (value === 0) return `${curSym}0`
     const absValue = Math.abs(value)
     if (absValue >= 1000) {
-      return `${value < 0 ? '-' : ''}€${(absValue / 1000).toFixed(0)}k`
+      return `${value < 0 ? '-' : ''}${curSym}${(absValue / 1000).toFixed(0)}k`
     }
-    return `€${value.toFixed(0)}`
+    return `${curSym}${value.toFixed(0)}`
   }
 
   // Calculate dynamic Y axis domain and ticks based on data and visible lines
@@ -276,7 +279,7 @@ export function PortfolioValueChart({ data, benchmarks = [], isLoading }: Portfo
               border: '1px solid hsl(var(--border))',
               borderRadius: '8px',
             }}
-            formatter={(value: number | undefined) => value !== undefined ? formatCurrency(value, 'EUR') : ''}
+            formatter={(value: number | undefined) => value !== undefined ? formatCurrency(value) : ''}
           />
           {showCostBasis && (
             <Line

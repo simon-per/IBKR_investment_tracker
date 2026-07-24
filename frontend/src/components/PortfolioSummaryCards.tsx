@@ -1,7 +1,8 @@
 import { TrendingUp, TrendingDown, Wallet, Target } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import type { PortfolioSummary } from '@/lib/api'
-import { formatCurrency, formatPercent } from '@/lib/utils'
+import { formatPercent } from '@/lib/utils'
+import { useFormatCurrency } from '@/lib/CurrencyContext'
 
 interface PortfolioSummaryCardsProps {
   summary: PortfolioSummary | undefined
@@ -9,6 +10,8 @@ interface PortfolioSummaryCardsProps {
 }
 
 export function PortfolioSummaryCards({ summary, isLoading }: PortfolioSummaryCardsProps) {
+  const formatCurrency = useFormatCurrency()
+
   if (isLoading) {
     return (
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
@@ -48,7 +51,7 @@ export function PortfolioSummaryCards({ summary, isLoading }: PortfolioSummaryCa
         </CardHeader>
         <CardContent>
           <div className="text-2xl font-bold">
-            {formatCurrency(summary.total_market_value_eur, 'EUR')}
+            {formatCurrency(summary.total_market_value_eur)}
           </div>
           <p className="text-xs text-muted-foreground">
             Current portfolio value
@@ -63,7 +66,7 @@ export function PortfolioSummaryCards({ summary, isLoading }: PortfolioSummaryCa
         </CardHeader>
         <CardContent>
           <div className="text-2xl font-bold">
-            {formatCurrency(summary.total_cost_basis_eur, 'EUR')}
+            {formatCurrency(summary.total_cost_basis_eur)}
           </div>
           <p className="text-xs text-muted-foreground">
             Total amount invested
@@ -82,7 +85,7 @@ export function PortfolioSummaryCards({ summary, isLoading }: PortfolioSummaryCa
         </CardHeader>
         <CardContent>
           <div className={`text-2xl font-bold ${isProfit ? 'text-green-600' : 'text-red-600'}`}>
-            {formatCurrency(summary.total_gain_loss_eur, 'EUR')}
+            {formatCurrency(summary.total_gain_loss_eur)}
           </div>
           <p className="text-xs text-muted-foreground">
             {formatPercent(summary.total_gain_loss_percent)}
@@ -101,7 +104,7 @@ export function PortfolioSummaryCards({ summary, isLoading }: PortfolioSummaryCa
         </CardHeader>
         <CardContent>
           <div className={`text-2xl font-bold ${isRealizedProfit ? 'text-green-600' : 'text-red-600'}`}>
-            {formatCurrency(summary.total_realized_gain_loss_eur, 'EUR')}
+            {formatCurrency(summary.total_realized_gain_loss_eur)}
           </div>
           <p className="text-xs text-muted-foreground">
             {summary.num_closed_positions === 0

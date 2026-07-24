@@ -265,6 +265,21 @@ class SchedulerService:
                     except Exception as e:
                         logger.error(f"Failed to fetch rates for {currency}: {e}")
 
+                # Also keep EUR->base rates fresh for the selectable base currencies
+                # (CHF/USD) so switching the display currency is instant.
+                for base in ("CHF", "USD"):
+                    try:
+                        await currency_service._batch_fetch_rates(
+                            from_currency="EUR",
+                            target_date=today,
+                            to_currency=base,
+                            days_back=days_back
+                        )
+                        logger.info(f"Fetched EUR->{base} exchange rates")
+                        total_rates += 1
+                    except Exception as e:
+                        logger.error(f"Failed to fetch EUR->{base} rates: {e}")
+
                 await db.commit()
 
                 result = {

@@ -4,25 +4,29 @@ Shared tax lot reconciliation logic used by both sync.py router and scheduler_se
 
 Instead of deleting ALL tax lots on sync (losing history of sold positions),
 this module:
-1. Snapshots existing open lots
+1. Snapshots existing open lots (grouped per security)
 2. Deletes only open lots
 3. Creates new lots from IBKR data
-4. Detects sold positions by comparing snapshot vs incoming
-5. Creates closed lot records for fully/partially sold positions
+4. Detects sold positions by comparing the total quantity held per security
+   (snapshot vs incoming), NOT by matching individual lot prices
+5. Creates closed lot records (FIFO) for the sold quantity
+
+Why quantity-based reconciliation:
+A genuine sale reduces the number of shares held. A corporate action (e.g. the
+S&P Global -> Mobility Global spinoff) makes IBKR re-allocate the per-share cost
+basis for days afterwards, so ``costBasisPrice`` drifts daily without any sale.
+Matching lots on price therefore produced phantom "closed" lots on every drift
+day. Comparing total quantity per security is immune to that drift.
 """
 import logging
+from collections import defaultdict
 from decimal import Decimal
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Set
 
 from app.services.currency_service import CurrencyService
 from app.repositories.taxlot_repository import TaxLotRepository
 
 logger = logging.getLogger(__name__)
-
-
-def _lot_key(security_id: int, open_date, price_per_unit: Decimal) -> Tuple:
-    """Build a composite key for matching tax lots across syncs."""
-    return (security_id, open_date, round(float(price_per_unit), 2))
 
 
 async def reconcile_taxlots(
@@ -35,7 +39,8 @@ async def reconcile_taxlots(
     """
     Reconcile incoming IBKR tax lots against existing open lots.
 
-    Preserves closed lot history and detects newly sold positions.
+    Preserves closed lot history and detects newly sold positions by comparing
+    the total quantity held per security (snapshot vs incoming).
 
     Args:
         taxlot_repo: TaxLotRepository instance
@@ -55,10 +60,12 @@ async def reconcile_taxlots(
     lots_closed_full = 0
     lots_closed_partial = 0
 
-    # --- Phase A: Snapshot existing open lots ---
+    # --- Phase A: Snapshot existing open lots, grouped per security ---
     # Include securities with open lots in the DB but not in the incoming query
     # (fully-sold securities), so they get reconciled into closed lots.
-    snapshot: Dict[Tuple, Dict] = {}
+    # Grouping into a list (not a price-keyed dict) preserves multiple distinct
+    # lots that share the same (security_id, open_date, price).
+    snapshot: Dict[int, List[Dict]] = defaultdict(list)
     existing_open_lots = await taxlot_repo.get_open_taxlots()
     all_security_ids = set(conid_to_security_id.values()) | {
         lot.security_id for lot in existing_open_lots
@@ -67,8 +74,7 @@ async def reconcile_taxlots(
     for security_id in all_security_ids:
         open_lots = await taxlot_repo.get_by_security_id(security_id, is_open=True)
         for lot in open_lots:
-            key = _lot_key(lot.security_id, lot.open_date, lot.price_per_unit)
-            snapshot[key] = {
+            snapshot[security_id].append({
                 "quantity": lot.quantity,
                 "cost_basis_eur": lot.cost_basis_eur,
                 "cost_basis": lot.cost_basis,
@@ -76,16 +82,17 @@ async def reconcile_taxlots(
                 "security_id": lot.security_id,
                 "open_date": lot.open_date,
                 "price_per_unit": lot.price_per_unit,
-            }
+            })
 
-    logger.info(f"Snapshot: {len(snapshot)} existing open lots")
+    snapshot_lot_count = sum(len(lots) for lots in snapshot.values())
+    logger.info(f"Snapshot: {snapshot_lot_count} existing open lots across {len(snapshot)} securities")
 
     # --- Phase B: Delete existing OPEN lots only (preserves closed lots) ---
     for security_id in all_security_ids:
         await taxlot_repo.delete_open_by_security_id(security_id)
 
-    # --- Phase C: Create new lots from IBKR data, track incoming keys ---
-    incoming_keys: Dict[Tuple, Dict] = {}
+    # --- Phase C: Create new lots from IBKR data, track incoming quantity per security ---
+    incoming_qty: Dict[int, Decimal] = defaultdict(lambda: Decimal("0"))
 
     for lot_data in taxlots_data:
         conid = lot_data["conid"]
@@ -124,67 +131,73 @@ async def reconcile_taxlots(
         await taxlot_repo.create(taxlot_data)
         taxlots_count += 1
         total_cost_basis_eur += cost_basis_eur
+        incoming_qty[security_id] += lot_data["quantity"]
 
-        key = _lot_key(security_id, lot_data["open_date"], lot_data["price_per_unit"])
-        incoming_keys[key] = {
-            "quantity": lot_data["quantity"],
-            "cost_basis_eur": cost_basis_eur,
-        }
-
-    # --- Phase D: Reconcile — detect sold positions ---
+    # --- Phase D: Reconcile — detect sold positions by quantity drop per security ---
+    # A sale is a reduction in shares held. Price drift (corporate actions) does
+    # not change quantity, so it never triggers a closure here. Sold quantity is
+    # attributed FIFO (oldest open_date first) across the snapshot lots.
     close_date = report_to_date
 
-    for key, old in snapshot.items():
-        if key not in incoming_keys:
-            # Fully sold — create closed lot record
-            if close_date:
-                closed_data = {
-                    "security_id": old["security_id"],
-                    "open_date": old["open_date"],
-                    "quantity": old["quantity"],
-                    "cost_basis": old["cost_basis"],
-                    "price_per_unit": old["price_per_unit"],
-                    "currency": old["currency"],
-                    "cost_basis_eur": old["cost_basis_eur"],
-                    "is_open": False,
-                    "close_date": close_date,
-                }
-                await taxlot_repo.create(closed_data)
-                lots_closed_full += 1
-                logger.info(
-                    f"Closed lot: security_id={old['security_id']}, "
-                    f"open_date={old['open_date']}, qty={old['quantity']}, "
-                    f"close_date={close_date}"
-                )
-        else:
-            # Key exists in both — check for partial sell
-            new = incoming_keys[key]
-            if new["quantity"] < old["quantity"]:
-                sold_qty = old["quantity"] - new["quantity"]
-                # Proportional cost_basis_eur for the sold portion
-                proportion = sold_qty / old["quantity"]
-                sold_cost_eur = old["cost_basis_eur"] * proportion
-                sold_cost = old["cost_basis"] * proportion
+    for security_id, snap_lots in snapshot.items():
+        snapshot_qty = sum((lot["quantity"] for lot in snap_lots), Decimal("0"))
+        sold_qty = snapshot_qty - incoming_qty.get(security_id, Decimal("0"))
 
-                if close_date:
-                    closed_data = {
-                        "security_id": old["security_id"],
-                        "open_date": old["open_date"],
-                        "quantity": sold_qty,
-                        "cost_basis": sold_cost,
-                        "price_per_unit": old["price_per_unit"],
-                        "currency": old["currency"],
-                        "cost_basis_eur": sold_cost_eur,
-                        "is_open": False,
-                        "close_date": close_date,
-                    }
-                    await taxlot_repo.create(closed_data)
-                    lots_closed_partial += 1
-                    logger.info(
-                        f"Partial close: security_id={old['security_id']}, "
-                        f"open_date={old['open_date']}, sold_qty={sold_qty}, "
-                        f"remaining_qty={new['quantity']}, close_date={close_date}"
-                    )
+        if sold_qty <= 0:
+            # No net reduction: unchanged holding, a buy, or pure price drift.
+            continue
+
+        if not close_date:
+            # No report date to stamp the closure with — skip creating closed lots.
+            logger.warning(
+                f"Sold {sold_qty} shares of security_id={security_id} but no "
+                f"report_to_date available; skipping closed-lot creation"
+            )
+            continue
+
+        remaining = sold_qty
+        for lot in sorted(snap_lots, key=lambda l: l["open_date"]):
+            if remaining <= 0:
+                break
+            take = min(lot["quantity"], remaining)
+            if take <= 0:
+                continue
+
+            proportion = take / lot["quantity"]
+            sold_cost_eur = lot["cost_basis_eur"] * proportion
+            sold_cost = lot["cost_basis"] * proportion
+
+            closed_data = {
+                "security_id": lot["security_id"],
+                "open_date": lot["open_date"],
+                "quantity": take,
+                "cost_basis": sold_cost,
+                "price_per_unit": lot["price_per_unit"],
+                "currency": lot["currency"],
+                "cost_basis_eur": sold_cost_eur,
+                "is_open": False,
+                "close_date": close_date,
+            }
+            await taxlot_repo.create(closed_data)
+
+            if take == lot["quantity"]:
+                lots_closed_full += 1
+            else:
+                lots_closed_partial += 1
+            logger.info(
+                f"Closed lot (FIFO): security_id={lot['security_id']}, "
+                f"open_date={lot['open_date']}, sold_qty={take}, "
+                f"close_date={close_date}"
+            )
+            remaining -= take
+
+        if remaining > 0:
+            # Snapshot didn't hold enough shares to cover the reported drop.
+            # This shouldn't happen; log it for visibility rather than silently drop.
+            logger.warning(
+                f"Reconcile: security_id={security_id} sold_qty exceeded snapshot "
+                f"by {remaining}; closed lots may understate the sale"
+            )
 
     logger.info(
         f"Reconciliation: {taxlots_count} synced, {lots_closed_full} fully closed, "

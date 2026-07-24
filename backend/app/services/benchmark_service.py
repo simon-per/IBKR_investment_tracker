@@ -230,6 +230,28 @@ class BenchmarkService:
         await self.db.flush()
         return result.rowcount
 
+    async def _apply_base_currency(self, points: List[Dict]) -> List[Dict]:
+        """
+        Project EUR-denominated benchmark points into the configured base currency
+        at each point's date. The timeline cache stays EUR; this is a display-only
+        projection so switching base currency never invalidates the cache.
+        """
+        from app.services.portfolio_service import PortfolioService
+
+        base_fx = await PortfolioService(self.db)._load_base_fx()
+        if base_fx.base_currency == "EUR":
+            return points
+        for p in points:
+            d = date.fromisoformat(p["date"])
+            bv = base_fx.convert(Decimal(str(p["benchmark_value_eur"])), d)
+            cb = base_fx.convert(Decimal(str(p["cost_basis_eur"])), d)
+            gl = bv - cb
+            p["benchmark_value_eur"] = float(round(bv, 2))
+            p["cost_basis_eur"] = float(round(cb, 2))
+            p["gain_loss_eur"] = float(round(gl, 2))
+            p["gain_loss_percent"] = float(round((gl / cb * 100) if cb > 0 else 0, 2))
+        return points
+
     # ── Core benchmark calculation ─────────────────────────────────────
 
     async def _ensure_fx_rates_available(
@@ -302,7 +324,7 @@ class BenchmarkService:
         if not missing_dates:
             # Full cache hit — return cached data sorted by date
             logger.info(f"Benchmark {benchmark_key}: full cache hit ({len(cached_data)} points)")
-            return sorted(cached_data.values(), key=lambda x: x["date"])
+            return await self._apply_base_currency(sorted(cached_data.values(), key=lambda x: x["date"]))
 
         logger.info(
             f"Benchmark {benchmark_key}: {len(cached_data)} cached, "
@@ -476,4 +498,4 @@ class BenchmarkService:
         for point in new_points:
             cached_data[date.fromisoformat(point["date"])] = point
 
-        return sorted(cached_data.values(), key=lambda x: x["date"])
+        return await self._apply_base_currency(sorted(cached_data.values(), key=lambda x: x["date"]))

@@ -1,6 +1,7 @@
 import { useState, useMemo } from 'react'
 import type { Position } from '@/lib/api'
-import { formatCurrency, formatPercent } from '@/lib/utils'
+import { formatPercent } from '@/lib/utils'
+import { useFormatCurrency } from '@/lib/CurrencyContext'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react'
 
@@ -49,6 +50,7 @@ const getRatingScore = (consensus: string | undefined): number => {
 }
 
 export function PositionsList({ positions, isLoading }: PositionsListProps) {
+  const formatCurrency = useFormatCurrency()
   const [sortColumn, setSortColumn] = useState<SortColumn>('market_value_eur')
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc')
 
@@ -263,13 +265,13 @@ export function PositionsList({ positions, isLoading }: PositionsListProps) {
                       {position.quantity.toFixed(2)}
                     </td>
                     <td className="py-3 text-right tabular-nums">
-                      {formatCurrency(position.cost_basis_eur, 'EUR')}
+                      {formatCurrency(position.cost_basis_eur)}
                     </td>
                     <td className="py-3 text-right tabular-nums">
-                      {formatCurrency(position.market_value_eur, 'EUR')}
+                      {formatCurrency(position.market_value_eur)}
                     </td>
                     <td className={`py-3 text-right tabular-nums ${isProfit ? 'text-green-600' : 'text-red-600'}`}>
-                      {formatCurrency(position.gain_loss_eur, 'EUR')}
+                      {formatCurrency(position.gain_loss_eur)}
                     </td>
                     <td className={`py-3 text-right tabular-nums ${isProfit ? 'text-green-600' : 'text-red-600'}`}>
                       {formatPercent(position.gain_loss_percent)}

@@ -37,6 +37,19 @@ async def lifespan(app: FastAPI):
             logger.info(f"Warning: Could not initialize ticker mappings: {str(e)}")
             await db.rollback()
 
+    # Seed the default base (display) currency
+    from app.repositories.app_settings_repository import AppSettingsRepository
+
+    async with AsyncSessionLocal() as db:
+        try:
+            settings_repo = AppSettingsRepository(db)
+            if await settings_repo.ensure_default_base_currency():
+                await db.commit()
+                logger.info("Seeded default base currency (EUR)")
+        except Exception as e:
+            logger.info(f"Warning: Could not seed base currency: {str(e)}")
+            await db.rollback()
+
     # Start the scheduler for daily automatic syncs
     from app.services.scheduler_service import get_scheduler
     scheduler = get_scheduler()
@@ -85,9 +98,10 @@ async def health_check():
 
 
 # Import and include routers
-from app.routers import sync, portfolio, market_data, analyst_ratings, allocation, scheduler, fundamentals, watchlist, dividends
+from app.routers import sync, portfolio, market_data, analyst_ratings, allocation, scheduler, fundamentals, watchlist, dividends, settings as settings_router
 
 app.include_router(sync.router, prefix="/api/sync", tags=["sync"])
+app.include_router(settings_router.router, prefix="/api/settings", tags=["settings"])
 app.include_router(portfolio.router, prefix="/api/portfolio", tags=["portfolio"])
 app.include_router(market_data.router, prefix="/api/market-data", tags=["market-data"])
 app.include_router(analyst_ratings.router, prefix="/api/analyst-ratings", tags=["analyst-ratings"])

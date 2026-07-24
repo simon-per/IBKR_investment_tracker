@@ -174,8 +174,12 @@ class DividendService:
         return {'computed': computed, 'errors': errors, 'message': f'Computed {computed} dividend payments'}
 
     async def get_dividend_summary(self) -> Dict:
-        """Aggregate computed dividends into a monthly summary."""
+        """Aggregate computed dividends into a monthly summary (in base currency)."""
         payments = await self.repo.get_computed_dividends()
+
+        # Project EUR amounts into the configured base currency at each ex_date.
+        from app.services.portfolio_service import PortfolioService
+        base_fx = await PortfolioService(self.db)._load_base_fx()
 
         monthly: Dict[str, Decimal] = defaultdict(Decimal)
         total_eur = Decimal("0")
@@ -185,7 +189,7 @@ class DividendService:
 
         for p in payments:
             month_key = p.ex_date.strftime("%Y-%m")
-            amount = p.gross_amount_eur or Decimal("0")
+            amount = base_fx.convert(p.gross_amount_eur or Decimal("0"), p.ex_date)
             monthly[month_key] += amount
             total_eur += amount
 
@@ -210,4 +214,5 @@ class DividendService:
             "ytd_eur": round(float(ytd_eur), 2),
             "total_eur": round(float(total_eur), 2),
             "last_updated": last_updated,
+            "base_currency": base_fx.base_currency,
         }

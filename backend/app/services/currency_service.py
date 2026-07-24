@@ -299,3 +299,23 @@ class CurrencyService:
 
         rate = await self.get_exchange_rate(from_currency, target_date)
         return amount * rate
+
+    async def convert(
+        self,
+        amount: Decimal,
+        from_currency: str,
+        to_currency: str,
+        target_date: date,
+    ) -> Decimal:
+        """
+        Convert an amount between arbitrary supported currencies on a given date.
+
+        Frankfurter is EUR-based but supports arbitrary from/to pairs, and the
+        exchange-rate cache is keyed by (from, to), so this works for e.g.
+        EUR->CHF, EUR->USD as well as the usual X->EUR.
+        """
+        if from_currency == to_currency:
+            return amount
+
+        rate = await self.get_exchange_rate(from_currency, target_date, to_currency)
+        return amount * rate

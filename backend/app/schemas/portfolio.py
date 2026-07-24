@@ -57,10 +57,11 @@ class PositionResponse(BaseModel):
 class PortfolioValuePoint(BaseModel):
     """Single data point for portfolio value over time"""
     date: str = Field(..., description="Date in ISO format (YYYY-MM-DD)")
-    cost_basis_eur: float = Field(..., description="Total amount invested up to this date")
-    market_value_eur: float = Field(..., description="Current market value on this date")
-    gain_loss_eur: float = Field(..., description="Unrealized gain/loss")
+    cost_basis_eur: float = Field(..., description="Total amount invested up to this date (in base_currency)")
+    market_value_eur: float = Field(..., description="Current market value on this date (in base_currency)")
+    gain_loss_eur: float = Field(..., description="Unrealized gain/loss (in base_currency)")
     gain_loss_percent: float = Field(..., description="Percentage gain/loss")
+    base_currency: str = Field("EUR", description="Currency the *_eur values are expressed in")
 
     class Config:
         from_attributes = True
@@ -138,6 +139,7 @@ class PortfolioSummary(BaseModel):
     total_gain_loss_percent: float = Field(..., description="Total percentage gain/loss")
     num_positions: int = Field(..., description="Number of unique securities held")
     date: Optional[str] = Field(None, description="Date of the summary")
+    base_currency: str = Field("EUR", description="Currency the *_eur values are expressed in")
     total_realized_gain_loss_eur: float = Field(0.0, description="Realized gain/loss from closed positions")
     total_realized_proceeds_eur: float = Field(0.0, description="Approximate proceeds from closed positions (qty × close-date price × FX)")
     total_realized_cost_basis_eur: float = Field(0.0, description="Cost basis of closed positions")

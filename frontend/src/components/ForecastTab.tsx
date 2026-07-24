@@ -3,6 +3,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Area, AreaChart } from 'recharts'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '@/lib/api'
+import { useCurrencySymbol } from '@/lib/CurrencyContext'
 
 const STORAGE_KEYS = {
   monthlyContribution: 'forecast.monthlyContribution',
@@ -20,6 +21,7 @@ function readNumber(key: string, fallback: number, min: number, max: number): nu
 }
 
 export function ForecastTab() {
+  const curSym = useCurrencySymbol()
   const [monthlyContribution, setMonthlyContribution] = useState(() => readNumber(STORAGE_KEYS.monthlyContribution, 1000, 0, 1000000))
   const [expectedReturn, setExpectedReturn] = useState(() => readNumber(STORAGE_KEYS.expectedReturn, 8, 0, 30))
   const [startFromZero, setStartFromZero] = useState(() => {
@@ -301,7 +303,7 @@ export function ForecastTab() {
                       : 'bg-background hover:bg-accent hover:text-accent-foreground'
                   }`}
                 >
-                  Current (€{Math.round(summary?.total_market_value_eur || 0).toLocaleString()})
+                  Current ({curSym}{Math.round(summary?.total_market_value_eur || 0).toLocaleString()})
                 </button>
                 <button
                   onClick={() => setStartFromZero(true)}
@@ -311,7 +313,7 @@ export function ForecastTab() {
                       : 'bg-background hover:bg-accent hover:text-accent-foreground'
                   }`}
                 >
-                  €0
+                  {curSym}0
                 </button>
               </div>
             </div>
@@ -324,7 +326,7 @@ export function ForecastTab() {
         <CardHeader>
           <CardTitle>Projected Portfolio Growth ({forecastYears} {forecastYears === 1 ? 'Year' : 'Years'})</CardTitle>
           <CardDescription>
-            Based on {expectedReturn}% annual return and €{monthlyContribution.toLocaleString()} monthly contribution
+            Based on {expectedReturn}% annual return and {curSym}{monthlyContribution.toLocaleString()} monthly contribution
           </CardDescription>
         </CardHeader>
         <CardContent className="pt-6">
@@ -339,12 +341,12 @@ export function ForecastTab() {
               <YAxis
                 domain={yAxisConfig.domain}
                 ticks={yAxisConfig.ticks}
-                tickFormatter={(value) => `€${(value / 1000).toFixed(0)}k`}
+                tickFormatter={(value) => `${curSym}${(value / 1000).toFixed(0)}k`}
                 tick={{ fontSize: 12 }}
                 width={80}
               />
               <Tooltip
-                formatter={(value: number | undefined) => value != null ? `€${value.toLocaleString()}` : '—'}
+                formatter={(value: number | undefined) => value != null ? `${curSym}${value.toLocaleString()}` : '—'}
                 labelFormatter={(label) => `Year ${label}`}
               />
               <Area
@@ -390,13 +392,13 @@ export function ForecastTab() {
                   <tr key={proj.year} className="border-b">
                     <td className="py-3 font-medium">{proj.year} {proj.year === 1 ? 'Year' : 'Years'}</td>
                     <td className="py-3 text-right tabular-nums font-semibold text-green-600 dark:text-green-400">
-                      €{proj.futureValue.toLocaleString()}
+                      {curSym}{proj.futureValue.toLocaleString()}
                     </td>
                     <td className="py-3 text-right tabular-nums">
-                      €{proj.totalContributions.toLocaleString()}
+                      {curSym}{proj.totalContributions.toLocaleString()}
                     </td>
                     <td className="py-3 text-right tabular-nums text-blue-600 dark:text-blue-400">
-                      €{proj.investmentGains.toLocaleString()}
+                      {curSym}{proj.investmentGains.toLocaleString()}
                     </td>
                   </tr>
                 ))}
@@ -422,7 +424,7 @@ export function ForecastTab() {
                 </div>
                 <div className="text-right">
                   <div className="text-2xl font-bold text-green-600 dark:text-green-400">
-                    €{scenario.value.toLocaleString()}
+                    {curSym}{scenario.value.toLocaleString()}
                   </div>
                 </div>
               </div>

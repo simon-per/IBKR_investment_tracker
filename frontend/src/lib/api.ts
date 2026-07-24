@@ -4,21 +4,30 @@
 
 const API_BASE_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
 
+export interface AppSettings {
+  base_currency: string;
+  supported_currencies: string[];
+}
+
 export interface PortfolioValuePoint {
   date: string;
+  // NOTE: *_eur fields carry values in the selected base_currency (see base_currency).
   cost_basis_eur: number;
   market_value_eur: number;
   gain_loss_eur: number;
   gain_loss_percent: number;
+  base_currency?: string;
 }
 
 export interface PortfolioSummary {
+  // NOTE: *_eur fields carry values in the selected base_currency (see base_currency).
   total_cost_basis_eur: number;
   total_market_value_eur: number;
   total_gain_loss_eur: number;
   total_gain_loss_percent: number;
   num_positions: number;
   date?: string;
+  base_currency?: string;
   total_realized_gain_loss_eur: number;
   total_realized_proceeds_eur: number;
   total_realized_cost_basis_eur: number;
@@ -300,6 +309,18 @@ class ApiClient {
       }
       throw new Error('Network request failed');
     }
+  }
+
+  // Settings endpoints
+  async getSettings(): Promise<AppSettings> {
+    return this.request<AppSettings>('/api/settings');
+  }
+
+  async updateBaseCurrency(baseCurrency: string): Promise<AppSettings> {
+    return this.request<AppSettings>('/api/settings/base-currency', {
+      method: 'PUT',
+      body: JSON.stringify({ base_currency: baseCurrency }),
+    });
   }
 
   // Portfolio endpoints

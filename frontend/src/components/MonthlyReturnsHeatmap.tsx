@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { ChevronRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { useCurrencySymbol } from '@/lib/CurrencyContext'
 import type { PortfolioValuePoint } from '@/lib/api'
 
 interface MonthlyReturnsHeatmapProps {
@@ -79,6 +80,7 @@ function getReturnColor(pct: number): string {
 }
 
 export function MonthlyReturnsHeatmap({ data, isLoading }: MonthlyReturnsHeatmapProps) {
+  const curSym = useCurrencySymbol()
   const [open, setOpen] = useState(false)
 
   const yearRows = useMemo(() => {
@@ -211,7 +213,7 @@ export function MonthlyReturnsHeatmap({ data, isLoading }: MonthlyReturnsHeatmap
                                 'rounded px-1.5 py-1 text-center text-xs font-medium',
                                 getReturnColor(m.returnPercent)
                               )}
-                              title={`${MONTH_LABELS[i]} ${row.year}: ${m.returnPercent >= 0 ? '+' : ''}${m.returnPercent.toFixed(2)}% (€${m.startValue.toLocaleString('en-US', { maximumFractionDigits: 0 })} → €${m.endValue.toLocaleString('en-US', { maximumFractionDigits: 0 })})${m.newInvestment > 0 ? ` · +€${m.newInvestment.toLocaleString('en-US', { maximumFractionDigits: 0 })} invested` : ''}`}
+                              title={`${MONTH_LABELS[i]} ${row.year}: ${m.returnPercent >= 0 ? '+' : ''}${m.returnPercent.toFixed(2)}% (${curSym}${m.startValue.toLocaleString('en-US', { maximumFractionDigits: 0 })} → ${curSym}${m.endValue.toLocaleString('en-US', { maximumFractionDigits: 0 })})${m.newInvestment > 0 ? ` · +${curSym}${m.newInvestment.toLocaleString('en-US', { maximumFractionDigits: 0 })} invested` : ''}`}
                             >
                               {m.returnPercent >= 0 ? '+' : ''}{m.returnPercent.toFixed(1)}%
                             </div>
@@ -227,7 +229,7 @@ export function MonthlyReturnsHeatmap({ data, isLoading }: MonthlyReturnsHeatmap
                               'rounded px-1.5 py-1 text-center text-xs font-medium',
                               getReturnColor(row.ytd.returnPercent)
                             )}
-                            title={`YTD ${row.year}: ${row.ytd.returnPercent >= 0 ? '+' : ''}${row.ytd.returnPercent.toFixed(2)}% (€${row.ytd.startValue.toLocaleString('en-US', { maximumFractionDigits: 0 })} → €${row.ytd.endValue.toLocaleString('en-US', { maximumFractionDigits: 0 })})${row.ytd.newInvestment > 0 ? ` · +€${row.ytd.newInvestment.toLocaleString('en-US', { maximumFractionDigits: 0 })} invested` : ''}`}
+                            title={`YTD ${row.year}: ${row.ytd.returnPercent >= 0 ? '+' : ''}${row.ytd.returnPercent.toFixed(2)}% (${curSym}${row.ytd.startValue.toLocaleString('en-US', { maximumFractionDigits: 0 })} → ${curSym}${row.ytd.endValue.toLocaleString('en-US', { maximumFractionDigits: 0 })})${row.ytd.newInvestment > 0 ? ` · +${curSym}${row.ytd.newInvestment.toLocaleString('en-US', { maximumFractionDigits: 0 })} invested` : ''}`}
                           >
                             {row.ytd.returnPercent >= 0 ? '+' : ''}{row.ytd.returnPercent.toFixed(1)}%
                           </div>

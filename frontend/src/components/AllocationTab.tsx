@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Treemap, ResponsiveContainer, Tooltip } from 'recharts'
 import { api } from '@/lib/api'
 import type { AllocationCategory } from '@/lib/api'
-import { formatCurrency } from '@/lib/utils'
+import { useFormatCurrency } from '@/lib/CurrencyContext'
 import { RefreshCw, X } from 'lucide-react'
 
 // Semantic colors for sectors
@@ -209,6 +209,7 @@ function DrillDownPanel({
   category: AllocationCategory
   onClose: () => void
 }) {
+  const formatCurrency = useFormatCurrency()
   return (
     <Card className="mt-4 border-primary/20">
       <CardHeader className="pb-3">
@@ -216,7 +217,7 @@ function DrillDownPanel({
           <div>
             <CardTitle className="text-lg">{categoryName}</CardTitle>
             <CardDescription>
-              {category.percentage.toFixed(1)}% of portfolio · {formatCurrency(category.market_value_eur, 'EUR')}
+              {category.percentage.toFixed(1)}% of portfolio · {formatCurrency(category.market_value_eur)}
             </CardDescription>
           </div>
           <Button variant="ghost" size="icon" onClick={onClose}>
@@ -232,7 +233,7 @@ function DrillDownPanel({
                 <th className="text-left py-2 font-medium">Symbol</th>
                 <th className="text-left py-2 font-medium">Description</th>
                 <th className="text-right py-2 font-medium">Weight</th>
-                <th className="text-right py-2 font-medium">Value (EUR)</th>
+                <th className="text-right py-2 font-medium">Value</th>
                 <th className="text-right py-2 font-medium">Type</th>
               </tr>
             </thead>
@@ -242,7 +243,7 @@ function DrillDownPanel({
                   <td className="py-2 font-medium">{pos.symbol}</td>
                   <td className="py-2 text-muted-foreground max-w-[200px] truncate">{pos.description}</td>
                   <td className="py-2 text-right tabular-nums">{pos.weight.toFixed(1)}%</td>
-                  <td className="py-2 text-right tabular-nums">{formatCurrency(pos.market_value_eur, 'EUR')}</td>
+                  <td className="py-2 text-right tabular-nums">{formatCurrency(pos.market_value_eur)}</td>
                   <td className="py-2 text-right">
                     {pos.is_etf_contribution && (
                       <span className="text-xs bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 px-1.5 py-0.5 rounded">
@@ -274,6 +275,7 @@ function AllocationTreemap({
   colorMap: Record<string, string>
   isLoading: boolean
 }) {
+  const formatCurrency = useFormatCurrency()
   const [selected, setSelected] = useState<string | null>(null)
 
   // Reset selection when allocation data changes
@@ -349,7 +351,7 @@ function AllocationTreemap({
                       <div className="bg-card border border-border rounded-lg px-3 py-2 shadow-lg text-sm">
                         <p className="font-semibold">{d.name}</p>
                         <p className="text-muted-foreground">{d.percentage?.toFixed(1)}%</p>
-                        <p className="text-muted-foreground">{formatCurrency(d.market_value_eur, 'EUR')}</p>
+                        <p className="text-muted-foreground">{formatCurrency(d.market_value_eur)}</p>
                       </div>
                     )
                   }}

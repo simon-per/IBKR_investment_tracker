@@ -4,6 +4,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { ChevronRight, Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { api } from '@/lib/api'
+import { useCurrencySymbol } from '@/lib/CurrencyContext'
 import type { DividendSummaryResponse } from '@/lib/api'
 
 const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
@@ -30,6 +31,7 @@ function formatEur(amount: number): string {
 }
 
 export function DividendSummary() {
+  const curSym = useCurrencySymbol()
   const [open, setOpen] = useState(false)
 
   const { data, isLoading } = useQuery<DividendSummaryResponse>({
@@ -79,14 +81,14 @@ export function DividendSummary() {
     if (data.ytd_eur > 0) {
       parts.push(
         <span key="ytd">
-          YTD: <span className="text-teal-600 dark:text-teal-400">{'\u20AC'}{formatEur(data.ytd_eur)}</span>
+          YTD: <span className="text-teal-600 dark:text-teal-400">{curSym}{formatEur(data.ytd_eur)}</span>
         </span>
       )
     }
     if (data.total_eur > 0) {
       parts.push(
         <span key="total">
-          {parts.length > 0 ? ' \u00B7 ' : ''}Total: <span className="text-teal-600 dark:text-teal-400">{'\u20AC'}{formatEur(data.total_eur)}</span>
+          {parts.length > 0 ? ' \u00B7 ' : ''}Total: <span className="text-teal-600 dark:text-teal-400">{curSym}{formatEur(data.total_eur)}</span>
         </span>
       )
     }
@@ -152,9 +154,9 @@ export function DividendSummary() {
                                   'rounded px-1.5 py-1 text-center text-xs font-medium',
                                   getAmountColor(amount, maxMonthlyAmount)
                                 )}
-                                title={`${MONTH_LABELS[i]} ${row.year}: \u20AC${formatEur(amount)}`}
+                                title={`${MONTH_LABELS[i]} ${row.year}: ${curSym}${formatEur(amount)}`}
                               >
-                                {'\u20AC'}{amount < 10 ? amount.toFixed(2) : amount.toFixed(0)}
+                                {curSym}{amount < 10 ? amount.toFixed(2) : amount.toFixed(0)}
                               </div>
                             ) : (
                               <div className="text-center text-xs text-muted-foreground py-1">{'\u2013'}</div>
@@ -168,9 +170,9 @@ export function DividendSummary() {
                                 'rounded px-1.5 py-1 text-center text-xs font-medium',
                                 getAmountColor(row.yearTotal, maxMonthlyAmount)
                               )}
-                              title={`Total ${row.year}: \u20AC${formatEur(row.yearTotal)}`}
+                              title={`Total ${row.year}: ${curSym}${formatEur(row.yearTotal)}`}
                             >
-                              {'\u20AC'}{formatEur(row.yearTotal)}
+                              {curSym}{formatEur(row.yearTotal)}
                             </div>
                           ) : (
                             <div className="text-center text-xs text-muted-foreground py-1">{'\u2013'}</div>

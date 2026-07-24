@@ -2,6 +2,7 @@ import { Component, type ReactNode } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Dashboard } from './components/Dashboard'
 import { ThemeProvider } from './components/ThemeProvider'
+import { CurrencyProvider } from './lib/CurrencyContext'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -56,11 +57,13 @@ function App() {
   return (
     <ThemeProvider defaultTheme="light" storageKey="ibkr-theme">
       <QueryClientProvider client={queryClient}>
-        <ErrorBoundary>
-          <div className="min-h-screen bg-background">
-            <Dashboard />
-          </div>
-        </ErrorBoundary>
+        <CurrencyProvider>
+          <ErrorBoundary>
+            <div className="min-h-screen bg-background">
+              <Dashboard />
+            </div>
+          </ErrorBoundary>
+        </CurrencyProvider>
       </QueryClientProvider>
     </ThemeProvider>
   )

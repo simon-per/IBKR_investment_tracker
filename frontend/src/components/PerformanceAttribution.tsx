@@ -12,7 +12,7 @@ import {
 } from 'recharts'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { ChevronRight } from 'lucide-react'
-import { formatCurrency } from '@/lib/utils'
+import { useFormatCurrency } from '@/lib/CurrencyContext'
 import type { PerformanceAttributionResponse } from '@/lib/api'
 
 interface PerformanceAttributionProps {
@@ -21,6 +21,7 @@ interface PerformanceAttributionProps {
 }
 
 export function PerformanceAttribution({ data, isLoading }: PerformanceAttributionProps) {
+  const formatCurrency = useFormatCurrency()
   const [open, setOpen] = useState(false)
 
   // Build summary text for the header
@@ -30,7 +31,7 @@ export function PerformanceAttribution({ data, isLoading }: PerformanceAttributi
       <>
         Total P&L:{' '}
         <span className={data.total_pnl_eur >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}>
-          {data.total_pnl_eur >= 0 ? '+' : ''}{formatCurrency(data.total_pnl_eur, 'EUR')}
+          {data.total_pnl_eur >= 0 ? '+' : ''}{formatCurrency(data.total_pnl_eur)}
         </span>
       </>
     )
@@ -114,6 +115,7 @@ export function PerformanceAttribution({ data, isLoading }: PerformanceAttributi
 }
 
 function AttributionTooltip({ active, payload }: { active?: boolean; payload?: Array<{ payload: PerformanceAttributionResponse['attributions'][0] }> }) {
+  const formatCurrency = useFormatCurrency()
   if (!active || !payload || payload.length === 0) return null
 
   const d = payload[0].payload
@@ -127,7 +129,7 @@ function AttributionTooltip({ active, payload }: { active?: boolean; payload?: A
         <p>
           <span className="text-muted-foreground">P&L: </span>
           <span className={`font-medium ${isPositive ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
-            {isPositive ? '+' : ''}{formatCurrency(d.pnl_contribution_eur, 'EUR')}
+            {isPositive ? '+' : ''}{formatCurrency(d.pnl_contribution_eur)}
           </span>
         </p>
         <p>
@@ -141,7 +143,7 @@ function AttributionTooltip({ active, payload }: { active?: boolean; payload?: A
         {d.new_investment_eur > 0 && (
           <p>
             <span className="text-muted-foreground">New investment: </span>
-            <span>{formatCurrency(d.new_investment_eur, 'EUR')}</span>
+            <span>{formatCurrency(d.new_investment_eur)}</span>
           </p>
         )}
       </div>

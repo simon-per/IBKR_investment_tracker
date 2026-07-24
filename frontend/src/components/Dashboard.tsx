@@ -18,12 +18,15 @@ import { FundamentalsTab } from './FundamentalsTab'
 import { WatchlistTab } from './WatchlistTab'
 import { ThemeToggle } from './ThemeToggle'
 import { BenchmarkPicker, BENCHMARK_COLORS } from './BenchmarkPicker'
+import { useBaseCurrency, useCurrencySymbol } from '@/lib/CurrencyContext'
 import { RefreshCw, Download, Clock } from 'lucide-react'
 
 type TimeRange = '1W' | 'MTD' | '1M' | '3M' | '6M' | 'YTD' | '1Y' | '2Y' | 'ALL'
 
 export function Dashboard() {
   const queryClient = useQueryClient()
+  const { baseCurrency, supportedCurrencies, setBaseCurrency, isUpdating: currencyUpdating } = useBaseCurrency()
+  const curSym = useCurrencySymbol()
   const [selectedRange, setSelectedRange] = useState<TimeRange>('1Y')
   const [selectedBenchmarks, setSelectedBenchmarks] = useState<string[]>(() => {
     try {
@@ -325,7 +328,18 @@ export function Dashboard() {
                 </div>
               )}
             </div>
-            <div className="flex gap-2">
+            <div className="flex gap-2 items-center">
+              <select
+                value={baseCurrency}
+                onChange={(e) => setBaseCurrency(e.target.value)}
+                disabled={currencyUpdating}
+                title="Base currency"
+                className="h-9 rounded-md border border-input bg-background px-3 text-sm font-medium disabled:opacity-50"
+              >
+                {supportedCurrencies.map((c) => (
+                  <option key={c} value={c}>{c}</option>
+                ))}
+              </select>
               <ThemeToggle />
               <Button
                 onClick={handleSync}
@@ -404,7 +418,7 @@ export function Dashboard() {
                   <div>
                     <CardTitle>Portfolio Value Over Time</CardTitle>
                     <CardDescription>
-                      Cost basis (invested) vs Market value (current worth) in EUR
+                      Cost basis (invested) vs Market value (current worth) in {baseCurrency}
                     </CardDescription>
                   </div>
                   <div className="flex items-center gap-2">
@@ -432,7 +446,7 @@ export function Dashboard() {
                       <div className="flex items-center gap-2">
                         <span className="text-muted-foreground">Period Performance:</span>
                         <span className={`font-semibold ${performanceMetrics.absoluteChange >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
-                          {performanceMetrics.absoluteChange >= 0 ? '+' : ''}€{performanceMetrics.absoluteChange.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          {performanceMetrics.absoluteChange >= 0 ? '+' : ''}{curSym}{performanceMetrics.absoluteChange.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                         </span>
                         <span className={`font-semibold ${performanceMetrics.percentageChange >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
                           ({performanceMetrics.percentageChange >= 0 ? '+' : ''}{performanceMetrics.percentageChange.toFixed(2)}%)
@@ -443,7 +457,7 @@ export function Dashboard() {
                       <div className="flex items-center gap-2">
                         <span className="text-muted-foreground">Period Gain:</span>
                         <span className={`font-semibold ${performanceMetrics.periodGain >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
-                          {performanceMetrics.periodGain >= 0 ? '+' : ''}€{performanceMetrics.periodGain.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          {performanceMetrics.periodGain >= 0 ? '+' : ''}{curSym}{performanceMetrics.periodGain.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                         </span>
                         <span className={`font-semibold ${performanceMetrics.periodGainPercent >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
                           ({performanceMetrics.periodGainPercent >= 0 ? '+' : ''}{performanceMetrics.periodGainPercent.toFixed(2)}%)

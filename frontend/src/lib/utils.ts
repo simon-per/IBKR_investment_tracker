@@ -14,6 +14,17 @@ export function formatCurrency(value: number, currency: string = "EUR"): string 
   }).format(value)
 }
 
+const CURRENCY_SYMBOLS: Record<string, string> = {
+  EUR: "€",
+  USD: "$",
+  CHF: "CHF ",
+}
+
+// Short symbol/prefix for a currency, for use in inline `${symbol}${value}` labels.
+export function currencySymbol(currency: string = "EUR"): string {
+  return CURRENCY_SYMBOLS[currency] ?? `${currency} `
+}
+
 export function formatPercent(value: number): string {
   return new Intl.NumberFormat("en-US", {
     style: "percent",
