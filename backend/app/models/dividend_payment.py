@@ -26,6 +26,12 @@ class DividendPayment(Base):
     currency: Mapped[Optional[str]] = mapped_column(String(3), nullable=True)
     shares_held: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 6), nullable=True)
     gross_amount_eur: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 6), nullable=True)
+    # Real withholding tax and net (gross - withholding), populated from IBKR
+    # cash transactions. Null for legacy yfinance-estimated rows.
+    withholding_tax_eur: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 6), nullable=True)
+    net_amount_eur: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 6), nullable=True)
+    pay_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    source: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # 'ibkr' | 'yfinance_estimate'
     last_computed: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=func.now(), nullable=False)
 
@@ -34,7 +40,10 @@ class DividendPayment(Base):
 
     __table_args__ = (
         UniqueConstraint('security_id', 'ex_date', name='uix_dividend_security_exdate'),
-        Index('ix_dividend_payments_security_id', 'security_id'),
+        # NOTE: security_id already has a column-level index (index=True above);
+        # do not re-declare ix_dividend_payments_security_id here or create_all
+        # emits a duplicate CREATE INDEX. The ex_date index has no column-level
+        # counterpart, so it stays.
         Index('ix_dividend_payments_ex_date', 'ex_date'),
     )
 

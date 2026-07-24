@@ -51,11 +51,16 @@ class DividendRepository:
             return payment
 
     async def get_computed_dividends(
-        self, start_date: Optional[date] = None, end_date: Optional[date] = None
+        self,
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
+        source: Optional[str] = None,
     ) -> List[DividendPayment]:
         stmt = select(DividendPayment).where(
             DividendPayment.gross_amount_eur.isnot(None)
         )
+        if source is not None:
+            stmt = stmt.where(DividendPayment.source == source)
         if start_date:
             stmt = stmt.where(DividendPayment.ex_date >= start_date)
         if end_date:
@@ -63,6 +68,13 @@ class DividendRepository:
         stmt = stmt.order_by(DividendPayment.ex_date.asc())
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
+
+    async def has_ibkr_dividends(self) -> bool:
+        """True if any authoritative IBKR-sourced dividend rows exist."""
+        result = await self.session.execute(
+            select(func.count(DividendPayment.id)).where(DividendPayment.source == "ibkr")
+        )
+        return int(result.scalar() or 0) > 0
 
     async def get_uncomputed(self) -> List[DividendPayment]:
         result = await self.session.execute(

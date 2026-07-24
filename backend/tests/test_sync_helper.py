@@ -18,8 +18,12 @@ from app.database import Base
 import app.models  # noqa: F401  register all mappers for relationship config
 from app.models.security import Security
 from app.models.taxlot import TaxLot
+from app.models.trade import Trade
+from app.models.corporate_action import CorporateAction
 from app.repositories.taxlot_repository import TaxLotRepository
-from app.services.sync_helper import reconcile_taxlots
+from app.repositories.trade_repository import TradeRepository
+from app.repositories.corporate_action_repository import CorporateActionRepository
+from app.services.sync_helper import reconcile_taxlots, EmptyStatementError
 
 
 class FakeCurrencyService:
@@ -43,6 +47,31 @@ async def _make_repo():
         await conn.run_sync(lambda c: Base.metadata.create_all(c, tables=tables))
     session = AsyncSession(engine, expire_on_commit=False)
     return engine, session, TaxLotRepository(session)
+
+
+async def _make_repos_with_txns():
+    """Like _make_repo but also creates trades + corporate_actions tables and a Security row."""
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    tables = [Security.__table__, TaxLot.__table__, Trade.__table__, CorporateAction.__table__]
+    async with engine.begin() as conn:
+        await conn.run_sync(lambda c: Base.metadata.create_all(c, tables=tables))
+    session = AsyncSession(engine, expire_on_commit=False)
+    # Seed a security (id=1, conid=100) so reconcile can resolve security_id -> conid.
+    session.add(Security(
+        id=1, isin="US0000000001", symbol="AAA", description="Test Co",
+        currency="USD", conid=100, asset_category="STK", exchange="NASDAQ",
+    ))
+    await session.flush()
+    return (
+        engine, session,
+        TaxLotRepository(session),
+        TradeRepository(session),
+        CorporateActionRepository(session),
+    )
 
 
 async def _seed_open_lot(repo, security_id, open_date, quantity, price, currency="USD"):
@@ -105,17 +134,23 @@ async def test_price_drift_same_quantity_creates_no_closed_lots():
 
 
 @pytest.mark.asyncio
-async def test_full_sale_closes_all_shares():
-    """Security absent from incoming -> whole position closed."""
+async def test_full_sale_of_one_security_closes_it():
+    """One security fully sold (absent from a non-empty incoming set) -> its whole position closes."""
     engine, session, repo = await _make_repo()
     try:
+        # Two securities held; security 1 is fully sold, security 2 still reported.
         await _seed_open_lot(repo, security_id=1, open_date=date(2025, 11, 6),
                              quantity=3, price=236.38)
+        await _seed_open_lot(repo, security_id=2, open_date=date(2025, 11, 6),
+                             quantity=5, price=100.00)
+
+        # Incoming still contains security 2 (conid "200"), so the statement is NOT empty.
+        incoming = [_incoming("200", date(2025, 11, 6), 5, 100.00)]
 
         result = await reconcile_taxlots(
             repo, FakeCurrencyService(),
-            conid_to_security_id={},   # security no longer reported by IBKR
-            taxlots_data=[],
+            conid_to_security_id={"200": 2},  # security 1 no longer reported by IBKR
+            taxlots_data=incoming,
             report_to_date=date(2026, 4, 17),
         )
 
@@ -126,6 +161,34 @@ async def test_full_sale_closes_all_shares():
         assert closed[0].quantity == Decimal("3")
         assert closed[0].close_date == date(2026, 4, 17)
         assert len(await repo.get_by_security_id(1, is_open=True)) == 0
+        # Security 2 is untouched and still open.
+        assert len(await repo.get_by_security_id(2, is_open=True)) == 1
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_empty_statement_raises_and_preserves_open_lots():
+    """An entirely empty incoming set while lots are held is a failed statement, not a liquidation."""
+    engine, session, repo = await _make_repo()
+    try:
+        await _seed_open_lot(repo, security_id=1, open_date=date(2025, 11, 6),
+                             quantity=3, price=236.38)
+
+        with pytest.raises(EmptyStatementError):
+            await reconcile_taxlots(
+                repo, FakeCurrencyService(),
+                conid_to_security_id={},   # nothing reported by IBKR (failed/empty statement)
+                taxlots_data=[],
+                report_to_date=date(2026, 4, 17),
+            )
+
+        # Nothing was deleted or closed — the open lot survives intact.
+        open_lots = await repo.get_by_security_id(1, is_open=True)
+        assert len(open_lots) == 1
+        assert open_lots[0].quantity == Decimal("3")
+        assert len(await repo.get_by_security_id(1, is_open=False)) == 0
     finally:
         await session.close()
         await engine.dispose()
@@ -274,6 +337,81 @@ async def test_reverse_split_with_cash_in_lieu_no_closure():
         assert result["lots_closed_full"] == 0
         assert result["lots_closed_partial"] == 0
         assert len(await repo.get_by_security_id(1, is_open=False)) == 0
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_trade_driven_close_uses_real_trade_date_and_source():
+    """A SELL trade in the window stamps the closure with its real date and close_source='trade'."""
+    engine, session, repo, trade_repo, corp_repo = await _make_repos_with_txns()
+    try:
+        await _seed_open_lot(repo, 1, date(2025, 11, 6), 10, 50.00)  # cost 500
+        # Authoritative SELL trade: sold 4 shares on 2026-06-10 (inside the window).
+        await trade_repo.upsert({
+            "ib_key": "TX1", "conid": "100", "security_id": 1, "symbol": "AAA",
+            "trade_date": date(2026, 6, 10), "buy_sell": "SELL", "quantity": Decimal("-4"),
+            "price": Decimal("50"), "proceeds": Decimal("200"), "commission": Decimal("-1"),
+            "currency": "USD", "realized_pnl": Decimal("0"), "asset_category": "STK",
+        })
+        # Incoming reflects 6 shares remaining (cost 300, dropped 40% -> a real sale).
+        incoming = [_incoming("100", date(2025, 11, 6), 6, 50.00)]
+
+        result = await reconcile_taxlots(
+            repo, FakeCurrencyService(),
+            conid_to_security_id={"100": 1},
+            taxlots_data=incoming,
+            report_to_date=date(2026, 6, 30),
+            trade_repo=trade_repo,
+            corp_action_repo=corp_repo,
+            last_sync_date=date(2026, 6, 1),
+        )
+
+        assert result["lots_closed_full"] + result["lots_closed_partial"] == 1
+        closed = await repo.get_by_security_id(1, is_open=False)
+        assert len(closed) == 1
+        assert closed[0].quantity == Decimal("4")
+        # Real trade date used, NOT the report_to_date (2026-06-30).
+        assert closed[0].close_date == date(2026, 6, 10)
+        assert closed[0].close_source == "trade"
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_corporate_action_reclassifies_even_when_cost_not_conserved():
+    """A reverse split in the window suppresses a phantom sale even when cost isn't within the 1% heuristic band."""
+    engine, session, repo, trade_repo, corp_repo = await _make_repos_with_txns()
+    try:
+        await _seed_open_lot(repo, 1, date(2025, 11, 6), 100, 5.00)  # cost 500
+        # Reverse split recorded by IBKR in the window.
+        await corp_repo.upsert({
+            "ib_key": "CA1", "conid": "100", "security_id": 1, "symbol": "AAA",
+            "action_date": date(2026, 6, 15), "action_type": "REVERSESPLIT",
+            "quantity": Decimal("-90"), "value": Decimal("0"), "proceeds": Decimal("0"),
+            "currency": "USD", "description": "AAA 1-for-10 reverse split",
+        })
+        # Incoming: 10 shares but cost dropped to 480 (96%) -> BELOW the 99% conservation
+        # band, so the heuristic alone would wrongly book a sale. The corporate action wins.
+        incoming = [_incoming("100", date(2025, 11, 6), 10, 48.00)]
+
+        result = await reconcile_taxlots(
+            repo, FakeCurrencyService(),
+            conid_to_security_id={"100": 1},
+            taxlots_data=incoming,
+            report_to_date=date(2026, 6, 30),
+            trade_repo=trade_repo,
+            corp_action_repo=corp_repo,
+            last_sync_date=date(2026, 6, 1),
+        )
+
+        assert result["lots_closed_full"] == 0
+        assert result["lots_closed_partial"] == 0
+        assert len(await repo.get_by_security_id(1, is_open=False)) == 0
+        open_lots = await repo.get_by_security_id(1, is_open=True)
+        assert sum(l.quantity for l in open_lots) == Decimal("10")
     finally:
         await session.close()
         await engine.dispose()

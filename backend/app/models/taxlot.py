@@ -30,6 +30,10 @@ class TaxLot(Base):
     cost_basis_eur: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)  # Converted to EUR
     is_open: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)  # Track if position is still open
     close_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    # How a closed lot was classified during reconciliation: 'trade' (a real SELL
+    # explained the drop), 'corporate_action' (split/spinoff/merger), or
+    # 'heuristic' (quantity/cost-conservation inference, pre-Trades fallback).
+    close_source: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         default=func.now(),

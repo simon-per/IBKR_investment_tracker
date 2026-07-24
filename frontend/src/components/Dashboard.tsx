@@ -16,6 +16,7 @@ import { AllocationTab } from './AllocationTab'
 import { ForecastTab } from './ForecastTab'
 import { FundamentalsTab } from './FundamentalsTab'
 import { WatchlistTab } from './WatchlistTab'
+import { TaxTab } from './TaxTab'
 import { ThemeToggle } from './ThemeToggle'
 import { BenchmarkPicker, BENCHMARK_COLORS } from './BenchmarkPicker'
 import { useBaseCurrency, useCurrencySymbol } from '@/lib/CurrencyContext'
@@ -392,12 +393,13 @@ export function Dashboard() {
       {/* Main Content */}
       <div className="w-full px-4 py-6">
         <Tabs defaultValue="performance" className="space-y-8">
-          <TabsList className="grid w-full max-w-2xl grid-cols-5">
+          <TabsList className="grid w-full max-w-3xl grid-cols-6">
             <TabsTrigger value="performance">Performance</TabsTrigger>
             <TabsTrigger value="allocation">Allocation</TabsTrigger>
             <TabsTrigger value="fundamentals">Fundamentals</TabsTrigger>
             <TabsTrigger value="watchlist">Watchlist</TabsTrigger>
             <TabsTrigger value="forecast">Forecast</TabsTrigger>
+            <TabsTrigger value="tax">Tax</TabsTrigger>
           </TabsList>
 
           {/* Performance Tab */}
@@ -507,6 +509,11 @@ export function Dashboard() {
           {/* Forecast Tab */}
           <TabsContent value="forecast">
             <ForecastTab />
+          </TabsContent>
+
+          {/* Tax Tab */}
+          <TabsContent value="tax">
+            <TaxTab />
           </TabsContent>
         </Tabs>
       </div>

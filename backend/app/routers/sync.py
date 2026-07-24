@@ -12,10 +12,14 @@ from decimal import Decimal
 from app.database import get_db
 from app.services.ibkr_service import IBKRService
 from app.services.currency_service import CurrencyService
-from app.services.sync_helper import reconcile_taxlots
+from app.services.sync_helper import reconcile_taxlots, persist_transactions
 from app.services.benchmark_service import BenchmarkService
+from app.services.dividend_service import DividendService
 from app.repositories.security_repository import SecurityRepository
 from app.repositories.taxlot_repository import TaxLotRepository
+from app.repositories.trade_repository import TradeRepository
+from app.repositories.corporate_action_repository import CorporateActionRepository
+from app.repositories.app_settings_repository import AppSettingsRepository
 
 logger = logging.getLogger(__name__)
 
@@ -59,17 +63,46 @@ async def sync_ibkr_data(db: AsyncSession = Depends(get_db)):
             conid_to_security_id[sec_data['conid']] = security.id
             securities_count += 1
 
-        # Step 4: Extract tax lots
+        # Step 4: Persist authoritative transaction history (Trades + CorporateActions).
+        # Tolerant: returns [] if those Flex sections aren't enabled yet. Additive —
+        # does not affect reconciliation on its own.
+        trade_repo = TradeRepository(db)
+        corp_action_repo = CorporateActionRepository(db)
+        app_settings = AppSettingsRepository(db)
+        trades_data = await ibkr_service.extract_trades(flex_data)
+        corp_actions_data = await ibkr_service.extract_corporate_actions(flex_data)
+        await persist_transactions(
+            trade_repo, corp_action_repo, conid_to_security_id,
+            trades_data, corp_actions_data,
+        )
+
+        # Record authoritative dividend income (gross/withholding/net) from
+        # <CashTransactions>. Flex-only (no Yahoo); tolerant of an absent section.
+        cash_txns = await ibkr_service.extract_cash_transactions(flex_data)
+        await DividendService(db).sync_dividends_from_cash_transactions(
+            cash_txns, conid_to_security_id
+        )
+
+        last_sync_date = await app_settings.get_last_sync_to_date()
+
+        # Step 5: Extract tax lots
         taxlots_data = await ibkr_service.extract_taxlots(flex_data)
 
-        # Step 5: Reconcile tax lots (preserves closed lot history)
+        # Step 6: Reconcile tax lots (preserves closed lot history)
         recon = await reconcile_taxlots(
             taxlot_repo=taxlot_repo,
             currency_service=currency_service,
             conid_to_security_id=conid_to_security_id,
             taxlots_data=taxlots_data,
             report_to_date=flex_data['to_date'],
+            trade_repo=trade_repo,
+            corp_action_repo=corp_action_repo,
+            last_sync_date=last_sync_date,
         )
+
+        # Remember this statement's to_date as the next sync's window start.
+        if flex_data.get('to_date'):
+            await app_settings.set_last_sync_to_date(flex_data['to_date'])
 
         taxlots_count = recon["taxlots_synced"]
         taxlots_skipped = recon["taxlots_skipped"]

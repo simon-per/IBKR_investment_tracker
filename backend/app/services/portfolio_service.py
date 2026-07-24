@@ -12,6 +12,7 @@ import logging
 
 from app.models.taxlot import TaxLot
 from app.models.security import Security
+from app.models.trade import Trade
 from app.services.market_data_service import MarketDataService
 from app.services.currency_service import CurrencyService
 from app.repositories.app_settings_repository import AppSettingsRepository
@@ -221,6 +222,60 @@ class PortfolioService:
             **realized,
         }
 
+    async def _realized_from_trades(self, base_fx: BaseFx) -> Optional[Dict]:
+        """
+        Compute realized totals from authoritative IBKR SELL trades, or return
+        None if no trades have been ingested yet (caller then falls back to the
+        market-price approximation over closed lots).
+
+        Each SELL trade already carries IBKR's own FIFO realized P&L
+        (fifoPnlRealized) and proceeds in the trade currency; we convert both to
+        EUR at the trade date, then project into the base currency.
+        """
+        trades = (await self.db.execute(select(Trade))).scalars().all()
+        if not trades:
+            return None
+
+        total_proceeds_eur = Decimal("0")
+        total_gain_eur = Decimal("0")
+        closed_security_ids: set = set()
+
+        for t in trades:
+            if (t.buy_sell or "").upper() != "SELL":
+                continue
+            currency = t.currency or "EUR"
+            proceeds = t.proceeds if t.proceeds is not None else Decimal("0")
+            gain = t.realized_pnl if t.realized_pnl is not None else Decimal("0")
+
+            try:
+                if currency == "EUR":
+                    proceeds_eur = proceeds
+                    gain_eur = gain
+                else:
+                    proceeds_eur = await self.currency_service.convert_to_eur(
+                        amount=proceeds, from_currency=currency, target_date=t.trade_date
+                    )
+                    gain_eur = await self.currency_service.convert_to_eur(
+                        amount=gain, from_currency=currency, target_date=t.trade_date
+                    )
+            except ValueError:
+                logger.warning(
+                    f"Realized: skipping trade {t.ib_key} — no FX for {currency} near {t.trade_date}"
+                )
+                continue
+
+            total_proceeds_eur += base_fx.convert(proceeds_eur, t.trade_date)
+            total_gain_eur += base_fx.convert(gain_eur, t.trade_date)
+            if t.security_id is not None:
+                closed_security_ids.add(t.security_id)
+
+        return {
+            "total_realized_gain_loss_eur": float(total_gain_eur),
+            "total_realized_proceeds_eur": float(total_proceeds_eur),
+            "total_realized_cost_basis_eur": float(total_proceeds_eur - total_gain_eur),
+            "num_closed_positions": len(closed_security_ids),
+        }
+
     async def get_realized_totals(self, base_fx: Optional[BaseFx] = None) -> Dict:
         """
         Aggregate realized gain/loss from closed tax lots.
@@ -231,9 +286,17 @@ class PortfolioService:
 
         Values are returned in the base currency (proceeds converted at close_date,
         cost basis at open_date). Output keys keep the *_eur suffix.
+
+        When authoritative IBKR <Trades> have been ingested, realized P&L is taken
+        straight from each SELL trade's fifoPnlRealized/proceeds (exact, IBKR's own
+        FIFO) instead of the market-price approximation below.
         """
         if base_fx is None:
             base_fx = await self._load_base_fx()
+
+        trade_based = await self._realized_from_trades(base_fx)
+        if trade_based is not None:
+            return trade_based
 
         result = await self.db.execute(
             select(TaxLot, Security)

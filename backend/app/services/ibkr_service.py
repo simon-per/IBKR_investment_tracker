@@ -11,6 +11,7 @@ import logging
 import xml.etree.ElementTree as ET
 
 from ibflex import client, parser, Types, AssetClass
+from ibflex import enums as ibflex_enums
 from ibflex.client import ResponseCodeError, BadResponseError
 
 from app.config import settings
@@ -28,6 +29,34 @@ _RETRYABLE_FLEX_CODES = {
 # under typical reverse-proxy read timeouts since POST /api/sync/ibkr is synchronous.
 _FLEX_RETRY_DELAYS = [3, 6, 9, 12]
 _MAX_FLEX_ATTEMPTS = len(_FLEX_RETRY_DELAYS) + 1  # 5 attempts total
+
+
+def _dec(value) -> Optional[Decimal]:
+    """Coerce an ibflex value to Decimal, tolerating None/blank."""
+    if value is None or value == "":
+        return None
+    try:
+        return Decimal(str(value))
+    except (ValueError, ArithmeticError):
+        return None
+
+
+def _enum_name(value) -> Optional[str]:
+    """Return a stable string for an ibflex enum member (its .name), else str()."""
+    if value is None:
+        return None
+    return getattr(value, "name", None) or str(value)
+
+
+def _as_date(value) -> Optional[date]:
+    """Normalize a date/datetime to a plain date."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return None
 
 
 class IBKRService:
@@ -340,6 +369,154 @@ class IBKRService:
                 taxlots.append(taxlot)
 
         return taxlots
+
+    async def extract_trades(self, flex_data: Dict) -> List[Dict]:
+        """
+        Extract executed BUY/SELL trades from the Flex Query <Trades> section.
+
+        Tolerant: returns [] if the section is absent (the Flex Query hasn't been
+        updated to include Trades yet), so the caller degrades to today's
+        heuristic reconciliation. Only STK trades are kept. ``quantity`` is
+        stored signed as IBKR reports it (buys positive, sells negative).
+        """
+        statement = flex_data['statement']
+        trades_section = getattr(statement, 'Trades', None)
+        if not trades_section:
+            return []
+
+        trades: List[Dict] = []
+        for t in trades_section:
+            if getattr(t, 'assetCategory', None) != AssetClass.STOCK:
+                continue
+            conid = getattr(t, 'conid', None)
+            if not conid:
+                continue
+
+            ib_key = (
+                getattr(t, 'transactionID', None)
+                or getattr(t, 'tradeID', None)
+                or f"{conid}-{getattr(t, 'tradeDate', '')}-{getattr(t, 'quantity', '')}-{getattr(t, 'tradePrice', '')}"
+            )
+            trade_date = _as_date(getattr(t, 'tradeDate', None)) or _as_date(getattr(t, 'reportDate', None))
+            if not trade_date:
+                logger.warning(f"Trade {ib_key} for conid {conid} has no usable date; skipping")
+                continue
+
+            trades.append({
+                'ib_key': str(ib_key),
+                'conid': str(conid),
+                'symbol': getattr(t, 'symbol', None),
+                'trade_date': trade_date,
+                'buy_sell': _enum_name(getattr(t, 'buySell', None)) or 'UNKNOWN',
+                'quantity': _dec(getattr(t, 'quantity', None)) or Decimal("0"),
+                'price': _dec(getattr(t, 'tradePrice', None)),
+                'proceeds': _dec(getattr(t, 'proceeds', None)),
+                'commission': _dec(getattr(t, 'ibCommission', None)),
+                'currency': getattr(t, 'currency', None),
+                'realized_pnl': _dec(getattr(t, 'fifoPnlRealized', None)),
+                'asset_category': 'STK',
+            })
+
+        logger.info(f"Extracted {len(trades)} STK trade(s) from Flex <Trades>")
+        return trades
+
+    async def extract_corporate_actions(self, flex_data: Dict) -> List[Dict]:
+        """
+        Extract corporate actions (splits, spinoffs, mergers, symbol changes...)
+        from the Flex Query <CorporateActions> section.
+
+        Tolerant: returns [] if the section is absent. Only STK actions are kept.
+        """
+        statement = flex_data['statement']
+        ca_section = getattr(statement, 'CorporateActions', None)
+        if not ca_section:
+            return []
+
+        actions: List[Dict] = []
+        for ca in ca_section:
+            if getattr(ca, 'assetCategory', None) != AssetClass.STOCK:
+                continue
+            conid = getattr(ca, 'conid', None)
+            if not conid:
+                continue
+
+            action_date = _as_date(getattr(ca, 'dateTime', None)) or _as_date(getattr(ca, 'reportDate', None))
+            if not action_date:
+                continue
+
+            ib_key = (
+                getattr(ca, 'transactionID', None)
+                or f"{conid}-{_enum_name(getattr(ca, 'type', None))}-{action_date}-{getattr(ca, 'quantity', '')}"
+            )
+
+            actions.append({
+                'ib_key': str(ib_key),
+                'conid': str(conid),
+                'symbol': getattr(ca, 'symbol', None),
+                'action_date': action_date,
+                'action_type': _enum_name(getattr(ca, 'type', None)) or 'UNKNOWN',
+                'quantity': _dec(getattr(ca, 'quantity', None)),
+                'value': _dec(getattr(ca, 'value', None)),
+                'proceeds': _dec(getattr(ca, 'proceeds', None)),
+                'currency': getattr(ca, 'currency', None),
+                'description': getattr(ca, 'actionDescription', None),
+            })
+
+        logger.info(f"Extracted {len(actions)} STK corporate action(s) from Flex <CorporateActions>")
+        return actions
+
+    async def extract_cash_transactions(self, flex_data: Dict) -> List[Dict]:
+        """
+        Extract dividend-related cash transactions (Dividends, Payment In Lieu,
+        Withholding Tax) from the Flex Query <CashTransactions> section.
+
+        Tolerant: returns [] if the section is absent. Consumed by the dividend
+        service to compute real gross / withholding / net income. ``amount`` is
+        signed as IBKR reports it (dividends positive, withholding negative).
+        """
+        statement = flex_data['statement']
+        ct_section = getattr(statement, 'CashTransactions', None)
+        if not ct_section:
+            return []
+
+        dividend_types = {
+            ibflex_enums.CashAction.DIVIDEND,
+            ibflex_enums.CashAction.PAYMENTINLIEU,
+            ibflex_enums.CashAction.WHTAX,
+        }
+
+        txns: List[Dict] = []
+        for ct in ct_section:
+            ct_type = getattr(ct, 'type', None)
+            if ct_type not in dividend_types:
+                continue
+            conid = getattr(ct, 'conid', None)
+            if not conid:
+                continue
+
+            pay_date = _as_date(getattr(ct, 'settleDate', None)) or _as_date(getattr(ct, 'dateTime', None)) \
+                or _as_date(getattr(ct, 'reportDate', None))
+            if not pay_date:
+                continue
+
+            ib_key = (
+                getattr(ct, 'transactionID', None)
+                or f"{conid}-{_enum_name(ct_type)}-{pay_date}-{getattr(ct, 'amount', '')}"
+            )
+
+            txns.append({
+                'ib_key': str(ib_key),
+                'conid': str(conid),
+                'symbol': getattr(ct, 'symbol', None),
+                'pay_date': pay_date,
+                'type': _enum_name(ct_type),  # DIVIDEND / PAYMENTINLIEU / WHTAX
+                'amount': _dec(getattr(ct, 'amount', None)) or Decimal("0"),
+                'currency': getattr(ct, 'currency', None),
+                'description': getattr(ct, 'description', None),
+            })
+
+        logger.info(f"Extracted {len(txns)} dividend/withholding cash transaction(s) from Flex <CashTransactions>")
+        return txns
 
     async def get_portfolio_summary(self) -> Dict:
         """

@@ -278,6 +278,45 @@ export interface DividendSummaryResponse {
   sync_in_progress: boolean;
 }
 
+export interface TaxDividendRow {
+  symbol: string | null;
+  description: string | null;
+  isin: string | null;
+  pay_date: string;
+  gross: number;
+  withholding: number;
+  net: number;
+}
+
+export interface TaxRealizedRow {
+  symbol: string | null;
+  trade_date: string;
+  quantity: number | null;
+  proceeds: number;
+  cost_basis: number;
+  gain_loss: number;
+}
+
+export interface TaxHoldingRow {
+  symbol: string | null;
+  quantity: number | null;
+  market_value: number;
+  cost_basis: number;
+}
+
+export interface TaxReport {
+  year: number;
+  base_currency: string;
+  dividend_source: 'ibkr' | 'yfinance_estimate';
+  dividend_income: TaxDividendRow[];
+  dividend_totals: { gross: number; withholding: number; net: number };
+  realized_gains: TaxRealizedRow[];
+  realized_totals: { proceeds: number; cost_basis: number; gain_loss: number };
+  holdings_snapshot: TaxHoldingRow[];
+  holdings_snapshot_total: number;
+  holdings_snapshot_note: string;
+}
+
 class ApiClient {
   private baseUrl: string;
 
@@ -477,6 +516,16 @@ class ApiClient {
 
   async syncDividends(): Promise<{ status: string; message: string }> {
     return this.request('/api/dividends/sync', { method: 'POST' });
+  }
+
+  // Tax endpoints
+  async getTaxReport(year: number): Promise<TaxReport> {
+    return this.request<TaxReport>(`/api/tax/report?year=${year}`);
+  }
+
+  /** Absolute URL for the CSV download (used as an <a href> target). */
+  getTaxReportCsvUrl(year: number): string {
+    return `${this.baseUrl}/api/tax/report.csv?year=${year}`;
   }
 
   // Health check
