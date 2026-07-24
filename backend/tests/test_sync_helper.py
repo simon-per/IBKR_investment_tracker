@@ -200,3 +200,107 @@ async def test_multiple_same_day_lots_preserved_on_drift():
     finally:
         await session.close()
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_forward_split_creates_no_closed_lots():
+    """Forward split (share count increases, cost basis conserved) is not a sale."""
+    engine, session, repo = await _make_repo()
+    try:
+        await _seed_open_lot(repo, 1, date(2025, 11, 6), 100, 5.00)  # cost 500
+        # 2:1 split: 200 shares @ 2.50, same total cost
+        incoming = [_incoming("100", date(2025, 11, 6), 200, 2.50)]
+
+        result = await reconcile_taxlots(
+            repo, FakeCurrencyService(),
+            conid_to_security_id={"100": 1},
+            taxlots_data=incoming,
+            report_to_date=date(2026, 7, 8),
+        )
+
+        assert result["lots_closed_full"] == 0
+        assert result["lots_closed_partial"] == 0
+        open_lots = await repo.get_by_security_id(1, is_open=True)
+        assert sum(l.quantity for l in open_lots) == Decimal("200")
+        assert len(await repo.get_by_security_id(1, is_open=False)) == 0
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reverse_split_creates_no_closed_lots():
+    """Reverse split (share count drops, cost basis conserved) must NOT record a sale."""
+    engine, session, repo = await _make_repo()
+    try:
+        await _seed_open_lot(repo, 1, date(2025, 11, 6), 100, 5.00)  # cost 500
+        # 1:10 reverse split: 10 shares @ 50, same total cost
+        incoming = [_incoming("100", date(2025, 11, 6), 10, 50.00)]
+
+        result = await reconcile_taxlots(
+            repo, FakeCurrencyService(),
+            conid_to_security_id={"100": 1},
+            taxlots_data=incoming,
+            report_to_date=date(2026, 7, 8),
+        )
+
+        assert result["lots_closed_full"] == 0
+        assert result["lots_closed_partial"] == 0
+        open_lots = await repo.get_by_security_id(1, is_open=True)
+        assert sum(l.quantity for l in open_lots) == Decimal("10")
+        assert len(await repo.get_by_security_id(1, is_open=False)) == 0
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reverse_split_with_cash_in_lieu_no_closure():
+    """Reverse split with sub-1% cash-in-lieu of fractional shares is still a split, not a sale."""
+    engine, session, repo = await _make_repo()
+    try:
+        await _seed_open_lot(repo, 1, date(2025, 11, 6), 105, 5.00)  # cost 525
+        # 1:10 reverse split of 105 -> 10 shares; ~0.5 share paid as cash-in-lieu
+        # remaining cost 522 (~99.4% of 525, within the 1% conservation band)
+        incoming = [_incoming("100", date(2025, 11, 6), 10, 52.20)]  # cost 522
+
+        result = await reconcile_taxlots(
+            repo, FakeCurrencyService(),
+            conid_to_security_id={"100": 1},
+            taxlots_data=incoming,
+            report_to_date=date(2026, 7, 8),
+        )
+
+        assert result["lots_closed_full"] == 0
+        assert result["lots_closed_partial"] == 0
+        assert len(await repo.get_by_security_id(1, is_open=False)) == 0
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_genuine_sale_still_closes_when_cost_drops():
+    """A real partial sale (share count AND cost basis drop together) still closes a lot."""
+    engine, session, repo = await _make_repo()
+    try:
+        await _seed_open_lot(repo, 1, date(2025, 11, 6), 100, 5.00)  # cost 500
+        # Sold 40 shares at the same price: 60 @ 5 remain (cost 300, dropped 40%)
+        incoming = [_incoming("100", date(2025, 11, 6), 60, 5.00)]
+
+        result = await reconcile_taxlots(
+            repo, FakeCurrencyService(),
+            conid_to_security_id={"100": 1},
+            taxlots_data=incoming,
+            report_to_date=date(2026, 7, 8),
+        )
+
+        assert result["lots_closed_full"] + result["lots_closed_partial"] == 1
+        closed = await repo.get_by_security_id(1, is_open=False)
+        assert len(closed) == 1
+        assert closed[0].quantity == Decimal("40")
+        open_lots = await repo.get_by_security_id(1, is_open=True)
+        assert sum(l.quantity for l in open_lots) == Decimal("60")
+    finally:
+        await session.close()
+        await engine.dispose()

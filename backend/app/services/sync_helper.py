@@ -28,6 +28,14 @@ from app.repositories.taxlot_repository import TaxLotRepository
 
 logger = logging.getLogger(__name__)
 
+# When the share count of a security drops between syncs, distinguish a real sale
+# from a reverse split / share consolidation: a sale reduces total cost basis,
+# whereas a split conserves it (fewer shares, higher price, same money). If the
+# incoming cost basis is at least this fraction of the snapshot cost basis, the
+# drop is treated as a corporate action, not a sale. The 1% band also absorbs
+# reverse-split cash-in-lieu of fractional shares.
+COST_CONSERVED_RATIO = Decimal("0.99")
+
 
 async def reconcile_taxlots(
     taxlot_repo: TaxLotRepository,
@@ -91,8 +99,9 @@ async def reconcile_taxlots(
     for security_id in all_security_ids:
         await taxlot_repo.delete_open_by_security_id(security_id)
 
-    # --- Phase C: Create new lots from IBKR data, track incoming quantity per security ---
+    # --- Phase C: Create new lots from IBKR data, track incoming quantity + cost per security ---
     incoming_qty: Dict[int, Decimal] = defaultdict(lambda: Decimal("0"))
+    incoming_cost: Dict[int, Decimal] = defaultdict(lambda: Decimal("0"))
 
     for lot_data in taxlots_data:
         conid = lot_data["conid"]
@@ -132,6 +141,7 @@ async def reconcile_taxlots(
         taxlots_count += 1
         total_cost_basis_eur += cost_basis_eur
         incoming_qty[security_id] += lot_data["quantity"]
+        incoming_cost[security_id] += lot_data["cost_basis"]
 
     # --- Phase D: Reconcile — detect sold positions by quantity drop per security ---
     # A sale is a reduction in shares held. Price drift (corporate actions) does
@@ -144,7 +154,20 @@ async def reconcile_taxlots(
         sold_qty = snapshot_qty - incoming_qty.get(security_id, Decimal("0"))
 
         if sold_qty <= 0:
-            # No net reduction: unchanged holding, a buy, or pure price drift.
+            # No net reduction: unchanged holding, a buy, forward split, or pure price drift.
+            continue
+
+        # Reverse split / share consolidation reduces the share count while conserving
+        # total cost basis (fewer shares, higher price, same money); a real sale reduces
+        # cost basis. If cost basis is (near) conserved despite fewer shares, refresh the
+        # open lots but do NOT record a sale.
+        snapshot_cost = sum((lot["cost_basis"] for lot in snap_lots), Decimal("0"))
+        inc_cost = incoming_cost.get(security_id, Decimal("0"))
+        if snapshot_cost > 0 and inc_cost >= snapshot_cost * COST_CONSERVED_RATIO:
+            logger.info(
+                f"security_id={security_id}: qty dropped {sold_qty} but cost basis "
+                f"conserved ({inc_cost}/{snapshot_cost}) — split/consolidation, not a sale"
+            )
             continue
 
         if not close_date:
