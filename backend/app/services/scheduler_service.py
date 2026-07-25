@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import date, timedelta
 
 from app.database import AsyncSessionLocal
-from app.services.ibkr_service import IBKRService
+from app.services.ibkr_service import IBKRService, FLEX_RETRY_DELAYS_PATIENT
 from app.services.market_data_service import MarketDataService
 from app.services.currency_service import CurrencyService
 from app.services.sync_helper import reconcile_taxlots, persist_transactions
@@ -61,9 +61,12 @@ class SchedulerService:
                 security_repo = SecurityRepository(db)
                 taxlot_repo = TaxLotRepository(db)
 
-                # Step 1: Fetch data from IBKR
+                # Step 1: Fetch data from IBKR. Nobody is waiting on a scheduled run,
+                # so wait longer between attempts rather than risking IBKR's rate cap.
                 logger.info("Fetching data from IBKR Flex Query...")
-                flex_data = await ibkr_service.fetch_flex_data()
+                flex_data = await ibkr_service.fetch_flex_data(
+                    retry_delays=FLEX_RETRY_DELAYS_PATIENT
+                )
 
                 # Step 2: Extract securities
                 logger.info("Extracting securities from Flex Query response...")
@@ -145,10 +148,17 @@ class SchedulerService:
                     "timestamp": datetime.now().isoformat()
                 }
 
+                # Same warnings as the manual endpoint: unsupported currencies plus any
+                # Flex XML schema drift the sanitizer worked around, so a scheduled sync
+                # surfaces it in /api/scheduler/status instead of only in the logs.
+                warnings = []
                 if skipped_currencies:
-                    result["warnings"] = [
+                    warnings.append(
                         f"Skipped {taxlots_skipped} taxlot(s) with unsupported currencies: {', '.join(sorted(skipped_currencies))}"
-                    ]
+                    )
+                warnings.extend(flex_data.get('flex_warnings') or [])
+                if warnings:
+                    result["warnings"] = warnings
 
                 logger.info(f"IBKR sync completed: {securities_count} securities, {taxlots_count} taxlots")
                 return result

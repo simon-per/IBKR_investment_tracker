@@ -25,10 +25,21 @@ logger = logging.getLogger(__name__)
 _RETRYABLE_FLEX_CODES = {
     "1001", "1003", "1004", "1005", "1006", "1007", "1008", "1009", "1018", "1019", "1021"
 }
-# Escalating backoff between attempts (seconds). Worst case ~30s of waiting, kept
-# under typical reverse-proxy read timeouts since POST /api/sync/ibkr is synchronous.
-_FLEX_RETRY_DELAYS = [3, 6, 9, 12]
-_MAX_FLEX_ATTEMPTS = len(_FLEX_RETRY_DELAYS) + 1  # 5 attempts total
+# IBKR limits a token to one request per second and 10 requests per minute (the text
+# of Flex error 1018), and a single ibflex download() is already several HTTP requests:
+# one to request the statement, then repeated polls until it's ready, each wrapped in
+# its own 3-try loop inside ibflex.client.submit_request. So an eager outer retry loop
+# blows through the per-minute cap and then trips the harsher, undocumented
+# `Code=1025: Too many failed attempts`, which locks the token for *hours* and blocks
+# all syncing. Retries must therefore be few and far apart.
+#
+# Interactive default: one retry, since POST /api/sync/ibkr is synchronous and a user
+# (and the reverse proxy) is waiting on it.
+_FLEX_RETRY_DELAYS = [30]
+# Scheduled jobs have nobody waiting, so they can be patient instead of pushy.
+FLEX_RETRY_DELAYS_PATIENT = [120, 300, 600]
+# Code=1018 *is* the per-minute cap being hit; never retry it quickly.
+_FLEX_RATE_LIMIT_MIN_DELAY = 60
 
 # Flex `levelOfDetail` values that are roll-ups of other rows in the same section
 # (e.g. an ORDER row summarising its own EXECUTION fills, or a CLOSED_LOT row
@@ -242,9 +253,14 @@ class IBKRService:
         logger.info(f"Extracted {len(positions)} openDateTime values from XML")
         return positions
 
-    async def fetch_flex_data(self) -> Dict:
+    async def fetch_flex_data(self, retry_delays: Optional[List[int]] = None) -> Dict:
         """
         Fetch data from IBKR Flex Query API.
+
+        Args:
+            retry_delays: Seconds to wait between download attempts; the number of
+                attempts is len(retry_delays) + 1. Defaults to the short interactive
+                budget; scheduled jobs should pass FLEX_RETRY_DELAYS_PATIENT.
 
         Returns:
             Dict containing parsed statement data with securities, open positions, etc.
@@ -255,11 +271,14 @@ class IBKRService:
         # Run the blocking ibflex download in a thread pool to avoid blocking async event loop.
         # IBKR generates Flex statements asynchronously and frequently returns transient
         # errors (e.g. Code=1001 "Statement could not be generated at this time") that
-        # ibflex 0.15 does not retry on its own. Retry the whole download with backoff so
-        # both the manual sync endpoint and the scheduled job survive these.
+        # ibflex 0.15 does not retry on its own. Retry the whole download, but sparingly:
+        # see the note on _FLEX_RETRY_DELAYS — retrying too eagerly is what trips IBKR's
+        # per-minute cap and then the multi-hour Code=1025 token lockout.
+        delays = list(_FLEX_RETRY_DELAYS if retry_delays is None else retry_delays)
+        max_attempts = len(delays) + 1
         loop = asyncio.get_event_loop()
         response = None
-        for attempt in range(_MAX_FLEX_ATTEMPTS):
+        for attempt in range(max_attempts):
             try:
                 response = await loop.run_in_executor(
                     None,
@@ -269,23 +288,36 @@ class IBKRService:
                 )
                 break
             except ResponseCodeError as e:
+                if e.code == "1025":
+                    # Undocumented lockout that follows too many requests in a short
+                    # window. Retrying can extend it, so fail fast with guidance.
+                    raise RuntimeError(
+                        f"IBKR has temporarily locked this Flex token (Code=1025: {e.msg}). "
+                        "This follows too many requests in a short window — IBKR allows one "
+                        "request per second and 10 per minute per token. Wait before syncing "
+                        "again, as repeated attempts can extend the lockout; if it persists "
+                        "for many hours, regenerate the Flex Web Service token in IBKR."
+                    ) from e
                 is_retryable = e.code in _RETRYABLE_FLEX_CODES
-                if not is_retryable or attempt == _MAX_FLEX_ATTEMPTS - 1:
+                if not is_retryable or attempt == max_attempts - 1:
                     raise
-                delay = _FLEX_RETRY_DELAYS[attempt]
+                delay = delays[attempt]
+                if e.code == "1018":
+                    # This code *is* the per-minute cap; back off past the window.
+                    delay = max(delay, _FLEX_RATE_LIMIT_MIN_DELAY)
                 logger.warning(
                     f"IBKR Flex transient error Code={e.code} ({e.msg}); "
-                    f"attempt {attempt + 1}/{_MAX_FLEX_ATTEMPTS}, retrying in {delay}s"
+                    f"attempt {attempt + 1}/{max_attempts}, retrying in {delay}s"
                 )
                 await asyncio.sleep(delay)
             except BadResponseError as e:
                 # Malformed/empty response — typically the server being busy. Treat as transient.
-                if attempt == _MAX_FLEX_ATTEMPTS - 1:
+                if attempt == max_attempts - 1:
                     raise
-                delay = _FLEX_RETRY_DELAYS[attempt]
+                delay = delays[attempt]
                 logger.warning(
                     f"IBKR Flex bad/empty response ({e}); "
-                    f"attempt {attempt + 1}/{_MAX_FLEX_ATTEMPTS}, retrying in {delay}s"
+                    f"attempt {attempt + 1}/{max_attempts}, retrying in {delay}s"
                 )
                 await asyncio.sleep(delay)
 
