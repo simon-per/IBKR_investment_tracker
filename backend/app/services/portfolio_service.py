@@ -298,20 +298,47 @@ class PortfolioService:
         if trade_based is not None:
             return trade_based
 
+        rows = await self.realized_rows_from_closed_lots(base_fx)
+        total_proceeds_eur = sum((row["proceeds"] for row in rows), Decimal("0"))
+        total_cost_basis_eur = sum((row["cost_basis"] for row in rows), Decimal("0"))
+
+        return {
+            "total_realized_gain_loss_eur": float(total_proceeds_eur - total_cost_basis_eur),
+            "total_realized_proceeds_eur": float(total_proceeds_eur),
+            "total_realized_cost_basis_eur": float(total_cost_basis_eur),
+            "num_closed_positions": len({row["security_id"] for row in rows}),
+        }
+
+    async def realized_rows_from_closed_lots(
+        self,
+        base_fx: BaseFx,
+        start: Optional[date] = None,
+        end: Optional[date] = None,
+    ) -> List[Dict]:
+        """
+        Per-closed-lot realized figures using the market-price approximation
+        described in get_realized_totals, optionally restricted to lots closed
+        within [start, end].
+
+        Shared by the portfolio realized totals and the tax report's fallback so
+        the two views can never disagree about the same closed lots. Lots that
+        can't be priced (or converted) are skipped, exactly as before.
+        """
+        conditions = [TaxLot.is_open == False, TaxLot.close_date.isnot(None)]
+        if start is not None:
+            conditions.append(TaxLot.close_date >= start)
+        if end is not None:
+            conditions.append(TaxLot.close_date <= end)
+
         result = await self.db.execute(
             select(TaxLot, Security)
             .join(Security, TaxLot.security_id == Security.id)
-            .where(and_(TaxLot.is_open == False, TaxLot.close_date.isnot(None)))
+            .where(and_(*conditions))
+            .order_by(TaxLot.close_date.asc())
         )
         closed_lots = result.all()
-
         if not closed_lots:
-            return {
-                "total_realized_gain_loss_eur": 0.0,
-                "total_realized_proceeds_eur": 0.0,
-                "total_realized_cost_basis_eur": 0.0,
-                "num_closed_positions": 0,
-            }
+            return []
 
         close_dates = [lot.close_date for lot, _ in closed_lots]
         unique_securities = {security for _, security in closed_lots}
@@ -323,10 +350,7 @@ class PortfolioService:
             price_currency_cache=price_currency_cache,
         )
 
-        total_proceeds_eur = Decimal("0")
-        total_cost_basis_eur = Decimal("0")
-        priced_security_ids: set = set()
-
+        rows: List[Dict] = []
         for lot, security in closed_lots:
             price = self._get_market_price_with_fallback(
                 security.id, lot.close_date, price_cache
@@ -353,16 +377,15 @@ class PortfolioService:
                     continue
 
             proceeds_eur = lot.quantity * price * fx_rate
-            total_proceeds_eur += base_fx.convert(proceeds_eur, lot.close_date)
-            total_cost_basis_eur += base_fx.convert(lot.cost_basis_eur, lot.open_date)
-            priced_security_ids.add(security.id)
-
-        return {
-            "total_realized_gain_loss_eur": float(total_proceeds_eur - total_cost_basis_eur),
-            "total_realized_proceeds_eur": float(total_proceeds_eur),
-            "total_realized_cost_basis_eur": float(total_cost_basis_eur),
-            "num_closed_positions": len(priced_security_ids),
-        }
+            rows.append({
+                "security_id": security.id,
+                "symbol": security.symbol,
+                "close_date": lot.close_date,
+                "quantity": lot.quantity,
+                "proceeds": base_fx.convert(proceeds_eur, lot.close_date),
+                "cost_basis": base_fx.convert(lot.cost_basis_eur, lot.open_date),
+            })
+        return rows
 
     async def get_positions_breakdown(self) -> List[Dict]:
         """

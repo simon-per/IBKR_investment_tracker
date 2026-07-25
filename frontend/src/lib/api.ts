@@ -311,6 +311,7 @@ export interface TaxReport {
   dividend_income: TaxDividendRow[];
   dividend_totals: { gross: number; withholding: number; net: number };
   realized_gains: TaxRealizedRow[];
+  realized_source: 'trades' | 'closed_lot_estimate';
   realized_totals: { proceeds: number; cost_basis: number; gain_loss: number };
   holdings_snapshot: TaxHoldingRow[];
   holdings_snapshot_total: number;

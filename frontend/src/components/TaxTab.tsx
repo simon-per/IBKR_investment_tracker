@@ -181,11 +181,30 @@ export function TaxTab() {
           {/* --- Realized capital gains --- */}
           <Card>
             <CardHeader>
-              <CardTitle>Realized capital gains</CardTitle>
-              <CardDescription>
-                Switzerland does not tax private capital gains — shown for completeness and other
-                regimes.
-              </CardDescription>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <CardTitle>Realized capital gains</CardTitle>
+                  <CardDescription>
+                    Switzerland does not tax private capital gains — shown for completeness and
+                    other regimes.
+                  </CardDescription>
+                </div>
+                <span
+                  className={cn(
+                    'rounded-full px-2.5 py-1 text-xs font-medium',
+                    data.realized_source === 'trades'
+                      ? 'bg-teal-100 text-teal-800 dark:bg-teal-950/60 dark:text-teal-200'
+                      : 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-200'
+                  )}
+                  title={
+                    data.realized_source === 'trades'
+                      ? "Exact figures from IBKR trade executions (FIFO realized P&L)"
+                      : 'Estimated from closed lots at market price on the close date — no IBKR trade data for this year'
+                  }
+                >
+                  {data.realized_source === 'trades' ? 'IBKR actual' : 'Estimated (closed lots)'}
+                </span>
+              </div>
             </CardHeader>
             <CardContent>
               {data.realized_gains.length === 0 ? (

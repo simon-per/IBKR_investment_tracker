@@ -120,6 +120,29 @@ class TaxService:
                 "gain_loss": round(float(gain), 2),
             })
 
+        realized_source = "trades"
+        if not realized_gains:
+            # No authoritative SELL trade in this year — either <Trades> hasn't been
+            # ingested yet, or the statement period doesn't reach back this far. Fall
+            # back to the same market-price approximation over closed lots that the
+            # portfolio view uses, so the two never disagree; flagged so the UI can
+            # label it an estimate (mirrors dividend_source).
+            realized_source = "closed_lot_estimate"
+            for row in await portfolio.realized_rows_from_closed_lots(base_fx, start, end):
+                proceeds, cost = row["proceeds"], row["cost_basis"]
+                gain = proceeds - cost
+                r_proceeds += proceeds
+                r_cost += cost
+                r_gain += gain
+                realized_gains.append({
+                    "symbol": row["symbol"],
+                    "trade_date": row["close_date"].isoformat(),
+                    "quantity": float(abs(row["quantity"])) if row["quantity"] is not None else None,
+                    "proceeds": round(float(proceeds), 2),
+                    "cost_basis": round(float(cost), 2),
+                    "gain_loss": round(float(gain), 2),
+                })
+
         # --- Indicative year-end holdings (wealth-tax base) ---
         # Uses the current positions snapshot; exact for the current year and
         # indicative for past years (historical valuation is not reconstructed).
@@ -150,6 +173,7 @@ class TaxService:
                 "net": round(float(div_net), 2),
             },
             "realized_gains": realized_gains,
+            "realized_source": realized_source,
             "realized_totals": {
                 "proceeds": round(float(r_proceeds), 2),
                 "cost_basis": round(float(r_cost), 2),
@@ -181,7 +205,7 @@ class TaxService:
         w.writerow(["TOTAL", "", "", "", dt["gross"], dt["withholding"], dt["net"]])
         w.writerow([])
 
-        w.writerow(["Realized capital gains"])
+        w.writerow([f"Realized capital gains (source: {report.get('realized_source', 'trades')})"])
         w.writerow(["Symbol", "Trade date", "Quantity",
                     f"Proceeds ({cur})", f"Cost basis ({cur})", f"Gain/Loss ({cur})"])
         for r in report["realized_gains"]:
