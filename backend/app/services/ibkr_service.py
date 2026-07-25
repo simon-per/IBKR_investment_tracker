@@ -3,7 +3,7 @@ IBKR Flex Query Service
 Fetches and parses securities and tax lot data from Interactive Brokers.
 Focuses on securities only - ignores dividends, cash, and other transactions.
 """
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from datetime import datetime, date
 from decimal import Decimal
 import asyncio
@@ -29,6 +29,16 @@ _RETRYABLE_FLEX_CODES = {
 # under typical reverse-proxy read timeouts since POST /api/sync/ibkr is synchronous.
 _FLEX_RETRY_DELAYS = [3, 6, 9, 12]
 _MAX_FLEX_ATTEMPTS = len(_FLEX_RETRY_DELAYS) + 1  # 5 attempts total
+
+# Flex `levelOfDetail` values that are roll-ups of other rows in the same section
+# (e.g. an ORDER row summarising its own EXECUTION fills, or a CLOSED_LOT row
+# restating a sale). IBKR gives each row its own transactionID, so the idempotent
+# upserts cannot dedupe them and ingesting both would double-count trades and
+# realized P&L. ibflex's own docs say as much: "Trades: uncheck 'Symbol Summary',
+# 'Asset Class', 'Orders'".
+_AGGREGATE_LEVELS_OF_DETAIL = {
+    "ORDER", "SYMBOL_SUMMARY", "ASSET_SUMMARY", "SUMMARY", "CLOSED_LOT",
+}
 
 
 def _dec(value) -> Optional[Decimal]:
@@ -99,6 +109,98 @@ class IBKRService:
             fixed_xml = fixed_xml.replace(b'currency="' + wrong_code + b'"', b'currency="' + correct_code + b'"')
 
         return fixed_xml
+
+    def _sanitize_flex_xml(self, xml_content: bytes) -> Tuple[bytes, List[str]]:
+        """
+        Make IBKR's XML digestible by the pinned ibflex, which is strict about schema.
+
+        ibflex maps every XML attribute onto a frozen dataclass field and raises
+        FlexParserError on the first unknown one (`Class.__annotations__[name]` in
+        parser.parse_element_attr), which aborts parsing of the *entire* document.
+        IBKR has added attributes since ibflex 0.15 was released in 2021 — e.g.
+        `subCategory` on <Trade>, `settleDate`/`levelOfDetail` on <CashTransaction> —
+        so one new field would otherwise break the whole sync, open positions
+        included. Two passes:
+
+        1. Drop aggregate duplicate rows (see _AGGREGATE_LEVELS_OF_DETAIL) when real
+           per-transaction rows sit alongside them. Done here, at the XML layer,
+           because ibflex discards `levelOfDetail` on some element types entirely,
+           which makes filtering after parsing impossible.
+        2. Drop attributes the matching ibflex class doesn't declare, using the same
+           `__annotations__` lookup ibflex uses so "known" means exactly what ibflex
+           will accept.
+
+        Returns (xml, warnings). The original bytes are returned untouched when
+        there was nothing to drop, and this never raises: on any failure the input
+        is returned unchanged so a sanitizer bug can't be worse than not having one.
+        """
+        warnings: List[str] = []
+        try:
+            root = ET.fromstring(xml_content)
+            # Materialize the walk before mutating, so removals can't disturb it.
+            all_elements = list(root.iter())
+
+            # Pass 1: de-duplicate aggregate rows.
+            dropped_rows: Dict[str, int] = {}
+            for container in all_elements:
+                children = list(container)
+                if not children:
+                    continue
+                aggregates = [
+                    child for child in children
+                    if (child.get('levelOfDetail') or '').strip().upper() in _AGGREGATE_LEVELS_OF_DETAIL
+                ]
+                if not aggregates:
+                    continue
+                if len(aggregates) == len(children):
+                    # Every row is an aggregate, so they're the only data we have.
+                    # Keep them: silently emptying a populated section would be a
+                    # worse failure than a possible double-count.
+                    levels = sorted({(c.get('levelOfDetail') or '') for c in aggregates})
+                    warnings.append(
+                        f"<{container.tag}> holds only aggregate rows (levelOfDetail={', '.join(levels)}); "
+                        f"keeping them — enable execution-level detail in the Flex Query for exact data"
+                    )
+                    continue
+                for child in aggregates:
+                    container.remove(child)
+                    dropped_rows[child.tag] = dropped_rows.get(child.tag, 0) + 1
+
+            for tag, count in sorted(dropped_rows.items()):
+                warnings.append(
+                    f"ignored {count} aggregate <{tag}> row(s) that duplicate execution-level rows"
+                )
+
+            # Pass 2: strip attributes unknown to the matching ibflex class.
+            dropped_attrs: Dict[str, int] = {}
+            for elem in all_elements:
+                if not elem.attrib:
+                    continue
+                flex_class = getattr(Types, elem.tag, None)
+                if not (isinstance(flex_class, type) and issubclass(flex_class, Types.FlexElement)):
+                    # A container (<Trades>, <FlexStatements>, ...) or a tag ibflex
+                    # doesn't model — leave it exactly as IBKR sent it.
+                    continue
+                known = getattr(flex_class, '__annotations__', {})
+                for name in [n for n in elem.attrib if n not in known]:
+                    del elem.attrib[name]
+                    key = f"{elem.tag}.{name}"
+                    dropped_attrs[key] = dropped_attrs.get(key, 0) + 1
+
+            if dropped_attrs:
+                detail = ', '.join(f"{key} (x{count})" for key, count in sorted(dropped_attrs.items()))
+                warnings.append(f"dropped IBKR attribute(s) unknown to this ibflex version: {detail}")
+
+            for warning in warnings:
+                logger.warning(f"Flex XML sanitizer: {warning}")
+
+            if not dropped_rows and not dropped_attrs:
+                return xml_content, warnings
+
+            return ET.tostring(root, encoding='utf-8'), warnings
+        except Exception as e:
+            logger.warning(f"Flex XML sanitizer failed ({e}); parsing the original XML unchanged")
+            return xml_content, []
 
     def _extract_open_date_times(self, xml_content: bytes) -> List[Dict]:
         """
@@ -190,6 +292,11 @@ class IBKRService:
         # Fix non-standard currency codes before parsing
         fixed_response = self._fix_currency_codes(response)
 
+        # Remove XML the pinned ibflex can't model (attributes IBKR has added since
+        # 0.15, aggregate duplicate rows) so a single schema addition can't abort the
+        # entire sync.
+        fixed_response, flex_warnings = self._sanitize_flex_xml(fixed_response)
+
         # Extract openDateTime values before ibflex parsing (since ibflex 0.15 doesn't support it)
         open_date_times = self._extract_open_date_times(fixed_response)
 
@@ -229,6 +336,7 @@ class IBKRService:
             'from_date': statement.fromDate if hasattr(statement, 'fromDate') else None,
             'to_date': statement.toDate if hasattr(statement, 'toDate') else None,
             'open_date_times': open_date_times,  # Include manually extracted openDateTime values
+            'flex_warnings': flex_warnings,  # Schema drift the sanitizer worked around
         }
 
     async def extract_securities(self, flex_data: Dict) -> List[Dict]:

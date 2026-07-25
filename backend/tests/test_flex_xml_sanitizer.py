@@ -1,0 +1,235 @@
+"""
+Offline tests for IBKRService._sanitize_flex_xml.
+
+The pinned ibflex maps every XML attribute onto a frozen dataclass field and
+aborts the *whole* document on the first unknown one, so an attribute IBKR added
+after ibflex 0.15 was released (e.g. `subCategory` on <Trade>) breaks the entire
+sync. These tests drive the real ibflex parser over small but real-shaped Flex
+documents — no network, no IBKR credentials.
+"""
+from decimal import Decimal
+
+import pytest
+
+from ibflex import parser
+from ibflex.parser import FlexParserError
+
+from app.services.ibkr_service import IBKRService
+
+
+def _svc():
+    return IBKRService(token="t", query_id="q")
+
+
+def _wrap(body: str) -> bytes:
+    """Wrap section XML in the FlexQueryResponse/FlexStatement envelope ibflex needs."""
+    return (
+        '<FlexQueryResponse queryName="Portfolio" type="AF">'
+        '<FlexStatements count="1">'
+        '<FlexStatement accountId="U1234567" fromDate="2026-01-01" toDate="2026-07-01"'
+        ' period="YearToDate" whenGenerated="2026-07-01;120000">'
+        f'{body}'
+        '</FlexStatement>'
+        '</FlexStatements>'
+        '</FlexQueryResponse>'
+    ).encode()
+
+
+def _trade(**overrides) -> str:
+    """A realistic <Trade>, including the `subCategory` that breaks ibflex 0.15.
+
+    Pass an attribute as None to omit it entirely.
+    """
+    attrs = {
+        'assetCategory': 'STK',
+        'subCategory': 'COMMON',  # added by IBKR after ibflex 0.15 — the bug
+        'conid': '100',
+        'symbol': 'AAA',
+        'transactionID': 'TX1',
+        'tradeID': 'TR1',
+        'tradeDate': '2026-03-02',
+        'reportDate': '2026-03-03',
+        'buySell': 'SELL',
+        'quantity': '-5',
+        'tradePrice': '20',
+        'proceeds': '100',
+        'ibCommission': '-1',
+        'currency': 'USD',
+        'fifoPnlRealized': '30',
+        'levelOfDetail': 'EXECUTION',
+    }
+    attrs.update(overrides)
+    rendered = ' '.join(f'{k}="{v}"' for k, v in attrs.items() if v is not None)
+    return f'<Trade {rendered} />'
+
+
+_TRADES = _wrap(f'<Trades>{_trade()}</Trades>')
+
+_CASH_TRANSACTIONS = _wrap(
+    '<CashTransactions>'
+    '<CashTransaction type="Dividends" assetCategory="STK" subCategory="COMMON" conid="100"'
+    ' symbol="AAA" transactionID="C1" dateTime="2026-05-01" settleDate="2026-05-02"'
+    ' levelOfDetail="DETAIL" amount="42.50" currency="USD" description="AAA DIVIDEND" />'
+    '<CashTransaction type="Withholding Tax" assetCategory="STK" subCategory="COMMON" conid="100"'
+    ' symbol="AAA" transactionID="C2" dateTime="2026-05-01" settleDate="2026-05-02"'
+    ' levelOfDetail="DETAIL" amount="-6.38" currency="USD" description="AAA WHTAX" />'
+    '</CashTransactions>'
+)
+
+_CORPORATE_ACTIONS = _wrap(
+    '<CorporateActions>'
+    '<CorporateAction type="RS" assetCategory="STK" subCategory="COMMON" conid="100"'
+    ' symbol="AAA" transactionID="CA1" dateTime="2026-04-01" reportDate="2026-04-01"'
+    ' quantity="-90" value="0" proceeds="0" currency="USD"'
+    ' actionDescription="AAA(US) SPLIT 1 FOR 10" levelOfDetail="DETAIL" />'
+    '</CorporateActions>'
+)
+
+
+def _statement(xml: bytes):
+    return parser.parse(xml).FlexStatements[0]
+
+
+# --------------------------------------------------------------------------
+# The bug: unknown attributes abort the whole document
+# --------------------------------------------------------------------------
+
+def test_unsanitized_trade_subcategory_breaks_ibflex():
+    """Guards the premise: without sanitizing, this is the live production failure."""
+    with pytest.raises(FlexParserError, match="Trade has no attribute"):
+        parser.parse(_TRADES)
+
+
+def test_sanitized_trade_parses_and_reports_dropped_attribute():
+    sanitized, warnings = _svc()._sanitize_flex_xml(_TRADES)
+
+    statement = _statement(sanitized)  # must not raise
+    assert len(statement.Trades) == 1
+    assert any('Trade.subCategory' in w for w in warnings)
+
+
+@pytest.mark.parametrize('raw', [_CASH_TRANSACTIONS, _CORPORATE_ACTIONS])
+def test_other_sections_also_recovered(raw):
+    """`subCategory` is declared on SecurityInfo only, so <CashTransaction> and
+    <CorporateAction> are the next sections that would abort the sync."""
+    with pytest.raises(FlexParserError, match='has no attribute'):
+        parser.parse(raw)
+
+    sanitized, _ = _svc()._sanitize_flex_xml(raw)
+    _statement(sanitized)  # must not raise
+
+
+def test_surviving_trade_fields_are_intact():
+    sanitized, _ = _svc()._sanitize_flex_xml(_TRADES)
+
+    trade = _statement(sanitized).Trades[0]
+    assert trade.tradeID == 'TR1'
+    assert trade.transactionID == 'TX1'
+    assert trade.quantity == Decimal('-5')
+    assert trade.fifoPnlRealized == Decimal('30')
+    assert trade.proceeds == Decimal('100')
+    assert trade.currency == 'USD'
+
+
+@pytest.mark.asyncio
+async def test_sanitize_then_extract_trades_end_to_end():
+    """The full production path: sanitize -> ibflex -> our extractor."""
+    svc = _svc()
+    sanitized, _ = svc._sanitize_flex_xml(_TRADES)
+
+    trades = await svc.extract_trades({'statement': _statement(sanitized)})
+
+    assert len(trades) == 1
+    assert trades[0]['ib_key'] == 'TX1'
+    assert trades[0]['buy_sell'] == 'SELL'
+    assert trades[0]['realized_pnl'] == Decimal('30')
+
+
+# --------------------------------------------------------------------------
+# The strip is per-class, not a blanket removal
+# --------------------------------------------------------------------------
+
+def test_securityinfo_keeps_its_legitimate_subcategory():
+    """`subCategory` IS declared on SecurityInfo, so it must survive there."""
+    raw = _wrap(
+        '<SecuritiesInfo>'
+        '<SecurityInfo assetCategory="STK" subCategory="ETF" symbol="AAA" conid="100"'
+        ' isin="US0000000001" description="AAA ETF" currency="USD" listingExchange="NASDAQ" />'
+        '</SecuritiesInfo>'
+    )
+
+    sanitized, warnings = _svc()._sanitize_flex_xml(raw)
+
+    assert sanitized is raw  # nothing unknown -> untouched
+    assert warnings == []
+    assert _statement(raw).SecuritiesInfo[0].subCategory == 'ETF'
+
+
+def test_clean_xml_is_returned_unchanged():
+    """No-op guarantee: a query without new attributes behaves byte-identically."""
+    raw = _wrap(f'<Trades>{_trade(subCategory=None)}</Trades>')
+
+    sanitized, warnings = _svc()._sanitize_flex_xml(raw)
+
+    assert sanitized is raw
+    assert warnings == []
+
+
+def test_sanitizer_never_raises_on_malformed_xml():
+    garbage = b'<FlexQueryResponse><not closed'
+
+    sanitized, warnings = _svc()._sanitize_flex_xml(garbage)
+
+    assert sanitized is garbage
+    assert warnings == []
+
+
+# --------------------------------------------------------------------------
+# Aggregate-row de-duplication
+# --------------------------------------------------------------------------
+
+def test_aggregate_rows_dropped_when_execution_rows_present():
+    """An ORDER row restates its EXECUTION fills; ingesting both double-counts."""
+    raw = _wrap(
+        '<Trades>'
+        + _trade(transactionID='TX1', levelOfDetail='EXECUTION')
+        + _trade(transactionID='TX2', levelOfDetail='ORDER')
+        + _trade(transactionID='TX3', levelOfDetail='SYMBOL_SUMMARY')
+        + '</Trades>'
+    )
+
+    sanitized, warnings = _svc()._sanitize_flex_xml(raw)
+
+    trades = _statement(sanitized).Trades
+    assert [t.transactionID for t in trades] == ['TX1']
+    assert any('aggregate <Trade> row(s)' in w for w in warnings)
+
+
+def test_all_aggregate_rows_are_kept_rather_than_emptying_the_section():
+    """No-data-loss rule: if aggregates are all we have, keep them and warn."""
+    raw = _wrap(
+        '<Trades>'
+        + _trade(transactionID='TX2', levelOfDetail='ORDER')
+        + _trade(transactionID='TX3', levelOfDetail='ORDER')
+        + '</Trades>'
+    )
+
+    sanitized, warnings = _svc()._sanitize_flex_xml(raw)
+
+    trades = _statement(sanitized).Trades
+    assert [t.transactionID for t in trades] == ['TX2', 'TX3']
+    assert any('only aggregate rows' in w for w in warnings)
+
+
+def test_rows_without_level_of_detail_are_never_dropped():
+    raw = _wrap(
+        '<Trades>'
+        + _trade(transactionID='TX1', levelOfDetail='ORDER')
+        + _trade(transactionID='TX2', levelOfDetail=None)
+        + '</Trades>'
+    )
+
+    sanitized, _ = _svc()._sanitize_flex_xml(raw)
+
+    trades = _statement(sanitized).Trades
+    assert [t.transactionID for t in trades] == ['TX2']

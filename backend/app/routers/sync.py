@@ -6,7 +6,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Dict
+from typing import Dict, List
 from decimal import Decimal
 
 from app.database import get_db
@@ -131,11 +131,16 @@ async def sync_ibkr_data(db: AsyncSession = Depends(get_db)):
             "data_to": str(flex_data['to_date']) if flex_data['to_date'] else None,
         }
 
-        # Add warning about skipped currencies if any
+        # Surface skipped currencies plus any Flex XML schema drift the sanitizer had
+        # to work around, so it's visible in the API/UI and not only in container logs.
+        warnings: List[str] = []
         if skipped_currencies:
-            result["warnings"] = [
+            warnings.append(
                 f"Skipped {taxlots_skipped} taxlot(s) with unsupported currencies: {', '.join(sorted(skipped_currencies))}"
-            ]
+            )
+        warnings.extend(flex_data.get('flex_warnings') or [])
+        if warnings:
+            result["warnings"] = warnings
 
         return result
 
