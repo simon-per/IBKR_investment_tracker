@@ -35,8 +35,31 @@ Budgets in `ibkr_service.py`: `_FLEX_RETRY_DELAYS = [30]` (2 attempts, interacti
 `FLEX_RETRY_DELAYS_PATIENT = [120, 300, 600]` (scheduled jobs). `1025` fails fast with guidance; `1018`
 always backs off >= 60s. Pinned by `tests/test_flex_retry_policy.py`.
 
-**Flex error codes:** `1001` statement not ready (transient, expected — the YTD statement is big),
-`1018` rate limit, `1019`/`1021` transient, `1025` lockout (fatal, don't retry), `1020` bad token.
+### The two-step rule (why we don't use `client.download()`)
+
+Flex is a two-step protocol: **`SendRequest`** asks IBKR to generate the statement and returns a
+`ReferenceCode`; **`GetStatement`** retrieves it, answering "try again shortly" until it's ready. IBKR's
+docs are explicit:
+
+> "If statements are still being generated when you submit your request to retrieve them, you should
+> **not re-initiate the Flex request**, but instead keep trying to **retrieve** the statement."
+
+`ibflex.client.download()` polls correctly for `1009`/`1019`/`1018` but **not `1001`** — it raises, so any
+outer retry calls `download()` again and starts a *brand-new generation job*. Do that a few times and
+IBKR blocks the token: **`1025` counts failed *generations*, not request volume** (volume is `1018`,
+which we never saw). Both lockouts came from this.
+
+So `IBKRService._download_statement()` drives the two steps itself using ibflex's public pieces
+(`request_statement`, `submit_request`, `check_statement_response`, `STMT_URL`): **SendRequest once**,
+then poll the *same* `ReferenceCode` for every `_RETRIEVE_PENDING_CODES` hit, bounded by a deadline
+(120s interactive / 900s scheduled) rather than an attempt count. The outer loop only ever re-issues
+SendRequest, and only for failures raised *before* a reference code exists — the one case where
+re-initiating is unavoidable.
+
+**Flex error codes:** `1001` statement not ready (transient, expected — poll, don't re-request),
+`1003` not available (terminal), `1018` rate limit (1/sec, 10/min per token), `1019`/`1021` transient,
+`1025` **undocumented** token lockout from repeated failures (fatal, never retry), `1012` token expired,
+`1013` IP restriction, `1015` bad token. The official table stops at 1021 — 1025 appears nowhere in it.
 
 ---
 

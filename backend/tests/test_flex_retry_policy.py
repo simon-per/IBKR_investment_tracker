@@ -5,8 +5,9 @@ IBKR allows one request per second and 10 per minute per token, and a single
 ibflex download() already issues several HTTP requests internally. Retrying
 eagerly therefore trips the per-minute cap and then `Code=1025: Too many failed
 attempts`, an undocumented lockout that blocks *all* syncing for hours. These
-tests pin the policy that prevents that: few attempts, long gaps, and never
-retry a lockout. No network — client.download is monkeypatched.
+tests pin the policy that prevents that: few attempts, long gaps, never retry a
+lockout, and — most importantly — never re-issue SendRequest just because the
+statement isn't ready yet. No network: ibflex's client functions are monkeypatched.
 """
 from types import SimpleNamespace
 
@@ -35,13 +36,19 @@ def no_sleep(monkeypatch):
 
 
 def _always_raise(monkeypatch, exc):
+    """
+    Fail at step 1 (SendRequest). That's the only step the outer retry loop may
+    re-issue, so patching it here is what exercises that budget — and it keeps the
+    tests offline now that fetch_flex_data drives the 2-step protocol itself rather
+    than calling client.download().
+    """
     calls = {'n': 0}
 
     def boom(token, query_id):
         calls['n'] += 1
         raise exc
 
-    monkeypatch.setattr(ibkr_module.client, 'download', boom)
+    monkeypatch.setattr(ibkr_module.client, 'request_statement', boom)
     return calls
 
 
@@ -110,6 +117,99 @@ async def test_permanent_error_is_not_retried(monkeypatch, no_sleep):
 
     assert calls['n'] == 1
     assert no_sleep == []
+
+
+#
+# The 2-step protocol: SendRequest once, then poll the SAME reference code.
+#
+
+class _FakeFlexServer:
+    """
+    Stands in for IBKR's two endpoints. `retrieve_results` is consumed one per poll;
+    each item is either an exception to raise or a bytes payload to return.
+    """
+
+    def __init__(self, retrieve_results):
+        self.retrieve_results = list(retrieve_results)
+        self.request_calls = 0
+        self.retrieve_calls = 0
+
+    def install(self, monkeypatch):
+        def request_statement(token, query_id):
+            self.request_calls += 1
+            return SimpleNamespace(ReferenceCode="REF123", Url=None)
+
+        def submit_request(url, token, query):
+            self.retrieve_calls += 1
+            assert query == "REF123", "must poll the same reference code"
+            outcome = self.retrieve_results.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return SimpleNamespace(content=outcome)
+
+        monkeypatch.setattr(ibkr_module.client, 'request_statement', request_statement)
+        monkeypatch.setattr(ibkr_module.client, 'submit_request', submit_request)
+        # check_statement_response only sees successful payloads here; pending states are
+        # delivered as ResponseCodeError from submit_request, matching ibflex's behaviour.
+        monkeypatch.setattr(ibkr_module.client, 'check_statement_response', lambda r: True)
+        monkeypatch.setattr(ibkr_module.time, 'sleep', lambda s: None)
+        return self
+
+
+def test_not_ready_statement_is_re_retrieved_never_re_requested(monkeypatch):
+    """
+    THE regression this refactor exists for. IBKR: "you should not re-initiate the Flex
+    request, but instead keep trying to retrieve the statement." A 1001 while polling
+    must NOT start a second generation job — that is what earned two 1025 lockouts.
+    """
+    server = _FakeFlexServer([
+        ResponseCodeError('1001', 'Statement could not be generated at this time.'),
+        ResponseCodeError('1019', 'Statement generation in progress.'),
+        b'<FlexQueryResponse></FlexQueryResponse>',
+    ]).install(monkeypatch)
+
+    data = IBKRService(token='t', query_id='q')._download_statement(60)
+
+    assert data == b'<FlexQueryResponse></FlexQueryResponse>'
+    assert server.request_calls == 1        # <-- the whole point
+    assert server.retrieve_calls == 3
+
+
+def test_lockout_during_retrieve_is_not_retried(monkeypatch):
+    server = _FakeFlexServer([
+        ResponseCodeError('1025', 'Too many failed attempts. Please review your configuration.'),
+    ]).install(monkeypatch)
+
+    with pytest.raises(RuntimeError, match='temporarily locked'):
+        IBKRService(token='t', query_id='q')._download_statement(60)
+
+    assert server.request_calls == 1
+    assert server.retrieve_calls == 1  # gave up immediately
+
+
+def test_fatal_code_during_retrieve_does_not_re_request(monkeypatch):
+    """An invalid token mid-poll is terminal; don't start another generation job."""
+    server = _FakeFlexServer([
+        ResponseCodeError('1015', 'Token is invalid.'),
+    ]).install(monkeypatch)
+
+    with pytest.raises(ResponseCodeError):
+        IBKRService(token='t', query_id='q')._download_statement(60)
+
+    assert server.request_calls == 1
+
+
+def test_retrieve_gives_up_at_the_deadline(monkeypatch):
+    """A statement that never becomes ready must time out, not poll forever."""
+    server = _FakeFlexServer(
+        [ResponseCodeError('1001', 'not ready')] * 500
+    ).install(monkeypatch)
+
+    with pytest.raises(TimeoutError, match='still not ready'):
+        IBKRService(token='t', query_id='q')._download_statement(1)
+
+    assert server.request_calls == 1
+    assert server.retrieve_calls < 500  # stopped early
 
 
 @pytest.mark.asyncio

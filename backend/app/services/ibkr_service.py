@@ -8,6 +8,7 @@ from datetime import datetime, date
 from decimal import Decimal
 import asyncio
 import logging
+import time
 import xml.etree.ElementTree as ET
 
 from ibflex import client, parser, Types, AssetClass
@@ -18,13 +19,29 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# IBKR Flex "…try again shortly" error codes worth retrying. These are transient
-# (statement still generating / server busy / throttled). ibflex 0.15 only retries
-# 1009/1019/1018 internally, so 1001 in particular surfaces immediately without it.
-# Permanent errors (1010-1017, 1020 token/query/account invalid, etc.) are NOT retried.
-_RETRYABLE_FLEX_CODES = {
-    "1001", "1003", "1004", "1005", "1006", "1007", "1008", "1009", "1018", "1019", "1021"
+# Codes that mean "the statement isn't ready yet" during the *retrieve* step. IBKR's
+# docs are explicit that these must be handled by re-fetching the SAME reference code:
+#   "If statements are still being generated when you submit your request to retrieve
+#    them, you should not re-initiate the Flex request, but instead keep trying to
+#    retrieve the statement."
+# ibflex only treats 1009/1019 (and 1018) this way, so 1001 aborts its download() and
+# any outer retry re-runs SendRequest — starting a brand-new generation job each time.
+# That is what earned two `1025` lockouts. 1003 is excluded: "Statement is not
+# available" is terminal, not a wait.
+_RETRIEVE_PENDING_CODES = {
+    "1001", "1004", "1005", "1006", "1007", "1008", "1009", "1018", "1019", "1021"
 }
+# Codes worth re-issuing SendRequest for. Only reachable before a reference code
+# exists, where there is nothing to poll and re-initiating is the sole option.
+_REQUEST_RETRYABLE_CODES = {
+    "1001", "1004", "1005", "1006", "1007", "1008", "1009", "1018", "1019", "1021"
+}
+# How long to keep politely polling one reference code before giving up (seconds).
+# The interactive path must stay under nginx's proxy_read_timeout 300.
+_RETRIEVE_DEADLINE_INTERACTIVE = 120
+_RETRIEVE_DEADLINE_PATIENT = 900
+# Fallback wait between polls when ibflex doesn't hand us a delay.
+_RETRIEVE_POLL_DELAY = 5
 # IBKR limits a token to one request per second and 10 requests per minute (the text
 # of Flex error 1018), and a single ibflex download() is already several HTTP requests:
 # one to request the statement, then repeated polls until it's ready, each wrapped in
@@ -93,6 +110,68 @@ class IBKRService:
         """
         self.token = token or settings.ibkr_token
         self.query_id = query_id or settings.ibkr_query_id
+
+    @staticmethod
+    def _lockout_error(e: ResponseCodeError) -> RuntimeError:
+        """Turn IBKR's undocumented Code=1025 into something actionable."""
+        return RuntimeError(
+            f"IBKR has temporarily locked this Flex token (Code=1025: {e.msg}). "
+            "It follows too many *failed* statement generations in a short window — IBKR "
+            "allows one request per second and 10 per minute per token. Wait before syncing "
+            "again, as repeated attempts can extend the lockout; if it persists beyond ~24h "
+            "with no further attempts, contact IBKR — the block may be account-scoped."
+        )
+
+    def _download_statement(self, deadline_seconds: int) -> bytes:
+        """
+        Download the Flex statement using IBKR's documented 2-step protocol, blocking.
+
+        Step 1 (`SendRequest`) asks IBKR to *generate* a statement and returns a
+        reference code. Step 2 (`GetStatement`) retrieves it, and until it's ready
+        answers with a "try again shortly" code.
+
+        The whole point of doing this ourselves rather than calling ibflex's
+        `client.download()` is that IBKR explicitly says a not-ready statement must be
+        handled by re-fetching the **same reference code** — never by re-issuing
+        SendRequest. ibflex doesn't treat 1001 as retryable, so it aborts, and any outer
+        retry starts a *new* generation job; enough of those and IBKR blocks the token
+        with `1025: Too many failed attempts`. Here step 1 happens once and everything
+        after it is a cheap retrieve against the same code.
+
+        Raises the same exception types as before (ResponseCodeError / BadResponseError),
+        so callers are unaffected.
+        """
+        stmt_access = client.request_statement(self.token, self.query_id)
+        url = stmt_access.Url or client.STMT_URL
+        reference = stmt_access.ReferenceCode
+        logger.info(f"IBKR Flex statement requested, reference code {reference}")
+
+        deadline = time.monotonic() + deadline_seconds
+        while True:
+            try:
+                response = client.submit_request(url=url, token=self.token, query=reference)
+                status = client.check_statement_response(response)
+                if status is True:
+                    return response.content
+                delay = status if isinstance(status, (int, float)) else _RETRIEVE_POLL_DELAY
+            except ResponseCodeError as e:
+                if e.code == "1025":
+                    raise self._lockout_error(e) from e
+                if e.code not in _RETRIEVE_PENDING_CODES:
+                    raise
+                delay = _FLEX_RATE_LIMIT_MIN_DELAY if e.code == "1018" else _RETRIEVE_POLL_DELAY
+                logger.info(
+                    f"IBKR Flex statement {reference} not ready (Code={e.code}); "
+                    f"re-retrieving the same reference code in {delay}s"
+                )
+
+            if time.monotonic() + delay > deadline:
+                raise TimeoutError(
+                    f"IBKR Flex statement {reference} was still not ready after "
+                    f"{deadline_seconds}s of polling. The statement is probably too large — "
+                    "narrow the Flex Query period or sections."
+                )
+            time.sleep(delay)
 
     def _fix_currency_codes(self, xml_content: bytes) -> bytes:
         """
@@ -290,46 +369,35 @@ class IBKRService:
         Raises:
             Exception: If API request fails or parsing errors occur
         """
-        # Run the blocking ibflex download in a thread pool to avoid blocking async event loop.
-        # IBKR generates Flex statements asynchronously and frequently returns transient
-        # errors (e.g. Code=1001 "Statement could not be generated at this time") that
-        # ibflex 0.15 does not retry on its own. Retry the whole download, but sparingly:
-        # see the note on _FLEX_RETRY_DELAYS — retrying too eagerly is what trips IBKR's
-        # per-minute cap and then the multi-hour Code=1025 token lockout.
+        # Download via IBKR's 2-step protocol in a thread pool (blocking `requests`).
+        # _download_statement() issues SendRequest once and then polls the SAME reference
+        # code, which is what IBKR's docs require; the retry loop here therefore only ever
+        # re-runs SendRequest, and only for errors raised *before* a reference code exists.
+        # Keeping that rare and slow is what stops us re-triggering a Code=1025 lockout.
         delays = list(_FLEX_RETRY_DELAYS if retry_delays is None else retry_delays)
         max_attempts = len(delays) + 1
+        patient = retry_delays is not None
+        deadline = _RETRIEVE_DEADLINE_PATIENT if patient else _RETRIEVE_DEADLINE_INTERACTIVE
         loop = asyncio.get_event_loop()
         response = None
         for attempt in range(max_attempts):
             try:
                 response = await loop.run_in_executor(
-                    None,
-                    client.download,
-                    self.token,
-                    self.query_id
+                    None, self._download_statement, deadline
                 )
                 break
             except ResponseCodeError as e:
                 if e.code == "1025":
-                    # Undocumented lockout that follows too many requests in a short
-                    # window. Retrying can extend it, so fail fast with guidance.
-                    raise RuntimeError(
-                        f"IBKR has temporarily locked this Flex token (Code=1025: {e.msg}). "
-                        "This follows too many requests in a short window — IBKR allows one "
-                        "request per second and 10 per minute per token. Wait before syncing "
-                        "again, as repeated attempts can extend the lockout; if it persists "
-                        "for many hours, regenerate the Flex Web Service token in IBKR."
-                    ) from e
-                is_retryable = e.code in _RETRYABLE_FLEX_CODES
-                if not is_retryable or attempt == max_attempts - 1:
+                    raise self._lockout_error(e) from e
+                if e.code not in _REQUEST_RETRYABLE_CODES or attempt == max_attempts - 1:
                     raise
                 delay = delays[attempt]
                 if e.code == "1018":
                     # This code *is* the per-minute cap; back off past the window.
                     delay = max(delay, _FLEX_RATE_LIMIT_MIN_DELAY)
                 logger.warning(
-                    f"IBKR Flex transient error Code={e.code} ({e.msg}); "
-                    f"attempt {attempt + 1}/{max_attempts}, retrying in {delay}s"
+                    f"IBKR Flex could not start statement generation (Code={e.code}: {e.msg}); "
+                    f"attempt {attempt + 1}/{max_attempts}, re-requesting in {delay}s"
                 )
                 await asyncio.sleep(delay)
             except BadResponseError as e:
