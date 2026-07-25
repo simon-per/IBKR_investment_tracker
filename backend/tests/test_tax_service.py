@@ -94,6 +94,55 @@ async def test_tax_report_dividends_and_realized_for_year():
 
 
 @pytest.mark.asyncio
+async def test_withholding_is_grouped_by_country_for_da1():
+    """DA-1 is filed per source country, derived from the ISIN prefix."""
+    engine, session = await _make_session()
+    try:
+        # Second security in a different domicile (CH), same base currency.
+        session.add(Security(
+            id=2, isin="CH0000000002", symbol="BBB", description="Swiss Co",
+            currency="EUR", conid=200, asset_category="STK", exchange="EBS",
+        ))
+        await session.flush()
+
+        repo = DividendRepository(session)
+        # US: 100 gross / 15 withheld
+        await repo.upsert_payment({
+            "security_id": 1, "ex_date": date(2025, 5, 2), "pay_date": date(2025, 5, 2),
+            "currency": "EUR", "shares_held": Decimal("0"),
+            "gross_amount_eur": Decimal("100"), "withholding_tax_eur": Decimal("15"),
+            "net_amount_eur": Decimal("85"), "source": "ibkr", "last_computed": datetime.now(),
+        })
+        # CH: 50 gross / 17.5 withheld
+        await repo.upsert_payment({
+            "security_id": 2, "ex_date": date(2025, 7, 1), "pay_date": date(2025, 7, 1),
+            "currency": "EUR", "shares_held": Decimal("0"),
+            "gross_amount_eur": Decimal("50"), "withholding_tax_eur": Decimal("17.5"),
+            "net_amount_eur": Decimal("32.5"), "source": "ibkr", "last_computed": datetime.now(),
+        })
+        await session.commit()
+
+        report = await TaxService(session).get_tax_report(2025)
+
+        by_country = {c["country"]: c for c in report["dividend_by_country"]}
+        assert set(by_country) == {"US", "CH"}
+        assert by_country["US"]["gross"] == 100.0
+        assert by_country["US"]["withholding"] == 15.0
+        assert by_country["CH"]["withholding"] == 17.5
+        assert by_country["CH"]["positions"] == 1
+        # Sorted by withholding, largest first — the biggest reclaim leads.
+        assert report["dividend_by_country"][0]["country"] == "CH"
+        # Country totals must reconcile with the overall dividend totals.
+        assert sum(c["withholding"] for c in report["dividend_by_country"]) == \
+            report["dividend_totals"]["withholding"]
+
+        assert "Withholding by country (DA-1)" in TaxService(session).to_csv(report)
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_holdings_snapshot_is_reconstructed_at_year_end_for_past_years():
     """
     The Swiss wealth-tax base (Steuerwert) is the 31 December value, so a past year must

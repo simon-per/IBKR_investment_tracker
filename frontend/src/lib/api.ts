@@ -307,6 +307,15 @@ export interface TaxDividendRow {
   net: number;
 }
 
+export interface TaxCountryRow {
+  /** ISIN prefix, e.g. "US", "CH", "DE". "??" when the ISIN is unknown. */
+  country: string;
+  positions: number;
+  gross: number;
+  withholding: number;
+  net: number;
+}
+
 export interface TaxRealizedRow {
   symbol: string | null;
   trade_date: string;
@@ -328,6 +337,9 @@ export interface TaxReport {
   base_currency: string;
   dividend_source: 'ibkr' | 'yfinance_estimate';
   dividend_income: TaxDividendRow[];
+  /** Withholding grouped by source country — DA-1 is filed per country. */
+  dividend_by_country: TaxCountryRow[];
+  dividend_country_note: string;
   dividend_totals: { gross: number; withholding: number; net: number };
   realized_gains: TaxRealizedRow[];
   realized_source: 'trades' | 'closed_lot_estimate';

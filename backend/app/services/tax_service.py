@@ -65,6 +65,8 @@ class TaxService:
 
         dividend_income: List[Dict] = []
         div_gross = div_wht = div_net = Decimal("0")
+        # DA-1 is filed per source country, so accumulate a per-country breakdown as we go.
+        by_country: Dict[str, Dict] = {}
         for dp, sec in rows:
             on_date = dp.pay_date or dp.ex_date
             if on_date is None or on_date < start or on_date > end:
@@ -87,7 +89,37 @@ class TaxService:
                 "withholding": round(float(wht), 2),
                 "net": round(float(net), 2),
             })
+
+            # First two ISIN characters are the issuer's domicile — a good proxy for the
+            # withholding country, though not exact (ADRs and some funds differ).
+            country = (sec.isin or "")[:2].upper()
+            bucket = by_country.setdefault(country or "??", {
+                "country": country or "??",
+                "gross": Decimal("0"), "withholding": Decimal("0"), "net": Decimal("0"),
+                "symbols": set(),
+            })
+            bucket["gross"] += gross
+            bucket["withholding"] += wht
+            bucket["net"] += net
+            if sec.symbol:
+                bucket["symbols"].add(sec.symbol)
+
         dividend_income.sort(key=lambda d: d["pay_date"])
+
+        dividend_by_country = sorted(
+            (
+                {
+                    "country": b["country"],
+                    "gross": round(float(b["gross"]), 2),
+                    "withholding": round(float(b["withholding"]), 2),
+                    "net": round(float(b["net"]), 2),
+                    "positions": len(b["symbols"]),
+                }
+                for b in by_country.values()
+            ),
+            key=lambda d: d["withholding"],
+            reverse=True,
+        )
 
         # --- Realized capital gains (per SELL trade) ---
         trade_rows = (await self.db.execute(
@@ -169,6 +201,11 @@ class TaxService:
             "base_currency": base_fx.base_currency,
             "dividend_source": "ibkr" if use_ibkr else "yfinance_estimate",
             "dividend_income": dividend_income,
+            "dividend_by_country": dividend_by_country,
+            "dividend_country_note": (
+                "Country derived from the ISIN prefix (issuer domicile) — a good proxy for the "
+                "DA-1 source country, but verify ADRs and funds, whose withholding country can differ."
+            ),
             "dividend_totals": {
                 "gross": round(float(div_gross), 2),
                 "withholding": round(float(div_wht), 2),
@@ -207,6 +244,14 @@ class TaxService:
                         d["gross"], d["withholding"], d["net"]])
         dt = report["dividend_totals"]
         w.writerow(["TOTAL", "", "", "", dt["gross"], dt["withholding"], dt["net"]])
+        w.writerow([])
+
+        # DA-1 is filed per source country.
+        w.writerow(["Withholding by country (DA-1)"])
+        w.writerow(["Country", "Positions",
+                    f"Gross ({cur})", f"Withholding ({cur})", f"Net ({cur})"])
+        for c in report.get("dividend_by_country", []):
+            w.writerow([c["country"], c["positions"], c["gross"], c["withholding"], c["net"]])
         w.writerow([])
 
         w.writerow([f"Realized capital gains (source: {report.get('realized_source', 'trades')})"])

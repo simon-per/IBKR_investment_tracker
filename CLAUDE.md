@@ -138,6 +138,11 @@ Tests: `tests/test_flex_xml_sanitizer.py`, `tests/test_flex_ingestion_e2e.py`.
   `pay_date`, **`source`** ∈ `ibkr` | `yfinance_estimate`.
 - **exchange_rates** / **market_prices** — caches. **ticker_mappings** — IBKR→Yahoo symbols.
 - **app_settings** — `base_currency`, `last_sync_to_date`. Plus fundamentals + earnings tables.
+- **sync_runs** — one row per sync attempt (`sync_type`, `status`, `message`, `details`, `warnings`).
+  `SchedulerService.last_sync_result` is in-memory only and auto-deploy restarts on every push, so
+  without this the daily validator can't tell "no sync ran" from "the container restarted".
+  `/api/scheduler/status` falls back to it; `/api/scheduler/history?limit=N` lists recent runs.
+  Recording is best-effort — it must never fail a sync or mask the real error.
 
 Migrations: `cd backend && alembic upgrade head` (the container CMD runs this on every start).
 
@@ -170,6 +175,11 @@ Two honesty flags, both badged in the UI and CSV:
 - `dividend_source`: `ibkr` (real withholding) vs `yfinance_estimate` (gross guess, no withholding)
 - `realized_source`: `trades` (IBKR FIFO) vs `closed_lot_estimate` (market price at close date — was
   ~8% off on a spot check, hence the badge)
+
+**Steuerwert is valued at 31 December**, not today: `holdings_snapshot_as_of()` rebuilds the holdings
+for `holdings_as_of` (= 31 Dec for a past year, today for the current one) using the same
+`open_date`/`close_date` window as `_calculate_daily_value`, so it can't disagree with the portfolio
+timeline. Positions with no resolvable price near that date are **omitted**, not counted as zero.
 
 Frontend: `TaxTab.tsx`. It's a filing aid, not tax advice.
 

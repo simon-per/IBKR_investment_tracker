@@ -178,6 +178,46 @@ export function TaxTab() {
             </CardContent>
           </Card>
 
+          {/* --- Withholding by country (DA-1 is filed per source country) --- */}
+          {data.dividend_by_country.length > 0 && (
+            <Card>
+              <CardHeader>
+                <CardTitle>Withholding by country (DA-1)</CardTitle>
+                <CardDescription>{data.dividend_country_note}</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b text-muted-foreground">
+                        <th className="px-2 py-1.5 text-left font-medium">Country</th>
+                        <th className="px-2 py-1.5 text-right font-medium">Positions</th>
+                        <th className="px-2 py-1.5 text-right font-medium">Gross</th>
+                        <th className="px-2 py-1.5 text-right font-medium">Withholding</th>
+                        <th className="px-2 py-1.5 text-right font-medium">Net</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.dividend_by_country.map((c) => (
+                        <tr key={c.country} className="border-b border-border/50">
+                          <td className="px-2 py-1.5 font-medium">{c.country}</td>
+                          <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground">
+                            {c.positions}
+                          </td>
+                          <td className="px-2 py-1.5 text-right tabular-nums">{money(c.gross)}</td>
+                          <td className="px-2 py-1.5 text-right tabular-nums">
+                            {c.withholding ? `-${money(c.withholding)}` : money(0)}
+                          </td>
+                          <td className="px-2 py-1.5 text-right font-medium tabular-nums">{money(c.net)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
           {/* --- Realized capital gains --- */}
           <Card>
             <CardHeader>
