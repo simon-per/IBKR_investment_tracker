@@ -175,6 +175,19 @@ def test_clean_xml_is_returned_unchanged():
     assert warnings == []
 
 
+def test_container_attributes_survive_sanitizing():
+    """
+    ibflex asserts <FlexStatements count> matches the number of children, so
+    stripping `count` would break every document. Container tags aren't modelled
+    in Types, so they must be left alone even when the pass rewrites the tree.
+    """
+    sanitized, warnings = _svc()._sanitize_flex_xml(_TRADES)
+
+    assert sanitized is not _TRADES  # the tree really was rewritten
+    assert b'count="1"' in sanitized
+    _statement(sanitized)  # ibflex's count assertion still passes
+
+
 def test_sanitizer_never_raises_on_malformed_xml():
     garbage = b'<FlexQueryResponse><not closed'
 
