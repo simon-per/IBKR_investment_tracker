@@ -125,21 +125,27 @@ class IBKRService:
         """
         Make IBKR's XML digestible by the pinned ibflex, which is strict about schema.
 
-        ibflex maps every XML attribute onto a frozen dataclass field and raises
-        FlexParserError on the first unknown one (`Class.__annotations__[name]` in
-        parser.parse_element_attr), which aborts parsing of the *entire* document.
-        IBKR has added attributes since ibflex 0.15 was released in 2021 — e.g.
-        `subCategory` on <Trade>, `settleDate`/`levelOfDetail` on <CashTransaction> —
-        so one new field would otherwise break the whole sync, open positions
-        included. Two passes:
+        ibflex converts every XML attribute onto a frozen dataclass field and raises
+        FlexParserError on the first one it can't handle, which aborts parsing of the
+        *entire* document — so a single unrecognised field or value breaks the whole
+        sync, open positions included. IBKR has drifted well past ibflex 0.15 (2021):
+        `subCategory` on <Trade> is unmodelled, and enabling extra Cash Transaction
+        types yields values like `type="Broker Fees"` that its CashAction enum has
+        never heard of. Two passes:
 
         1. Drop aggregate duplicate rows (see _AGGREGATE_LEVELS_OF_DETAIL) when real
            per-transaction rows sit alongside them. Done here, at the XML layer,
            because ibflex discards `levelOfDetail` on some element types entirely,
            which makes filtering after parsing impossible.
-        2. Drop attributes the matching ibflex class doesn't declare, using the same
-           `__annotations__` lookup ibflex uses so "known" means exactly what ibflex
-           will accept.
+        2. Drop every attribute ibflex would reject, decided by calling its own
+           parse_element_attr() — so "acceptable" means exactly what ibflex accepts,
+           covering unmodelled names, unknown enum values, unparseable dates/decimals
+           and unknown currencies alike. Dropping degrades gracefully: an unknown
+           CashTransaction `type` becomes None and the row is then skipped by
+           extract_cash_transactions (which only wants dividends/withholding), and an
+           unknown CorporateAction `type` lands as 'UNKNOWN' with its quantity intact.
+           (A required field with an unparseable value would still fail in ibflex's
+           constructor — but that failed before this pass existed too.)
 
         Returns (xml, warnings). The original bytes are returned untouched when
         there was nothing to drop, and this never raises: on any failure the input
@@ -182,8 +188,14 @@ class IBKRService:
                     f"ignored {count} aggregate <{tag}> row(s) that duplicate execution-level rows"
                 )
 
-            # Pass 2: strip attributes unknown to the matching ibflex class.
+            # Pass 2: drop any attribute ibflex would refuse. Rather than re-implement
+            # its rules, ask ibflex itself — parse_element_attr() is the exact function
+            # that runs during parsing, so it rejects precisely what would abort the
+            # document: an attribute it doesn't model, an enum value it doesn't know
+            # (e.g. CashTransaction type="Broker Fees"), an unparseable date/decimal,
+            # or an unknown currency code.
             dropped_attrs: Dict[str, int] = {}
+            drop_reasons: Dict[str, str] = {}
             for elem in all_elements:
                 if not elem.attrib:
                     continue
@@ -192,15 +204,25 @@ class IBKRService:
                     # A container (<Trades>, <FlexStatements>, ...) or a tag ibflex
                     # doesn't model — leave it exactly as IBKR sent it.
                     continue
-                known = getattr(flex_class, '__annotations__', {})
-                for name in [n for n in elem.attrib if n not in known]:
-                    del elem.attrib[name]
-                    key = f"{elem.tag}.{name}"
-                    dropped_attrs[key] = dropped_attrs.get(key, 0) + 1
+                for name, value in list(elem.attrib.items()):
+                    try:
+                        parser.parse_element_attr(flex_class, name, value)
+                    except Exception as exc:
+                        del elem.attrib[name]
+                        key = f"{elem.tag}.{name}"
+                        dropped_attrs[key] = dropped_attrs.get(key, 0) + 1
+                        drop_reasons.setdefault(
+                            key,
+                            "not modelled by this ibflex version"
+                            if isinstance(exc, KeyError) else str(exc),
+                        )
 
             if dropped_attrs:
-                detail = ', '.join(f"{key} (x{count})" for key, count in sorted(dropped_attrs.items()))
-                warnings.append(f"dropped IBKR attribute(s) unknown to this ibflex version: {detail}")
+                detail = ', '.join(
+                    f"{key} x{count} ({drop_reasons.get(key, 'rejected')})"
+                    for key, count in sorted(dropped_attrs.items())
+                )
+                warnings.append(f"dropped IBKR attribute(s) this ibflex version can't parse: {detail}")
 
             for warning in warnings:
                 logger.warning(f"Flex XML sanitizer: {warning}")

@@ -7,11 +7,12 @@ after ibflex 0.15 was released (e.g. `subCategory` on <Trade>) breaks the entire
 sync. These tests drive the real ibflex parser over small but real-shaped Flex
 documents — no network, no IBKR credentials.
 """
+from datetime import date
 from decimal import Decimal
 
 import pytest
 
-from ibflex import parser
+from ibflex import enums, parser
 from ibflex.parser import FlexParserError
 
 from app.services.ibkr_service import IBKRService
@@ -173,6 +174,101 @@ def test_clean_xml_is_returned_unchanged():
 
     assert sanitized is raw
     assert warnings == []
+
+
+# --------------------------------------------------------------------------
+# Unknown enum *values* (not just unknown attribute names)
+# --------------------------------------------------------------------------
+
+_UNKNOWN_CASH_TYPE = _wrap(
+    '<CashTransactions>'
+    # "Broker Fees" is selectable in the Flex Query but absent from ibflex's
+    # CashAction enum, so it aborts the whole document unless neutralised.
+    '<CashTransaction type="Broker Fees" assetCategory="STK" conid="100" symbol="AAA"'
+    ' transactionID="C0" dateTime="2026-04-01" settleDate="2026-04-01"'
+    ' amount="-2.50" currency="USD" description="BROKER FEE" />'
+    '<CashTransaction type="Dividends" assetCategory="STK" conid="100" symbol="AAA"'
+    ' transactionID="C1" dateTime="2026-05-01" settleDate="2026-05-02"'
+    ' amount="42.50" currency="USD" description="AAA DIVIDEND" />'
+    '<CashTransaction type="Withholding Tax" assetCategory="STK" conid="100" symbol="AAA"'
+    ' transactionID="C2" dateTime="2026-05-01" settleDate="2026-05-02"'
+    ' amount="-6.38" currency="USD" description="AAA WHTAX" />'
+    '</CashTransactions>'
+)
+
+
+def test_unknown_cash_action_value_would_abort_the_document():
+    with pytest.raises(FlexParserError, match='not a valid CashAction'):
+        parser.parse(_UNKNOWN_CASH_TYPE)
+
+
+@pytest.mark.asyncio
+async def test_unknown_cash_action_is_neutralised_not_fatal():
+    """
+    The unparseable row loses its `type` and is then skipped by the extractor,
+    while the real dividend + withholding pair beside it still comes through.
+    """
+    svc = _svc()
+    sanitized, warnings = svc._sanitize_flex_xml(_UNKNOWN_CASH_TYPE)
+
+    statement = _statement(sanitized)  # must not raise
+    types = [ct.type for ct in statement.CashTransactions]
+    assert types.count(None) == 1  # the "Broker Fees" row was neutralised
+    assert any('CashTransaction.type' in w and 'CashAction' in w for w in warnings)
+
+    txns = await svc.extract_cash_transactions({'statement': statement})
+
+    by_type = {t['type']: t for t in txns}
+    assert set(by_type) == {'DIVIDEND', 'WHTAX'}  # fee row dropped, not counted
+    assert by_type['DIVIDEND']['amount'] == Decimal('42.50')
+    assert by_type['WHTAX']['amount'] == Decimal('-6.38')
+
+
+@pytest.mark.asyncio
+async def test_unknown_reorg_type_keeps_the_action_with_unknown_label():
+    raw = _wrap(
+        '<CorporateActions>'
+        '<CorporateAction type="ZZ" assetCategory="STK" conid="100" symbol="AAA"'
+        ' transactionID="CA9" dateTime="2026-04-01" reportDate="2026-04-01"'
+        ' quantity="-90" value="0" proceeds="0" currency="USD"'
+        ' actionDescription="MYSTERY REORG" />'
+        '</CorporateActions>'
+    )
+    svc = _svc()
+    sanitized, _ = svc._sanitize_flex_xml(raw)
+
+    actions = await svc.extract_corporate_actions({'statement': _statement(sanitized)})
+
+    assert len(actions) == 1
+    assert actions[0]['action_type'] == 'UNKNOWN'
+    assert actions[0]['quantity'] == Decimal('-90')  # the useful data survives
+    assert actions[0]['action_date'] == date(2026, 4, 1)
+
+
+@pytest.mark.asyncio
+async def test_unknown_note_code_does_not_lose_the_trade():
+    raw = _wrap(f'<Trades>{_trade(notes="XYZ")}</Trades>')
+    svc = _svc()
+    sanitized, _ = svc._sanitize_flex_xml(raw)
+
+    trades = await svc.extract_trades({'statement': _statement(sanitized)})
+
+    assert len(trades) == 1
+    assert trades[0]['ib_key'] == 'TX1'
+    assert trades[0]['realized_pnl'] == Decimal('30')
+
+
+def test_valid_enum_values_are_kept():
+    """The check must discriminate, not strip everything that happens to be typed."""
+    raw = _wrap(f'<Trades>{_trade(subCategory=None, notes="P", buySell="SELL")}</Trades>')
+
+    sanitized, warnings = _svc()._sanitize_flex_xml(raw)
+
+    assert sanitized is raw  # nothing rejected -> untouched
+    assert warnings == []
+    trade = _statement(raw).Trades[0]
+    assert trade.buySell is enums.BuySell.SELL
+    assert trade.notes == (enums.Code.PARTIAL,)
 
 
 def test_container_attributes_survive_sanitizing():
