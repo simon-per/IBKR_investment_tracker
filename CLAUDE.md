@@ -1,579 +1,258 @@
-IBKR Portfolio Analyzer - Development Summary
-Project Overview
-A full-stack portfolio tracking application for Interactive Brokers accounts that tracks securities and tax lots with dual-line chart visualization showing cost basis vs. market value over time. All values converted to EUR as base currency.
+# IBKR Portfolio Analyzer — Project Guide
 
-Tech Stack
-Backend
-FastAPI - Async Python web framework
-SQLAlchemy 2.0 - Async ORM with SQLite
-Alembic - Database migrations
-ibflex - IBKR Flex Query XML parsing
-yfinance 1.1.0+ - Market data (primary, free) - REQUIRES version 1.1.0+ for stability
-Frankfurter API (frankfurter.app) - Currency conversion (free, EUR-based)
-Frontend
-React 18 + TypeScript + Vite
-TanStack Query - Data fetching and caching
-Recharts - Chart visualization
-Tailwind CSS + shadcn/ui
-Architecture
+Full-stack portfolio tracker for an Interactive Brokers account. Tracks securities, tax lots, trades,
+corporate actions and dividends; renders cost-basis vs. market-value charts; and produces a Swiss tax
+report. All values are stored in EUR and projected into a switchable base currency (currently **CHF**).
 
-┌─────────────────┐
-│  IBKR Flex Query │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────────────────────────────────────────┐
-│              Backend (FastAPI)                       │
-├─────────────────────────────────────────────────────┤
-│  • IBKRService: Parse Flex Query (STK only)         │
-│  • SecurityRepository: ISIN + Exchange composite key │
-│  • TaxLotRepository: Purchase tracking               │
-│  • CurrencyService: Batch fetch + caching           │
-│  • MarketDataService: Yahoo Finance + ticker mapping │
-│  • PortfolioService: Cost basis & market value calc  │
-└────────┬────────────────────────────────────────────┘
-         │
-         ▼
-┌─────────────────────────────────────────────────────┐
-│            Frontend (React)                          │
-├─────────────────────────────────────────────────────┤
-│  • Dashboard: Main view with charts & cards          │
-│  • PortfolioValueChart: Dual-line Recharts visual   │
-│  • PortfolioSummaryCards: Metrics overview           │
-│  • PositionsList: Holdings table with gain/loss      │
-└─────────────────────────────────────────────────────┘
-Database Schema
-Securities
-Composite Key: isin + exchange (handles same stock on different exchanges)
-Tracks: symbol, description, currency, conid, exchange
-TaxLots
-Individual purchase records with date, quantity, cost basis
-cost_basis_eur: Pre-converted to EUR for performance
-is_open: Tracks active vs closed positions
-TickerMappings
-Maps IBKR symbols to Yahoo Finance tickers
-Built-in mappings for German ETFs (XNAS, XAIX, DBPG, etc.)
-Auto-discovery: Tries variations and saves successful mappings
-ExchangeRates
-Caches Frankfurter API exchange rates
-Supports batch fetching (30-day ranges)
-Carry-forward for weekends/holidays
-MarketPrices
-Caches Yahoo Finance daily closing prices
-Reduces API calls for historical data
-Supports incremental sync
-Key Technical Decisions
-1. ISIN + Exchange Tracking
-Same stock on different exchanges = separate securities
-
-Example: Amazon US (NASDAQ, USD) vs Amazon DE (XETRA, EUR)
-Different prices, currencies, tax lots
-2. Currency Conversion Strategy
-Batch Fetching with Carry-Forward
-
-Batch API call: /2025-01-01..2025-01-31?from=USD&to=EUR
-One call fetches 30 days instead of 30 individual calls
-Weekend/holiday handling: Use most recent available rate
-All rates cached in database
-3. Ticker Mapping System
-Problem: International ETFs/stocks have different Yahoo Finance tickers
-
-IBKR: DBPG on IBIS2 → Yahoo: DBPG.DE
-IBKR: XNAS on IBIS2 → Yahoo: XNAS.DE
-IBKR: SMH on LSEETF → Yahoo: SMH.L
-Solution: Three-tier lookup
-
-Check custom mappings database
-Use exchange suffix logic (IBIS2 → .DE, LSEETF → .L, etc.)
-Try variations (.DE, .F, .L, no suffix)
-Auto-save successful mappings
-
-Exchange Suffix Mappings:
-- XETRA → .DE
-- IBIS2 → .DE
-- LSEETF → .L
-- AEB → .AS
-- (Add others as discovered)
-4. Market Data Strategy
-Yahoo Finance with Rate Limiting
-
-Primary: Yahoo Finance (free, international coverage)
-Exchange-specific tickers with suffixes
-Auto-discovery tries multiple variations
-Caches all prices to minimize API calls
-
-Rate Limiting Protection:
-- Random delays: 1-3 seconds per API request
-- Security delays: 2-4 seconds between different securities
-- User-Agent headers: Chrome browser signature
-- Smart retry: Detects rate limits and stops immediately
-- Hourly limits: ~500-2,000 requests (Yahoo enforced)
-- Burst limits: ~10-20 requests in quick succession
-
-⚠️ CRITICAL: Always get user permission before running market data sync!
-5. Portfolio Value Calculation
-Dual-Line Chart Data
-
-Cost Basis: Sum of cost_basis_eur from active tax lots
-Market Value: Sum of (quantity × market_price × fx_rate)
-Calculated daily for chart timeline
-Active tax lots: open_date <= date AND (close_date IS NULL OR close_date > date)
-Major Issues Fixed
-Issue 1: Enum vs String Comparison
-Problem: position.assetCategory returned AssetClass.STOCK (enum), but code checked != 'STK' (string)
-Result: ALL positions filtered out (0 securities synced)
-Fix: Changed to != AssetClass.STOCK (enum comparison)
-
-Issue 2: FlexQueryResponse Navigation
-Problem: parser.parse() returns FlexQueryResponse, not FlexStatement
-Result: No access to OpenPositions data
-Fix: Extract FlexStatement: response.FlexStatements[0]
-
-Issue 3: Currency API 404 Errors
-Problem: Recent dates (2026-01-30) not available yet on Frankfurter API
-Result: "Currency USD not supported" errors
-Fix: Implemented batch fetching with date ranges and carry-forward strategy
-
-Issue 4: German ETF Ticker Mismatches
-Problem: IBKR symbol DBPG doesn't work on Yahoo Finance
-Result: No market prices for German ETFs
-Fix: Built ticker mapping system with auto-discovery
-
-Issue 5: Field Name Mismatch
-Problem: Portfolio service returned cost_basis_eur, schema expected total_cost_basis_eur
-Result: Pydantic validation errors
-Fix: Mapped field names in get_current_portfolio_summary()
-
-Issue 6: Wrong Frankfurter API Endpoint
-Problem: Using frankfurter.dev instead of frankfurter.app
-Result: 404 errors on currency conversion requests
-Fix: Changed base URL to https://api.frankfurter.app in currency_service.py:20
-
-Issue 7: Empty ticker_mappings Migration
-Problem: Migration file 0fe97bf472da had only pass statements
-Result: ticker_mappings table not created, application crashes
-Fix:
-- Updated migration file with proper table creation SQL
-- Manually created table when migration couldn't downgrade
-- Added proper columns: ibkr_symbol, ibkr_exchange, yahoo_ticker, source, created_at
-
-Issue 8: Yahoo Finance Blocking/Rate Limiting
-Problem: Multiple issues causing 404/429 errors
-Root Causes:
-- Outdated yfinance 0.2.36
-- No User-Agent headers (looked like bot traffic)
-- No rate limiting (burst of 84 requests in 84 seconds)
-- Trying 3 ticker variations per security
-Fixes:
-- Upgraded yfinance: 0.2.36 → 1.1.0
-- Added User-Agent headers mimicking Chrome browser
-- Added random delays: 1-3 seconds per request
-- Added security delays: 2-4 seconds between securities
-- Smart retry logic with rate limit detection
-- Modified market_data_service.py
-
-Issue 9: Missing Exchange Suffixes
-Problem: LSEETF and IBIS2 not in EXCHANGE_SUFFIXES mapping
-Result: Unable to map UK-listed securities (e.g., SMH on London Stock Exchange)
-Fix: Added to EXCHANGE_SUFFIXES dict:
-- LSEETF: '.L' (London Stock Exchange ETFs)
-- IBIS2: '.DE' (German electronic exchange)
-
-Issue 10: SMH Ticker Incorrect Price
-Problem: SMH showing €8,075 instead of ~€1,650
-Root Cause: Using US SMH ticker (VanEck Semiconductor ETF @ $280) instead of UK SMH ticker (iShares MSCI Korea UCITS ETF @ $72.64 on LSE)
-Fix Applied:
-- Added LSEETF → .L mapping
-- Created ticker mapping: SMH@LSEETF → SMH.L
-- Deleted incorrect market prices (security_id = 27)
-Status: ⏳ Waiting for Yahoo Finance rate limit cooldown (30-60 min) before re-sync
-
-Database Migrations
-Created migrations for:
-
-securities, taxlots, exchange_rates, market_prices
-ticker_mappings (latest)
-Run migrations:
-
-
-cd backend
-alembic upgrade head
-Built-in Ticker Mappings
-Auto-initialized on startup (11 default mappings):
-
-German ETFs:
-- DBPG@IBIS2 → DBPG.DE (Xtrackers S&P 500 2x Leveraged)
-- XNAS@IBIS2 → XNAS.DE (Xtrackers Nasdaq 100)
-- XAIX@XETRA → XAIX.DE (Xtrackers MSCI World)
-- VUSA@XETRA → VUSA.DE (Vanguard S&P 500)
-- EUNL@XETRA → EUNL.DE (iShares Core MSCI World)
-
-UK ETFs:
-- SMH@LSEETF → SMH.L (iShares MSCI Korea UCITS ETF)
-
-Plus Amsterdam listings and auto-discovered mappings
-API Endpoints
-Sync
-POST /api/sync/ibkr - Sync from IBKR Flex Query
-GET /api/sync/status - Sync status
-Market Data
-POST /api/market-data/sync - Fetch historical prices
-GET /api/market-data/status - Cache statistics
-Portfolio
-GET /api/portfolio/value-over-time - Chart data
-GET /api/portfolio/summary - Current totals
-GET /api/portfolio/positions - Holdings breakdown
-Environment Configuration
-Backend .env
-
-IBKR_TOKEN=your_flex_query_token
-IBKR_QUERY_ID=your_flex_query_id
-DATABASE_URL=sqlite+aiosqlite:///./portfolio.db
-CORS_ORIGINS=http://localhost:5173
-Frontend .env.development
-
-VITE_API_URL=http://localhost:8000/api
-IBKR Flex Query Configuration
-Required Fields:
-
-Currency
-Asset Class
-Symbol
-Quantity
-Cost Basis Price
-Cost Basis Money
-Open Date Time
-Description
-Listing Exchange
-Conid
-ISIN
-Report Date
-Settings:
-
-Format: XML
-Period: Last Business Day (or custom range)
-Asset Category: Stocks (STK) only
-Running the Application
-Backend
-
-cd backend
-source venv/bin/activate  # Windows: venv\Scripts\activate
-uvicorn app.main:app --reload --port 8000
-Frontend
-
-cd frontend
-npm run dev
-Access
-Frontend: http://localhost:5173
-Backend API: http://localhost:8000
-API Docs: http://localhost:8000/docs
-Usage Flow
-Sync IBKR Data
-
-Click "Sync IBKR Data" in dashboard
-Fetches securities and tax lots from IBKR
-Converts cost basis to EUR
-Stores in database
-Sync Market Data
-
-
-curl -X POST http://localhost:8000/api/market-data/sync
-Fetches 2 years of historical prices
-Uses ticker mappings for German ETFs
-Auto-discovers correct tickers
-Caches all prices
-View Portfolio
-
-Dual-line chart shows cost basis vs market value
-Summary cards show totals and gain/loss
-Positions list shows all holdings
-Debugging Features
-Currency Service
-Batch fetch debug: Shows date ranges and rates fetched
-Carry-forward debug: Shows when using previous rates
-Market Data Service
-Ticker mapping debug: Shows custom mappings used
-Auto-discovery debug: Shows ticker variations tried
-Success logging: Saves auto-discovered mappings
-IBKR Service
-Statement parsing debug: Shows OpenPositions count
-Security extraction debug: Shows AssetClass enum values
-Common Commands
-Database
-
-# Reset database
-rm portfolio.db
-alembic upgrade head
-
-# Check data
-python -c "
-import asyncio
-from app.database import AsyncSessionLocal
-from sqlalchemy import select, func
-from app.models.taxlot import TaxLot
-
-async def check():
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(select(func.count(TaxLot.id)))
-        print(f'Tax Lots: {result.scalar()}')
-
-asyncio.run(check())
-"
-Add Custom Ticker Mapping
-
-import asyncio
-from app.database import AsyncSessionLocal
-from app.repositories.ticker_mapping_repository import TickerMappingRepository
-
-async def add():
-    async with AsyncSessionLocal() as db:
-        repo = TickerMappingRepository(db)
-        await repo.upsert_mapping(
-            ibkr_symbol="SYMBOL",
-            ibkr_exchange="XETRA",
-            yahoo_ticker="SYMBOL.DE",
-            source="manual"
-        )
-        await db.commit()
-
-asyncio.run(add())
-
-# Check SMH market prices
-sqlite3 portfolio.db "SELECT date, close_price FROM market_prices WHERE security_id = 27 ORDER BY date DESC LIMIT 5;"
-
-# Delete incorrect market prices for a security
-sqlite3 portfolio.db "DELETE FROM market_prices WHERE security_id = 27;"
-
-Yahoo Finance Rate Limits and Best Practices
-⚠️ CRITICAL RULES
-
-NEVER make Yahoo Finance API calls without explicit user permission
-Always wait 30-60 minutes after hitting rate limit before retry
-One market data sync can make 50-150+ API requests (depending on securities and date ranges)
-Rate Limit Indicators
-
-HTTP 404 errors with "Expecting value: line 1 column 1 (char 0)"
-HTTP 429 Too Many Requests
-Empty JSON responses
-Connection timeouts
-Protection Mechanisms in Place
-
-Random delays: 1-3 seconds per request
-Security delays: 2-4 seconds between different securities
-User-Agent headers: Mimics Chrome browser
-Smart retry: Stops immediately when rate limit detected
-Incremental caching: Only fetches missing dates
-Estimated Rate Limits (Yahoo enforced)
-
-Hourly limit: ~500-2,000 requests per hour
-Burst limit: ~10-20 requests in quick succession
-IP-based: Affects all requests from same machine
-Recovery Time
-
-Wait minimum 30 minutes after rate limit
-Safe approach: Wait 1 hour before retry
-Check user permission before each sync
-Recovery Commands
-
-# Check when last market data sync ran (from backend logs)
-# Wait 30-60 minutes
-
-# When ready, get user permission first
-curl -X POST http://localhost:8000/api/market-data/sync
-
-# Monitor backend logs for rate limit warnings
-Current State
-✅ Completed and Working:
-
-IBKR Flex Query integration (28 securities, 920 tax lots imported)
-Currency conversion with batch fetching (Frankfurter API working)
-Ticker mapping system with auto-discovery
-Market data fetching with rate limiting (14,058 prices cached for 27/28 securities)
-Portfolio calculations (cost basis + market value)
-Frontend dashboard with charts
-Database schema and migrations complete
-Backend running on port 8000
-
-⏳ Pending:
-
-SMH market prices need re-sync (waiting for Yahoo Finance rate limit cooldown)
-Must wait 30-60 minutes from last API call
-User permission required before any market data sync
-
-⚠️ Known Issues:
-
-SMH (security_id = 27) showing incorrect price (~€8,075 instead of ~€1,650)
-Prices deleted, awaiting re-fetch with correct SMH.L ticker
-Yahoo Finance rate limit hit (burst limit exceeded)
-🔮 Future Enhancements:
-
-Tax lot sale tracking (closed positions)
-Dividend tracking
-Performance attribution
-Portfolio allocation pie chart
-Dark mode
-Export to CSV/Excel
-Troubleshooting
-If sync shows 0 securities:
-
-Check backend logs for AssetClass enum debug
-Verify XML has assetCategory="STK"
-
-If currency conversion fails:
-
-Check Frankfurter API batch fetch status
-Verify dates are not too far in future
-Look for carry-forward debug messages
-Ensure using frankfurter.app (NOT frankfurter.dev)
-
-If market prices missing:
-
-Check ticker mapping debug output
-Verify Yahoo Finance ticker variations tried
-Add custom mapping if needed
-Check if exchange suffix is in EXCHANGE_SUFFIXES dict
-
-If Yahoo Finance rate limit errors (404/429):
-
-⚠️ STOP ALL MARKET DATA REQUESTS IMMEDIATELY
-Wait 30-60 minutes before retry
-Check yfinance version (must be 1.1.0+)
-Verify User-Agent headers are set
-Ensure rate limiting delays are active (1-3s per request, 2-4s between securities)
-Always get user permission before syncing
-
-If frontend shows errors:
-
-Check backend is running on port 8000
-Verify CORS settings in backend
-Check browser console for details
-
-If ticker mapping issues:
-
-Check EXCHANGE_SUFFIXES dict has the exchange
-Add manual mapping using TickerMappingRepository
-Verify Yahoo Finance ticker with browser test
-Delete incorrect market_prices entries before re-sync
-File Structure
-
-backend/
-├── app/
-│   ├── models/          # SQLAlchemy models
-│   ├── repositories/    # Data access layer
-│   ├── services/        # Business logic
-│   ├── routers/         # API endpoints
-│   ├── schemas/         # Pydantic models
-│   └── main.py          # FastAPI app
-├── alembic/             # Migrations
-└── portfolio.db         # SQLite database
-
-frontend/
-├── src/
-│   ├── components/      # React components
-│   ├── lib/             # API client & utils
-│   └── App.tsx          # Main app
-└── package.json
-
-Files Modified in Latest Session
-backend/app/services/currency_service.py
-- Line 20: Changed base URL from frankfurter.dev to frankfurter.app
-
-backend/app/services/market_data_service.py
-- Added rate limiting with random delays (1-3s per request, 2-4s between securities)
-- Added User-Agent headers (Chrome browser signature)
-- Upgraded yfinance dependency requirement (1.1.0+)
-- Added smart retry logic with rate limit detection
-- Added LSEETF and IBIS2 to EXCHANGE_SUFFIXES dict
-
-backend/alembic/versions/0fe97bf472da_add_ticker_mappings_table.py
-- Added proper table creation SQL (replaced empty pass statements)
-- Columns: ibkr_symbol, ibkr_exchange, yahoo_ticker, source, created_at
-
-backend/requirements.txt
-- Upgraded yfinance from 0.2.36 to 1.1.0
-
-Database Operations (Manual)
-- Created ticker_mappings table via SQL (when migration failed)
-- Added ticker mapping: SMH@LSEETF → SMH.L
-- Deleted market_prices for security_id = 27 (SMH)
-
-Last Updated: 2026-02-01 (Session with rate limiting fixes completed)
-Status: 98% complete - one security (SMH) awaiting re-sync after rate limit cooldown
-Current Blocker: Yahoo Finance rate limit - waiting 30-60 min before retry
-Next Steps:
-1. Wait for rate limit cooldown (30-60 minutes from last sync)
-2. Get user permission to retry market data sync
-3. Verify SMH shows correct price (~€1,650 instead of ~€8,075)
-4. Full end-to-end testing of portfolio dashboard
-
-Data Status:
-- Securities: 28 imported ✅
-- Tax Lots: 920 imported ✅
-- Market Prices: 14,058 cached for 27/28 securities ⏳
-- Missing: SMH.L prices (security_id = 27)
+**Live:** https://portfolio.srv1211053.hstgr.cloud · **Repo is PUBLIC** (never commit account data)
 
 ---
 
-Quick Reference - Current Session Status
-Issue: Yahoo Finance Rate Limit Hit
-When: Last market data sync (check backend logs for exact time)
-Impact: SMH showing wrong price (~€8,075 instead of ~€1,650)
-Root Cause: Using US SMH ticker instead of UK SMH.L ticker
-Fix Applied: Added SMH@LSEETF → SMH.L mapping, deleted wrong prices
-Action Required: Wait 30-60 min, get user permission, run market data sync
-Expected Result: Only SMH.L prices will be fetched (others cached), SMH value corrects to ~€1,650
+## ⚠️ Two rules that must never be broken
 
-Backend Status:
-- Running on port 8000 ✅
-- Database: backend/portfolio.db ✅
-- 27 of 28 securities have correct market data ✅
-- 1 security (SMH) awaiting re-sync ⏳
+### 1. Never call Yahoo Finance without explicit user permission
+`yfinance` powers market prices, dividend estimates, fundamentals and benchmarks. Yahoo rate-limits
+hard (~500-2,000 requests/hour, ~10-20 in a burst, IP-based). A full market-data sync is **50-150+
+requests**. Symptoms of a limit: HTTP 429, HTTP 404 with `Expecting value: line 1 column 1 (char 0)`,
+empty JSON, timeouts. Recovery: **stop immediately, wait 30-60 min.**
 
-Frontend Status:
-- Running on http://localhost:5173 ✅
-- Connected to backend ✅
-- Displaying portfolio with minor price error (SMH) ⏳
+Protections in `market_data_service.py`: random 1-3s delay per request, 2-4s between securities, Chrome
+User-Agent, rate-limit detection that aborts the run, and incremental caching (only missing dates).
+`yfinance` must stay **>= 1.1.0**.
 
-Critical Reminders:
-⚠️ DO NOT run market data sync without user permission
-⚠️ DO NOT sync before 30-60 min cooldown period
-⚠️ Always check yfinance version (must be 1.1.0+)
-✅ Rate limiting protections are now in place
+The IBKR Flex sync (`POST /api/sync/ibkr`) is Flex-only and touches **no** Yahoo — it's always safe.
+
+### 2. Never loop the IBKR Flex sync
+IBKR allows **1 request/second and 10 requests/minute per token**, and one `ibflex.client.download()`
+is *several* HTTP requests (request statement, then poll until ready, each with 3 internal tries). An
+eager retry loop blows the cap and triggers **`Code=1025: Too many failed attempts`** — an undocumented
+token lockout lasting **hours** (observed ~14h) that blocks all syncing. This has happened twice, both
+times self-inflicted.
+
+Retrying *during* a lockout can extend it. When locked: do nothing and let the schedule recover it.
+
+Budgets in `ibkr_service.py`: `_FLEX_RETRY_DELAYS = [30]` (2 attempts, interactive path) and
+`FLEX_RETRY_DELAYS_PATIENT = [120, 300, 600]` (scheduled jobs). `1025` fails fast with guidance; `1018`
+always backs off >= 60s. Pinned by `tests/test_flex_retry_policy.py`.
+
+**Flex error codes:** `1001` statement not ready (transient, expected — the YTD statement is big),
+`1018` rate limit, `1019`/`1021` transient, `1025` lockout (fatal, don't retry), `1020` bad token.
 
 ---
 
-Fundamentals Feature (Implemented & Reviewed)
-New files added:
-- backend/app/models/fundamental_metrics.py - SQLAlchemy model for per-security fundamentals
-- backend/app/models/earnings_event.py - SQLAlchemy model for earnings calendar events
-- backend/app/repositories/fundamentals_repository.py - upsert_metrics, upsert_earnings_event
-- backend/app/routers/fundamentals.py - GET /api/fundamentals/{security_id}, POST /api/fundamentals/sync
-- backend/app/services/fundamentals_service.py - yfinance .info fetch via asyncio.to_thread
-- backend/alembic/versions/b4c8d2e6f7a9_add_fundamentals_tables.py - migration
-- frontend/src/components/FundamentalsTab.tsx - React tab with metrics + earnings calendar
+## Tech stack
 
-Key implementation decisions:
-- asyncio.to_thread used for yfinance calls (blocking I/O off event loop)
-- Consolidated fetch: single yf.Ticker().info call per security (not separate calls)
-- ETF guard relaxed: ETFs pass through fundamentals sync (PE/EPS stored as null for ETFs)
-- joinedload used for EarningsEvent.security relationship; queries use .unique().scalars().all()
-- 7-day staleness window: fundamentals re-fetched if last_updated > 7 days ago
-- quote_type defaults to 'EQUITY' via info.get('quoteType', 'EQUITY')
+**Backend** — FastAPI (async), SQLAlchemy 2.0 + aiosqlite (WAL), Alembic, APScheduler,
+`ibflex` **0.15** (pinned), `yfinance` >= 1.1.0, Frankfurter API for FX.
+**Frontend** — React 18 + TypeScript + Vite, TanStack Query, Recharts, Tailwind + shadcn/ui.
 
-Bug review findings (all edge cases reviewed, no fixes needed):
-1. Empty dict from rate-limited yfinance: if not info guard passes empty dicts, stores null metrics,
-   marked as synced — acceptable, 7-day refresh handles it
-2. quoteType: None stored as None (not default 'EQUITY') — minor, frontend handles null gracefully
-3. _extract_earnings DataFrame guard (hasattr .empty): safe — yfinance always returns DataFrame or raises
-4. Thread safety: closure captures immutable string, creates yf.Ticker fresh per thread — thread-safe
-5. SQLAlchemy session: no cross-thread session access — all DB ops on main async event loop
-6. joinedload duplicates: both queries use .unique().scalars().all() — correct
-7. Relationship name EarningsEvent.security: verified matches back_populates at security.py:60-63
+---
 
-Modified existing files:
-- backend/app/main.py - registered fundamentals router
-- backend/app/models/__init__.py - exported new models
-- backend/app/models/security.py - added earnings_events relationship (back_populates)
-- backend/app/schemas/portfolio.py - added FundamentalsResponse schema
-- frontend/src/components/Dashboard.tsx - added Fundamentals tab
-- frontend/src/lib/api.ts - added fetchFundamentals, syncFundamentals API calls
+## IBKR Flex Query integration
+
+### The Flex Query (`App_OpenLots`, ID 1389408)
+
+Required sections and the fields the parsers actually read:
+
+| Section | Options | Key fields |
+|---|---|---|
+| **Open Positions** | **Lot** | `conid`, `symbol`, `isin`, `description`, `currency`, `listingExchange`, `position`, `costBasisPrice`, `costBasisMoney`, `openDateTime`, `reportDate` |
+| **Trades** | **Execution** | `conid`, `symbol`, `tradeDate`, `buySell`, `quantity`, `tradePrice`, `proceeds`, `ibCommission`, `currency`, **`fifoPnlRealized`** (= "Realized P/L"), `transactionID` |
+| **Cash Transactions** | Dividends, Payment in Lieu, **Withholding Tax** | `type`, `conid`, `symbol`, `settleDate`/`dateTime`, `amount`, `currency`, `transactionID` |
+| **Corporate Actions** | Detail | `type`, `conid`, `symbol`, `dateTime`/`reportDate`, `quantity`, `value`, `proceeds`, `actionDescription`, `transactionID` |
+
+**General config that matters:** Format **XML**; Period **Year to Date** (Trades/CashTransactions only
+contain rows *inside* the period — "Last Business Day" would mean historical trades never arrive);
+Date `yyyyMMdd`, Time `HHmmss`, separator `;`. **Never use `dd/MM/yyyy`** — ibflex assumes US
+`MM/dd/yyyy` for ambiguous formats and would silently swap month and day.
+
+Prior tax years need a one-off period change (e.g. 2025), then set back to YTD. Ingestion is idempotent
+(upserts keyed on `ib_key`), so re-syncing is safe.
+
+### `_sanitize_flex_xml()` — why it exists
+
+ibflex 0.15 (released 2021) converts **every** XML attribute onto a frozen dataclass and raises
+`FlexParserError` on the first thing it can't handle, which **aborts the entire document** — so one
+unrecognised field kills the whole sync, open positions included. IBKR has drifted well past it:
+
+- **Unknown attribute names**, e.g. `subCategory` on `<Trade>` (modelled only on `SecurityInfo`).
+- **Unknown enum values**, e.g. `type="Broker Fees"` — the query can enable 17 cash-transaction types
+  but `enums.CashAction` models 10. Also `CorporateAction.type` (`Reorg`) and `notes`/`code` (`Code`).
+
+`IBKRService._sanitize_flex_xml()` runs before `parser.parse()` and:
+1. drops **any attribute ibflex's own `parser.parse_element_attr()` rejects** — that single call covers
+   unknown names, bad enum values, unparseable dates/decimals and unknown currencies, and can't drift
+   out of step with ibflex;
+2. drops aggregate duplicate rows (`levelOfDetail` in ORDER / SYMBOL_SUMMARY / CLOSED_LOT / …) when
+   real execution rows sit beside them, since IBKR gives each its own `transactionID` and ingesting
+   both would **double-count trades and realized P&L** — but keeps them if they're all there is, so a
+   populated section is never emptied.
+
+It returns the original bytes untouched when nothing changed, never raises, and reports every drop via
+`warnings[]` (surfaced in the sync response). **Don't patch attribute names one by one** — it's generic.
+`_fix_currency_codes()` still runs first so `RUS`→`RUB` is repaired rather than dropped.
+
+Degradation is graceful: an unknown cash `type` becomes `None` and the row is skipped by
+`extract_cash_transactions` (which only wants dividends/withholding); an unknown reorg `type` lands as
+`'UNKNOWN'` with quantity and date intact.
+
+Tests: `tests/test_flex_xml_sanitizer.py`, `tests/test_flex_ingestion_e2e.py`.
+
+---
+
+## Database schema
+
+- **securities** — composite identity `isin + exchange` (same stock on two exchanges = two rows, e.g.
+  ASML on NASDAQ *and* AEB). Also `symbol`, `description`, `currency`, `conid`.
+- **taxlots** — one row per purchase: `open_date`, `quantity`, `cost_basis`, `cost_basis_eur`
+  (pre-converted), `is_open`, `close_date`, **`close_source`** ∈ `trade` | `corporate_action` |
+  `heuristic`.
+- **trades** — authoritative executions, idempotent on `ib_key`: `buy_sell`, `quantity`, `price`,
+  `proceeds`, `commission`, **`realized_pnl`** (IBKR's own FIFO). `security_id` is nullable — a fully
+  sold security is no longer in OpenPositions.
+- **corporate_actions** — `action_type` (Reorg name), `quantity`, `value`, `proceeds`, `description`.
+- **dividend_payments** — `gross_amount_eur`, **`withholding_tax_eur`**, **`net_amount_eur`**,
+  `pay_date`, **`source`** ∈ `ibkr` | `yfinance_estimate`.
+- **exchange_rates** / **market_prices** — caches. **ticker_mappings** — IBKR→Yahoo symbols.
+- **app_settings** — `base_currency`, `last_sync_to_date`. Plus fundamentals + earnings tables.
+
+Migrations: `cd backend && alembic upgrade head` (the container CMD runs this on every start).
+
+---
+
+## Reconciliation & realized P&L
+
+`reconcile_taxlots()` (`sync_helper.py`) explains quantity changes in priority order:
+1. **SELL trades** → close lots FIFO with the real date/proceeds/`fifoPnlRealized`; `close_source='trade'`
+2. **Corporate actions** → deterministic reclassification (split/spinoff/merger), not a sale
+3. **Fallback heuristic** (quantity drop + `COST_CONSERVED_RATIO`) → `close_source='heuristic'`
+
+**Empty-statement wipe guard:** if incoming tax lots are empty but the DB holds open lots, the sync
+**aborts** instead of marking everything sold. A successful-but-empty statement is treated as a failure.
+This guard has already saved the data through several failed syncs.
+
+`get_realized_totals()` prefers `trades` (exact) and falls back to a market-price approximation over
+closed lots. `realized_rows_from_closed_lots()` is **shared** by the portfolio totals and the tax report
+so the two can never disagree — they did once, and that was a bug.
+
+---
+
+## Tax report (Swiss framing)
+
+`GET /api/tax/report?year=YYYY` and `.csv`. Switzerland doesn't tax private capital gains but does tax
+dividend income and allows reclaiming foreign withholding via **DA-1** — so the report leads with
+dividend income + withholding, then realized gains, then a year-end holdings snapshot (Steuerwert).
+
+Two honesty flags, both badged in the UI and CSV:
+- `dividend_source`: `ibkr` (real withholding) vs `yfinance_estimate` (gross guess, no withholding)
+- `realized_source`: `trades` (IBKR FIFO) vs `closed_lot_estimate` (market price at close date — was
+  ~8% off on a spot check, hence the badge)
+
+Frontend: `TaxTab.tsx`. It's a filing aid, not tax advice.
+
+---
+
+## Sync schedule (Europe/Berlin)
+
+| Time | Job | Touches Yahoo? |
+|---|---|---|
+| 08:00 | `full_sync_job` — IBKR + FX + 730d market data + dividends | **yes** |
+| 13:00 | `ibkr_only_sync_job` — IBKR + FX | no |
+| 15:00 | `market_data_only_sync_job` (7d) | yes |
+| 20:00 | `ibkr_only_sync_job` — IBKR + FX | no |
+| 22:00 | `market_data_only_sync_job` (7d) | yes |
+
+The 13:00/20:00 IBKR-only jobs exist because a transient `Code=1001` at 08:00 used to cost a full day of
+freshness. They deliberately **skip** market data and yfinance dividends — see rule 1. Pinned by
+`tests/test_scheduler_jobs.py`. Status: `GET /api/scheduler/status`.
+
+---
+
+## Deployment
+
+**Push to `main` → deployed automatically within 10 minutes.** `/root/auto-deploy.sh` on the VPS (root
+crontab, `*/10 * * * *`) does: `flock` → `git fetch` → deploy **only if strictly behind** `origin/main`
+(`merge-base --is-ancestor`; it will refuse and log if the VPS has diverged) → back up `portfolio.db` →
+`deploy.sh` → health check → **roll back to the previous commit if health fails**. Log:
+`/root/auto-deploy.log`.
+
+`deploy.sh` is expensive (`docker compose down`, `build --no-cache`, `npm ci`), which is why the cron
+guards on an actual change. Its own health check fires a few seconds after start and often reports
+FAILED spuriously — check `/health` again after ~15s before believing it.
+
+- SSH: `ssh -i ~/.ssh/id_ed25519_hostinger root@portfolio.srv1211053.hstgr.cloud`
+- Secrets live only in `/root/IBKR_investment_tracker/backend/.env` (`IBKR_TOKEN`, `IBKR_QUERY_ID`)
+- nginx proxies all `/api/` publicly with `proxy_read_timeout 300`; needs `listen [::]:443/80` (an AAAA
+  record exists)
+- Backups: `/root/ibkr-backups/<date>/`
+
+A **cloud routine** `ibkr-sync-validator` (claude.ai/code/routines) runs daily at 07:45 UTC to validate
+the morning sync via the public API + the IBKR MCP connector. It **cannot SSH**, so it opens PRs rather
+than pushing to `main`.
+
+---
+
+## Local development
+
+```bash
+cd backend && venv\Scripts\activate && uvicorn app.main:app --reload --port 8000
+cd frontend && npm run dev          # http://localhost:5173
+```
+
+Tests (58, all offline — no IBKR or Yahoo calls):
+```bash
+cd backend && ./venv/Scripts/python.exe -m pytest tests/ -q
+```
+
+Useful:
+```bash
+# masked token check (never echo the whole thing)
+grep -o '^IBKR_TOKEN=.\{0,4\}' backend/.env
+
+# data snapshot on the VPS
+python3 -c "
+import sqlite3; c=sqlite3.connect('/root/IBKR_investment_tracker/backend/portfolio.db')
+c.execute('PRAGMA busy_timeout=30000')
+for q in ['select count(*) from securities','select count(*) from taxlots where is_open=1',
+          'select count(*) from trades','select source,count(*) from dividend_payments group by 1']:
+    print(q, c.execute(q).fetchall())"
+```
+
+---
+
+## Ticker mapping & currency
+
+**Ticker mapping** (`market_data_service.py`) — three tiers: custom `ticker_mappings` row → exchange
+suffix → try variations (`.DE`, `.F`, `.L`, bare), then auto-save what worked.
+`EXCHANGE_SUFFIXES`: `XETRA`/`IBIS2`→`.DE`, `LSEETF`→`.L`, `AEB`→`.AS`. Add new exchanges here when a
+security has no prices. Verify a ticker in a browser before adding a mapping, and delete wrong
+`market_prices` rows before re-syncing.
+
+**Currency** — Frankfurter at `https://api.frankfurter.app` (**not** `.dev`). Batch-fetches date ranges
+(one call per ~30 days) and carries the last known rate forward across weekends/holidays.
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| `has no attribute` / `is not a valid` in a sync | IBKR schema drift. `_sanitize_flex_xml` should absorb it — if not, extend it generically (never patch one field) + add a test |
+| `Code=1025` | Token lockout, usually self-inflicted. **Wait**, don't retry. The schedule recovers it |
+| `Code=1001` | Statement not ready — normal for a big YTD query; the patient budget or a later job handles it |
+| Sync 200 but 0 trades | Flex Query section/period not covering them |
+| `dividend_source` stuck on `yfinance_estimate` | No `<CashTransactions>` ingested — check the section + Withholding Tax option |
+| Yahoo 404/429 | **Stop.** Wait 30-60 min. Check `yfinance >= 1.1.0` |
+| Site "down" in the browser | Often TIM home DNS, not the server — verify with `Test-NetConnection`, not `nslookup` |
+| Deploy says health FAILED | Usually the premature check; re-curl `/health` after ~15s |
+
+---
+
+## Current state (2026-07-25)
+
+38 securities, 971 open tax lots, 4 closed lots, 1356 dividend rows.
+
+**Pending:** the first successful Flex sync since Trades/CorporateActions/CashTransactions were enabled.
+Until it lands: `trades` empty, `dividend_source='yfinance_estimate'`, `realized_source=
+'closed_lot_estimate'`, `close_source='heuristic'`, and GOOGL shows 10 of 12 shares (a 2026-07-24 buy of
+2 arrived after the sync broke). All fixes are deployed; it's gated only on the IBKR lockout clearing.

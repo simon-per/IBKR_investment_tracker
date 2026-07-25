@@ -16,8 +16,16 @@ env/
 .pytest_cache/
 
 # Database (contains personal financial data)
+# NOTE: this repo is public, so these patterns must also catch backup and WAL
+# sidecar files — "*.db" does NOT match portfolio.db.bak-2026-07-23 or
+# portfolio.db-wal, and an accidental `git add -A` would publish the account.
 *.db
 *.sqlite
+*.db.bak*
+*.db-wal
+*.db-shm
+*.sqlite-wal
+*.sqlite-shm
 
 # Generated portfolio data exports
 portfolio_data*.json

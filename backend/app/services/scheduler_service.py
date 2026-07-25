@@ -528,11 +528,50 @@ class SchedulerService:
         logger.info("MARKET DATA ONLY SYNC COMPLETED")
         logger.info("=" * 80)
 
+    async def ibkr_only_sync_job(self):
+        """
+        IBKR-only sync, at 13:00 and 20:00 Europe/Berlin.
+
+        Exists because the 08:00 full sync is the *only* job that talks to IBKR, so a
+        transient `Code=1001` ("statement could not be generated") used to cost a whole
+        day of freshness — and that got likelier once the Flex Query grew to Year-to-Date
+        with Trades/CorporateActions/CashTransactions, since IBKR takes longer to build it.
+
+        Deliberately does NOT call sync_market_data() or sync_dividends(): both hit Yahoo
+        Finance, which is rate-limited and, per CLAUDE.md, must never be called without
+        explicit user permission. Re-running just the IBKR half is safe and cheap —
+        ingestion is idempotent (upserts keyed on ib_key) — and it also picks up intraday
+        trades. Exchange rates come from Frankfurter (free, unmetered), so they ride along.
+        """
+        logger.info("=" * 80)
+        logger.info("STARTING IBKR-ONLY SYNC (no market data)")
+        logger.info("=" * 80)
+
+        ibkr_result = await self.sync_ibkr_data()
+        logger.info(f"IBKR Sync Result: {ibkr_result}")
+
+        fx_result = await self.sync_exchange_rates(days_back=7)
+        logger.info(f"Exchange Rate Sync Result: {fx_result}")
+
+        self.last_sync_result = {
+            "type": "ibkr_sync",
+            "timestamp": datetime.now().isoformat(),
+            "ibkr_result": ibkr_result,
+            "fx_result": fx_result,
+            "status": ibkr_result.get("status", "error"),
+        }
+
+        logger.info("=" * 80)
+        logger.info("IBKR-ONLY SYNC COMPLETED")
+        logger.info("=" * 80)
+
     def start(self):
         """
-        Start the scheduler with 3 daily syncs (Europe/Berlin):
+        Start the scheduler with 5 daily syncs (Europe/Berlin):
         - 08:00: Full sync (IBKR + 730 days market data) — fills historical gaps
+        - 13:00: IBKR only — second chance if the morning statement wasn't ready
         - 15:00: Market data only (7 days) — after European market close
+        - 20:00: IBKR only — last chance to land the day's trades
         - 22:00: Market data only (7 days) — after US market close
         """
         if self.scheduler is not None:
@@ -549,6 +588,24 @@ class SchedulerService:
             trigger=CronTrigger(hour=8, minute=0, timezone='Europe/Berlin'),
             id='full_sync_job',
             name='Full IBKR + Market Data Sync (08:00 Europe/Berlin)',
+            replace_existing=True
+        )
+
+        # 13:00 Europe/Berlin — IBKR only (second chance if 08:00's statement wasn't ready)
+        self.scheduler.add_job(
+            self.ibkr_only_sync_job,
+            trigger=CronTrigger(hour=13, minute=0, timezone='Europe/Berlin'),
+            id='ibkr_sync_midday',
+            name='IBKR-only Sync (13:00 Europe/Berlin)',
+            replace_existing=True
+        )
+
+        # 20:00 Europe/Berlin — IBKR only (last chance to land the day's trades)
+        self.scheduler.add_job(
+            self.ibkr_only_sync_job,
+            trigger=CronTrigger(hour=20, minute=0, timezone='Europe/Berlin'),
+            id='ibkr_sync_evening',
+            name='IBKR-only Sync (20:00 Europe/Berlin)',
             replace_existing=True
         )
 
