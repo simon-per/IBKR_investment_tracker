@@ -94,6 +94,95 @@ async def test_tax_report_dividends_and_realized_for_year():
 
 
 @pytest.mark.asyncio
+async def test_holdings_snapshot_is_reconstructed_at_year_end_for_past_years():
+    """
+    The Swiss wealth-tax base (Steuerwert) is the 31 December value, so a past year must
+    be valued at that date — not from today's positions, which is what it used to do.
+    """
+    engine, session = await _make_session()
+    try:
+        # Held across 2025-12-31 -> counts.
+        session.add(TaxLot(
+            security_id=1, open_date=date(2025, 3, 10), close_date=None,
+            quantity=Decimal("10"), cost_basis=Decimal("800"), price_per_unit=Decimal("80"),
+            currency="EUR", cost_basis_eur=Decimal("800"), is_open=True,
+        ))
+        # Closed mid-2025 -> must NOT count at year end.
+        session.add(TaxLot(
+            security_id=1, open_date=date(2025, 1, 5), close_date=date(2025, 6, 30),
+            quantity=Decimal("4"), cost_basis=Decimal("300"), price_per_unit=Decimal("75"),
+            currency="EUR", cost_basis_eur=Decimal("300"), is_open=False,
+        ))
+        # Bought after the year end -> must NOT count in 2025.
+        session.add(TaxLot(
+            security_id=1, open_date=date(2026, 2, 1), close_date=None,
+            quantity=Decimal("7"), cost_basis=Decimal("700"), price_per_unit=Decimal("100"),
+            currency="EUR", cost_basis_eur=Decimal("700"), is_open=True,
+        ))
+        session.add(MarketPrice(
+            security_id=1, date=date(2025, 12, 31), close_price=Decimal("120"),
+            currency="EUR", source="test",
+        ))
+        await session.commit()
+
+        report = await TaxService(session).get_tax_report(2025)
+
+        assert report["holdings_as_of"] == "2025-12-31"
+        assert len(report["holdings_snapshot"]) == 1
+        row = report["holdings_snapshot"][0]
+        assert row["quantity"] == 10.0          # only the lot held on 31 Dec
+        assert row["market_value"] == 1200.0    # 10 x 120 at the year-end price
+        assert row["cost_basis"] == 800.0
+        assert report["holdings_snapshot_total"] == 1200.0
+        assert "2025-12-31" in TaxService(session).to_csv(report)
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_holdings_snapshot_uses_today_for_the_current_year():
+    """No 31 December yet, so today's positions are the correct answer."""
+    engine, session = await _make_session()
+    try:
+        session.add(TaxLot(
+            security_id=1, open_date=date(2026, 1, 15), close_date=None,
+            quantity=Decimal("5"), cost_basis=Decimal("500"), price_per_unit=Decimal("100"),
+            currency="EUR", cost_basis_eur=Decimal("500"), is_open=True,
+        ))
+        await session.commit()
+
+        report = await TaxService(session).get_tax_report(date.today().year)
+
+        assert report["holdings_as_of"] == date.today().isoformat()
+        assert "current year" in report["holdings_snapshot_note"]
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_unpriceable_holding_is_omitted_not_counted_as_zero():
+    engine, session = await _make_session()
+    try:
+        session.add(TaxLot(
+            security_id=1, open_date=date(2025, 3, 10), close_date=None,
+            quantity=Decimal("10"), cost_basis=Decimal("800"), price_per_unit=Decimal("80"),
+            currency="EUR", cost_basis_eur=Decimal("800"), is_open=True,
+        ))
+        await session.commit()  # no MarketPrice rows at all
+
+        report = await TaxService(session).get_tax_report(2025)
+
+        assert report["holdings_snapshot"] == []
+        assert report["holdings_snapshot_total"] == 0.0
+        assert "omitted" in report["holdings_snapshot_note"]
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_realized_falls_back_to_closed_lots_when_no_sell_trades():
     """
     Without ingested <Trades>, the tax report must still report the lots the DB

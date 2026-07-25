@@ -22,6 +22,7 @@ from app.repositories.trade_repository import TradeRepository
 from app.repositories.corporate_action_repository import CorporateActionRepository
 from app.repositories.app_settings_repository import AppSettingsRepository
 from app.repositories.market_price_repository import MarketPriceRepository
+from app.repositories.sync_run_repository import SyncRunRepository
 from app.services.benchmark_service import BenchmarkService, BENCHMARKS
 from app.models.benchmark_price import BenchmarkPrice
 from sqlalchemy import select, distinct
@@ -444,6 +445,7 @@ class SchedulerService:
         logger.info("STARTING FULL SYNC JOB (IBKR + MARKET DATA)")
         logger.info("=" * 80)
 
+        started_at = datetime.now()
         market_result = None
 
         # Step 1: Sync IBKR data
@@ -478,6 +480,7 @@ class SchedulerService:
             "dividend_result": div_result,
             "status": ibkr_result.get("status", "error"),
         }
+        await self._record_run(self.last_sync_result, started_at)
 
         logger.info("=" * 80)
         logger.info("FULL SYNC JOB COMPLETED")
@@ -492,6 +495,8 @@ class SchedulerService:
         logger.info("=" * 80)
         logger.info("STARTING MARKET DATA + EXCHANGE RATE SYNC (7 days)")
         logger.info("=" * 80)
+
+        started_at = datetime.now()
 
         # Sync exchange rates first (needed for portfolio value calculation)
         fx_result = await self.sync_exchange_rates(days_back=7)
@@ -523,10 +528,35 @@ class SchedulerService:
             "benchmark_result": bench_result,
             "status": market_result.get("status", "error"),
         }
+        await self._record_run(self.last_sync_result, started_at)
 
         logger.info("=" * 80)
         logger.info("MARKET DATA ONLY SYNC COMPLETED")
         logger.info("=" * 80)
+
+    async def _record_run(self, result: dict, started_at: datetime) -> None:
+        """
+        Persist a job's outcome to sync_runs.
+
+        last_sync_result alone is in-memory, so it disappears on every container
+        restart — and auto-deploy restarts on each push, which would leave the daily
+        validator blind.
+
+        Best-effort end to end: the session itself may fail to open, so the whole thing
+        is guarded. Bookkeeping must never be the reason a sync reports failure.
+        """
+        try:
+            async with AsyncSessionLocal() as db:
+                await SyncRunRepository(db).record(
+                    sync_type=result.get("type", "unknown"),
+                    status=result.get("status", "error"),
+                    message=result.get("message") or (result.get("ibkr_result") or {}).get("message"),
+                    details={k: v for k, v in result.items() if k not in ("warnings",)},
+                    warnings=result.get("warnings"),
+                    started_at=started_at,
+                )
+        except Exception as e:
+            logger.warning(f"Could not persist sync run: {e}")
 
     async def ibkr_only_sync_job(self):
         """
@@ -547,6 +577,7 @@ class SchedulerService:
         logger.info("STARTING IBKR-ONLY SYNC (no market data)")
         logger.info("=" * 80)
 
+        started_at = datetime.now()
         ibkr_result = await self.sync_ibkr_data()
         logger.info(f"IBKR Sync Result: {ibkr_result}")
 
@@ -560,6 +591,7 @@ class SchedulerService:
             "fx_result": fx_result,
             "status": ibkr_result.get("status", "error"),
         }
+        await self._record_run(self.last_sync_result, started_at)
 
         logger.info("=" * 80)
         logger.info("IBKR-ONLY SYNC COMPLETED")

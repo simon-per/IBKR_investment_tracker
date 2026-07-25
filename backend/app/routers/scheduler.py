@@ -2,13 +2,37 @@
 Scheduler Router
 API endpoints for managing the automated sync scheduler.
 """
-from fastapi import APIRouter, HTTPException
-from typing import Dict
+import logging
 
+from fastapi import APIRouter, HTTPException, Depends
+from typing import Dict, Optional
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.database import get_db
+from app.repositories.sync_run_repository import SyncRunRepository
 from app.services.scheduler_service import get_scheduler
 
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+async def _last_sync(scheduler, db: AsyncSession) -> Optional[Dict]:
+    """
+    Prefer the in-memory result, fall back to the persisted history.
+
+    The in-memory value is lost on every container restart, and auto-deploy restarts on
+    each push — so without this fallback the daily validator can see `last_sync: null`
+    and wrongly conclude that no sync ran.
+    """
+    if scheduler.last_sync_result:
+        return scheduler.last_sync_result
+    try:
+        run = await SyncRunRepository(db).get_latest()
+        return SyncRunRepository.to_dict(run) if run else None
+    except Exception as e:  # history is a convenience; never fail the status call
+        logger.warning(f"Could not read persisted sync history: {e}")
+        return None
 
 
 @router.post("/trigger", response_model=Dict)
@@ -39,7 +63,7 @@ async def trigger_sync_now():
 
 
 @router.get("/status", response_model=Dict)
-async def get_scheduler_status():
+async def get_scheduler_status(db: AsyncSession = Depends(get_db)):
     """
     Get the current status of the scheduler, including all jobs and last sync result.
 
@@ -54,7 +78,7 @@ async def get_scheduler_status():
                 "status": "not_running",
                 "message": "Scheduler is not running",
                 "jobs": [],
-                "last_sync": None,
+                "last_sync": await _last_sync(scheduler, db),
             }
 
         jobs = []
@@ -69,11 +93,27 @@ async def get_scheduler_status():
         return {
             "status": "running",
             "jobs": jobs,
-            "last_sync": scheduler.last_sync_result,
+            "last_sync": await _last_sync(scheduler, db),
         }
 
     except Exception as e:
         raise HTTPException(
             status_code=500,
             detail=f"Failed to get scheduler status: {str(e)}"
+        )
+
+
+@router.get("/history", response_model=Dict)
+async def get_sync_history(limit: int = 20, db: AsyncSession = Depends(get_db)):
+    """
+    Recent sync attempts, newest first — the durable record of what ran and what broke.
+    """
+    try:
+        repo = SyncRunRepository(db)
+        runs = await repo.get_recent(limit)
+        return {"count": len(runs), "runs": [SyncRunRepository.to_dict(r) for r in runs]}
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to read sync history: {str(e)}"
         )

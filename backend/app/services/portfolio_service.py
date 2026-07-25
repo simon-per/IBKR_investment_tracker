@@ -6,7 +6,7 @@ import bisect
 from typing import List, Dict, Optional, Tuple
 from datetime import date, timedelta
 from decimal import Decimal
-from sqlalchemy import select, and_, func
+from sqlalchemy import select, and_, or_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 import logging
 
@@ -308,6 +308,75 @@ class PortfolioService:
             "total_realized_cost_basis_eur": float(total_cost_basis_eur),
             "num_closed_positions": len({row["security_id"] for row in rows}),
         }
+
+    async def holdings_snapshot_as_of(self, base_fx: BaseFx, on_date: date) -> List[Dict]:
+        """
+        Per-security holdings as they stood on ``on_date``, valued at that date's prices.
+
+        The Swiss wealth-tax base (Steuerwert) is the **31 December** value, so the tax
+        report cannot just use today's positions for a past year. Lot selection uses the
+        same window as _calculate_daily_value (opened on or before the date, not closed
+        before it) so the tax snapshot and the portfolio timeline agree.
+
+        Securities whose price can't be resolved near ``on_date`` are skipped rather than
+        counted at zero — a thin price history degrades the total instead of lying.
+        """
+        result = await self.db.execute(
+            select(TaxLot, Security)
+            .join(Security, TaxLot.security_id == Security.id)
+            .where(
+                and_(
+                    TaxLot.open_date <= on_date,
+                    or_(TaxLot.close_date.is_(None), TaxLot.close_date >= on_date),
+                )
+            )
+            .order_by(Security.symbol.asc())
+        )
+        lots = result.all()
+        if not lots:
+            return []
+
+        securities = {security for _, security in lots}
+        price_cache, price_currency_cache = await self._preload_market_prices(
+            securities, on_date, on_date
+        )
+        exchange_rate_cache = await self._preload_exchange_rates(
+            securities, on_date, on_date, price_currency_cache=price_currency_cache
+        )
+
+        by_security: Dict[int, Dict] = {}
+        for lot, security in lots:
+            price = self._get_market_price_with_fallback(security.id, on_date, price_cache)
+            if price is None:
+                logger.warning(
+                    f"Holdings snapshot {on_date}: no price for {security.symbol}, skipping lot {lot.id}"
+                )
+                continue
+
+            price_currency = price_currency_cache.get(security.id, security.currency)
+            if price_currency == "EUR":
+                fx_rate = Decimal("1")
+            else:
+                fx_rate = self._get_exchange_rate_with_fallback(
+                    price_currency, on_date, exchange_rate_cache
+                )
+                if fx_rate is None:
+                    logger.warning(
+                        f"Holdings snapshot {on_date}: no FX for {price_currency}, skipping lot {lot.id}"
+                    )
+                    continue
+
+            row = by_security.setdefault(security.id, {
+                "symbol": security.symbol,
+                "quantity": Decimal("0"),
+                "market_value": Decimal("0"),
+                "cost_basis": Decimal("0"),
+            })
+            row["quantity"] += lot.quantity
+            row["market_value"] += base_fx.convert(lot.quantity * price * fx_rate, on_date)
+            row["cost_basis"] += base_fx.convert(lot.cost_basis_eur, lot.open_date)
+
+        return list(by_security.values())
 
     async def realized_rows_from_closed_lots(
         self,

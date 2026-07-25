@@ -263,8 +263,18 @@ export function TaxTab() {
           {/* --- Holdings snapshot (wealth tax) --- */}
           <Card>
             <CardHeader>
-              <CardTitle>Holdings snapshot (wealth tax / Steuerwert)</CardTitle>
-              <CardDescription>{data.holdings_snapshot_note}</CardDescription>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <CardTitle>Holdings snapshot (wealth tax / Steuerwert)</CardTitle>
+                  <CardDescription>{data.holdings_snapshot_note}</CardDescription>
+                </div>
+                <span
+                  className="rounded-full bg-muted px-2.5 py-1 text-xs font-medium text-muted-foreground"
+                  title="Swiss wealth tax is assessed on the 31 December value"
+                >
+                  as at {data.holdings_as_of}
+                </span>
+              </div>
             </CardHeader>
             <CardContent>
               {data.holdings_snapshot.length === 0 ? (

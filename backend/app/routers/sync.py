@@ -7,6 +7,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Dict, List
+from datetime import datetime
 from decimal import Decimal
 
 from app.database import get_db
@@ -20,6 +21,7 @@ from app.repositories.taxlot_repository import TaxLotRepository
 from app.repositories.trade_repository import TradeRepository
 from app.repositories.corporate_action_repository import CorporateActionRepository
 from app.repositories.app_settings_repository import AppSettingsRepository
+from app.repositories.sync_run_repository import SyncRunRepository
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +43,7 @@ async def sync_ibkr_data(db: AsyncSession = Depends(get_db)):
     Returns:
         Summary of synced data including counts
     """
+    started_at = datetime.now()
     try:
         # Initialize services and repositories
         ibkr_service = IBKRService()
@@ -142,10 +145,21 @@ async def sync_ibkr_data(db: AsyncSession = Depends(get_db)):
         if warnings:
             result["warnings"] = warnings
 
+        # Persist the attempt so it survives container restarts (auto-deploy restarts on
+        # every push). Best-effort: never turn a good sync into a failure.
+        await SyncRunRepository(db).record(
+            sync_type="ibkr", status="success", message=result["message"],
+            details={k: v for k, v in result.items() if k not in ("message", "warnings")},
+            warnings=warnings or None, started_at=started_at,
+        )
+
         return result
 
     except Exception as e:
         await db.rollback()
+        await SyncRunRepository(db).record(
+            sync_type="ibkr", status="error", message=str(e), started_at=started_at,
+        )
         raise HTTPException(
             status_code=500,
             detail=f"Failed to sync IBKR data: {str(e)}"

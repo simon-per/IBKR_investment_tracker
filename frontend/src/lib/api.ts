@@ -91,8 +91,27 @@ export interface SchedulerStatus {
     type: string;
     timestamp: string;
     status: string;
+    /** Populated on failures — e.g. the IBKR Code=1025 lockout explanation. */
+    message?: string | null;
+    /** Flex XML schema drift the sanitizer worked around, skipped currencies, etc. */
+    warnings?: string[] | null;
+    details?: Record<string, unknown> | null;
   } | null;
   message?: string;
+}
+
+export interface SyncRun {
+  type: string;
+  status: string;
+  timestamp: string | null;
+  message?: string | null;
+  warnings?: string[] | null;
+  details?: Record<string, unknown> | null;
+}
+
+export interface SyncHistory {
+  count: number;
+  runs: SyncRun[];
 }
 
 export interface BenchmarkInfo {
@@ -312,6 +331,8 @@ export interface TaxReport {
   dividend_totals: { gross: number; withholding: number; net: number };
   realized_gains: TaxRealizedRow[];
   realized_source: 'trades' | 'closed_lot_estimate';
+  /** Date the holdings snapshot is valued at — 31 Dec for past years, today otherwise. */
+  holdings_as_of: string;
   realized_totals: { proceeds: number; cost_basis: number; gain_loss: number };
   holdings_snapshot: TaxHoldingRow[];
   holdings_snapshot_total: number;
@@ -449,6 +470,10 @@ class ApiClient {
   }
 
   // Scheduler endpoints
+  async getSyncHistory(limit = 20): Promise<SyncHistory> {
+    return this.request<SyncHistory>(`/api/scheduler/history?limit=${limit}`);
+  }
+
   async getSchedulerStatus(): Promise<SchedulerStatus> {
     return this.request<SchedulerStatus>('/api/scheduler/status');
   }

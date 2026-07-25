@@ -143,21 +143,23 @@ class TaxService:
                     "gain_loss": round(float(gain), 2),
                 })
 
-        # --- Indicative year-end holdings (wealth-tax base) ---
-        # Uses the current positions snapshot; exact for the current year and
-        # indicative for past years (historical valuation is not reconstructed).
+        # --- Year-end holdings (wealth-tax base / Steuerwert) ---
+        # Switzerland values wealth at 31 December, so a past year must be reconstructed
+        # at that date rather than reported as today's positions. For the current year
+        # (no 31 Dec yet) today's snapshot is the right answer.
+        today = date.today()
+        as_of = end if end < today else today
         holdings: List[Dict] = []
         holdings_total = Decimal("0")
         try:
-            positions = await portfolio.get_positions_breakdown()
-            for p in positions:
-                mv = Decimal(str(p.get("market_value_eur", 0) or 0))
+            for row in await portfolio.holdings_snapshot_as_of(base_fx, as_of):
+                mv = row["market_value"]
                 holdings_total += mv
                 holdings.append({
-                    "symbol": p.get("symbol"),
-                    "quantity": p.get("quantity"),
+                    "symbol": row["symbol"],
+                    "quantity": float(row["quantity"]),
                     "market_value": round(float(mv), 2),
-                    "cost_basis": round(float(p.get("cost_basis_eur", 0) or 0), 2),
+                    "cost_basis": round(float(row["cost_basis"]), 2),
                 })
         except Exception:
             pass
@@ -181,9 +183,11 @@ class TaxService:
             },
             "holdings_snapshot": holdings,
             "holdings_snapshot_total": round(float(holdings_total), 2),
+            "holdings_as_of": as_of.isoformat(),
             "holdings_snapshot_note": (
-                "Current positions snapshot — exact for the current year, "
-                "indicative for prior years (year-end valuation not reconstructed)."
+                f"Holdings as at {as_of.isoformat()}, valued at that date's closing prices"
+                + ("." if as_of == end else " (current year — 31 December has not occurred yet).")
+                + " Positions whose price could not be resolved near that date are omitted."
             ),
         }
 
@@ -215,7 +219,7 @@ class TaxService:
         w.writerow(["TOTAL", "", "", rt["proceeds"], rt["cost_basis"], rt["gain_loss"]])
         w.writerow([])
 
-        w.writerow(["Holdings snapshot (indicative wealth-tax base)"])
+        w.writerow([f"Holdings snapshot (wealth-tax base) as at {report.get('holdings_as_of', '')}"])
         w.writerow(["Symbol", "Quantity", f"Market value ({cur})", f"Cost basis ({cur})"])
         for h in report["holdings_snapshot"]:
             w.writerow([h["symbol"], h["quantity"], h["market_value"], h["cost_basis"]])

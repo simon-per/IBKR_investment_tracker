@@ -16,6 +16,7 @@ from app.models.dividend_payment import DividendPayment
 from app.models.app_settings import AppSetting
 from app.models.trade import Trade
 from app.models.corporate_action import CorporateAction
+from app.models.sync_run import SyncRun
 
 __all__ = [
     "Security",
@@ -31,4 +32,5 @@ __all__ = [
     "AppSetting",
     "Trade",
     "CorporateAction",
+    "SyncRun",
 ]

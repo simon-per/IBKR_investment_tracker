@@ -328,6 +328,12 @@ export function Dashboard() {
                   )}
                 </div>
               )}
+              {/* A bare "(error)" isn't actionable — show what actually went wrong. */}
+              {schedulerStatus?.last_sync?.status === 'error' && schedulerStatus.last_sync.message && (
+                <p className="mt-1 max-w-3xl text-xs text-amber-700 dark:text-amber-400">
+                  {schedulerStatus.last_sync.message}
+                </p>
+              )}
             </div>
             <div className="flex gap-2 items-center">
               <select
