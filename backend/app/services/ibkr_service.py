@@ -475,8 +475,22 @@ class IBKRService:
                 )
                 await asyncio.sleep(delay)
 
+        return self.parse_flex_xml(response)
+
+    def parse_flex_xml(self, xml_content: bytes) -> Dict:
+        """
+        Turn raw Flex statement bytes into the `flex_data` dict the extractors consume.
+
+        Split out from fetch_flex_data() so the same pipeline can ingest a statement
+        downloaded by hand from IBKR's web UI — that path needs no token and so cannot
+        trip a `1025` lockout, which makes it the escape hatch when the token is blocked
+        and the only way to reach a prior tax year (a YTD query can't). See
+        `app/cli/ingest_flex_xml.py`.
+
+        Does no I/O of any kind.
+        """
         # Fix non-standard currency codes before parsing
-        fixed_response = self._fix_currency_codes(response)
+        fixed_response = self._fix_currency_codes(xml_content)
 
         # Remove XML the pinned ibflex can't model (attributes IBKR has added since
         # 0.15, aggregate duplicate rows) so a single schema addition can't abort the

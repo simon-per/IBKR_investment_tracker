@@ -110,6 +110,28 @@ Date `yyyyMMdd`, Time `HHmmss`, separator `;`. **Never use `dd/MM/yyyy`** — ib
 Prior tax years need a one-off period change (e.g. 2025), then set back to YTD. Ingestion is idempotent
 (upserts keyed on `ib_key`), so re-syncing is safe.
 
+### Offline ingest — the escape hatch from a locked token
+
+The Flex **Web Service** and the **download button** in Client Portal serve the same statement over
+independent channels. Only the API path spends the token's request budget, so only it can trip `1025`.
+So a statement saved from the browser can be ingested *during* a lockout — and since the browser download
+uses whatever period you set, it is also the practical way to reach a prior tax year:
+
+```bash
+docker cp stmt.xml backend-portfolio-backend-1:/tmp/stmt.xml
+docker exec backend-portfolio-backend-1 python -m app.cli.ingest_flex_xml /tmp/stmt.xml --dry-run
+docker exec backend-portfolio-backend-1 python -m app.cli.ingest_flex_xml /tmp/stmt.xml
+```
+
+`app/cli/ingest_flex_xml.py` reuses `IBKRService.parse_flex_xml()` and
+`sync_helper.ingest_flex_statement()` — the *same* functions `POST /api/sync/ibkr` and the scheduled jobs
+use — so reconciliation order, the empty-statement wipe guard and the idempotent upserts all apply
+identically. It records a `sync_runs` row with `sync_type='ibkr_manual_xml'`. Touches no network at all
+(no Flex, no Yahoo). `--dry-run` reports counts without writing. Tests: `tests/test_manual_xml_ingest.py`.
+
+There is deliberately **no upload endpoint**: `/api/` is proxied publicly and unauthenticated, and a route
+that rewrites tax lots is a far larger surface than a CLI run over ssh.
+
 ### `_sanitize_flex_xml()` — why it exists
 
 ibflex 0.15 (released 2021) converts **every** XML attribute onto a frozen dataclass and raises
@@ -156,7 +178,10 @@ Tests: `tests/test_flex_xml_sanitizer.py`, `tests/test_flex_ingestion_e2e.py`.
   `pay_date`, **`source`** ∈ `ibkr` | `yfinance_estimate`.
 - **exchange_rates** / **market_prices** — caches. **ticker_mappings** — IBKR→Yahoo symbols.
 - **app_settings** — `base_currency`, `last_sync_to_date`. Plus fundamentals + earnings tables.
-- **sync_runs** — one row per sync attempt (`sync_type`, `status`, `message`, `details`, `warnings`).
+- **sync_runs** — one row per sync attempt (`sync_type` ∈ `ibkr` | `ibkr_sync` | `full_sync` |
+  `market_data_only` | `ibkr_manual_xml`, `status`, `message`, `details`, `warnings`). Timestamps are
+  serialized UTC-aware via `utc_iso()` — a bare naive `isoformat()` is parsed as *local* by the browser,
+  which once made an 08:00 sync display as 06:02.
   `SchedulerService.last_sync_result` is in-memory only and auto-deploy restarts on every push, so
   without this the daily validator can't tell "no sync ran" from "the container restarted".
   `/api/scheduler/status` falls back to it; `/api/scheduler/history?limit=N` lists recent runs.

@@ -1,4 +1,4 @@
-from sqlalchemy import Integer, ForeignKey, DateTime, Index
+from sqlalchemy import Integer, ForeignKey, DateTime
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 from datetime import datetime
@@ -32,9 +32,12 @@ class AnalystRating(Base):
     # Relationships
     security: Mapped["Security"] = relationship(back_populates="analyst_rating")
 
-    __table_args__ = (
-        Index('ix_analyst_ratings_security_id', 'security_id', unique=True),
-    )
+    # No __table_args__ index here: `index=True, unique=True` on security_id above already
+    # generates ix_analyst_ratings_security_id as a unique index. Declaring it a second
+    # time put two identically-named Index objects in the metadata, which made
+    # Base.metadata.create_all() fail with "index ... already exists". Alembic owns the
+    # real schema so production never noticed, but it broke any test that builds the full
+    # schema. The on-disk index is unchanged.
 
     @property
     def total_ratings(self) -> int:

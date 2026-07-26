@@ -29,11 +29,117 @@ from app.models.security import Security
 from app.models.taxlot import TaxLot
 from app.models.trade import Trade
 from app.services.currency_service import CurrencyService
+from app.services.ibkr_service import IBKRService
 from app.repositories.taxlot_repository import TaxLotRepository
 from app.repositories.trade_repository import TradeRepository
 from app.repositories.corporate_action_repository import CorporateActionRepository
 
 logger = logging.getLogger(__name__)
+
+
+async def ingest_flex_statement(db, flex_data: Dict) -> Dict:
+    """
+    Apply one parsed Flex statement to the database, and nothing else.
+
+    This is the whole post-download half of a sync: securities -> transaction history ->
+    dividends -> tax lot reconciliation -> bookkeeping. It was duplicated almost verbatim
+    in `routers/sync.py` and `scheduler_service.py`; the offline XML ingest
+    (`app/cli/ingest_flex_xml.py`) would have made it a third copy, and three copies of
+    the reconciliation order is how the views drift apart.
+
+    Deliberately does **no** network I/O and does **not** commit — the caller owns the
+    transaction, so a failure anywhere here leaves the database untouched. Currency
+    conversion reads the cached `exchange_rates` table via CurrencyService.
+
+    Raises EmptyStatementError (from reconcile_taxlots) if the statement has no tax lots
+    while the database still holds open ones — the wipe guard, which every caller must
+    keep getting for free.
+    """
+    # Imported here rather than at module scope to match the existing pattern and keep
+    # sync_helper importable from the CLI without pulling in the service graph eagerly.
+    from app.services.dividend_service import DividendService
+    from app.services.benchmark_service import BenchmarkService
+    from app.repositories.security_repository import SecurityRepository
+    from app.repositories.taxlot_repository import TaxLotRepository
+    from app.repositories.app_settings_repository import AppSettingsRepository
+
+    ibkr_service = IBKRService()
+    currency_service = CurrencyService(db)
+    security_repo = SecurityRepository(db)
+    taxlot_repo = TaxLotRepository(db)
+    trade_repo = TradeRepository(db)
+    corp_action_repo = CorporateActionRepository(db)
+    app_settings = AppSettingsRepository(db)
+
+    # Securities first: everything downstream is keyed on conid -> security_id.
+    securities_data = await ibkr_service.extract_securities(flex_data)
+    conid_to_security_id: Dict[str, int] = {}
+    for sec_data in securities_data:
+        security = await security_repo.upsert(sec_data)
+        conid_to_security_id[sec_data['conid']] = security.id
+    logger.info(f"Synced {len(conid_to_security_id)} securities")
+
+    # Authoritative transaction history. Tolerant of absent Flex sections, and additive:
+    # it records history without moving any lot on its own.
+    trades_data = await ibkr_service.extract_trades(flex_data)
+    corp_actions_data = await ibkr_service.extract_corporate_actions(flex_data)
+    await persist_transactions(
+        trade_repo, corp_action_repo, conid_to_security_id,
+        trades_data, corp_actions_data,
+    )
+
+    # Real dividend income (gross/withholding/net) from <CashTransactions>. Flex-only.
+    cash_txns = await ibkr_service.extract_cash_transactions(flex_data)
+    await DividendService(db).sync_dividends_from_cash_transactions(
+        cash_txns, conid_to_security_id
+    )
+
+    last_sync_date = await app_settings.get_last_sync_to_date()
+    taxlots_data = await ibkr_service.extract_taxlots(flex_data)
+
+    recon = await reconcile_taxlots(
+        taxlot_repo=taxlot_repo,
+        currency_service=currency_service,
+        conid_to_security_id=conid_to_security_id,
+        taxlots_data=taxlots_data,
+        report_to_date=flex_data['to_date'],
+        trade_repo=trade_repo,
+        corp_action_repo=corp_action_repo,
+        last_sync_date=last_sync_date,
+    )
+
+    # Remember this statement's to_date as the next sync's window start.
+    if flex_data.get('to_date'):
+        await app_settings.set_last_sync_to_date(flex_data['to_date'])
+
+    # Tax lots moved, so any cached benchmark timeline is stale.
+    cleared = await BenchmarkService(db).clear_cache()
+    logger.info(f"Cleared {cleared} benchmark timeline cache entries (tax lots changed)")
+
+    warnings: List[str] = []
+    if recon["skipped_currencies"]:
+        warnings.append(
+            f"Skipped {recon['taxlots_skipped']} taxlot(s) with unsupported currencies: "
+            f"{', '.join(sorted(recon['skipped_currencies']))}"
+        )
+    warnings.extend(flex_data.get('flex_warnings') or [])
+
+    return {
+        "securities_synced": len(conid_to_security_id),
+        "taxlots_synced": recon["taxlots_synced"],
+        "taxlots_skipped": recon["taxlots_skipped"],
+        "lots_closed_full": recon["lots_closed_full"],
+        "lots_closed_partial": recon["lots_closed_partial"],
+        "lots_restamped": recon["lots_restamped"],
+        "trades_seen": len(trades_data),
+        "corporate_actions_seen": len(corp_actions_data),
+        "cash_transactions_seen": len(cash_txns),
+        "total_cost_basis_eur": float(recon["total_cost_basis_eur"]),
+        "account_id": flex_data['account_id'],
+        "data_from": str(flex_data['from_date']) if flex_data['from_date'] else None,
+        "data_to": str(flex_data['to_date']) if flex_data['to_date'] else None,
+        "warnings": warnings,
+    }
 
 
 async def persist_transactions(

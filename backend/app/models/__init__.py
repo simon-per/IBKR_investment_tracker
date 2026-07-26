@@ -17,6 +17,10 @@ from app.models.app_settings import AppSetting
 from app.models.trade import Trade
 from app.models.corporate_action import CorporateAction
 from app.models.sync_run import SyncRun
+# These two were missing, so `import app.models` left Base.metadata incomplete — Alembic
+# discovery and any create_all() silently skipped them.
+from app.models.ticker_mapping import TickerMapping
+from app.models.benchmark_timeline_cache import BenchmarkTimelineCache
 
 __all__ = [
     "Security",
@@ -33,4 +37,6 @@ __all__ = [
     "Trade",
     "CorporateAction",
     "SyncRun",
+    "TickerMapping",
+    "BenchmarkTimelineCache",
 ]

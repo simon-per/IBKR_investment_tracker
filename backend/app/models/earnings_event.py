@@ -35,7 +35,8 @@ class EarningsEvent(Base):
 
     __table_args__ = (
         UniqueConstraint('security_id', 'earnings_date', name='uix_security_earnings_date'),
-        Index('ix_earnings_events_security_id', 'security_id'),
+        # No ix_earnings_events_security_id here: `index=True` on security_id already
+        # generates that exact name, and declaring it twice broke create_all().
         Index('ix_earnings_events_date', 'earnings_date'),
     )
 

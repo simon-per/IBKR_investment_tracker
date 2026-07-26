@@ -1,4 +1,4 @@
-from sqlalchemy import Integer, Float, String, ForeignKey, DateTime, Index, BigInteger
+from sqlalchemy import Integer, Float, String, ForeignKey, DateTime, BigInteger
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 from datetime import datetime
@@ -58,9 +58,9 @@ class FundamentalMetrics(Base):
     # Relationships
     security: Mapped["Security"] = relationship(back_populates="fundamental_metrics")
 
-    __table_args__ = (
-        Index('ix_fundamental_metrics_security_id', 'security_id', unique=True),
-    )
+    # security_id already declares `unique=True, index=True`, which generates
+    # ix_fundamental_metrics_security_id as a unique index; re-declaring it here put the
+    # same name in the metadata twice and broke Base.metadata.create_all(). Schema unchanged.
 
     @property
     def is_etf(self) -> bool:

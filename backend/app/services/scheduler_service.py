@@ -15,18 +15,12 @@ from app.database import AsyncSessionLocal
 from app.services.ibkr_service import IBKRService, FLEX_RETRY_DELAYS_PATIENT
 from app.services.market_data_service import MarketDataService
 from app.services.currency_service import CurrencyService
-from app.services.sync_helper import reconcile_taxlots, persist_transactions
+from app.services.sync_helper import ingest_flex_statement
 from app.repositories.security_repository import SecurityRepository
-from app.repositories.taxlot_repository import TaxLotRepository
-from app.repositories.trade_repository import TradeRepository
-from app.repositories.corporate_action_repository import CorporateActionRepository
-from app.repositories.app_settings_repository import AppSettingsRepository
-from app.repositories.market_price_repository import MarketPriceRepository
 from app.repositories.sync_run_repository import SyncRunRepository, utc_iso
 from app.services.benchmark_service import BenchmarkService, BENCHMARKS
 from app.models.benchmark_price import BenchmarkPrice
 from sqlalchemy import select, distinct
-from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 
@@ -57,111 +51,37 @@ class SchedulerService:
         async with AsyncSessionLocal() as db:
             try:
                 # Initialize services and repositories
-                ibkr_service = IBKRService()
-                currency_service = CurrencyService(db)
-                security_repo = SecurityRepository(db)
-                taxlot_repo = TaxLotRepository(db)
-
                 # Step 1: Fetch data from IBKR. Nobody is waiting on a scheduled run,
                 # so wait longer between attempts rather than risking IBKR's rate cap.
                 logger.info("Fetching data from IBKR Flex Query...")
-                flex_data = await ibkr_service.fetch_flex_data(
+                flex_data = await IBKRService().fetch_flex_data(
                     retry_delays=FLEX_RETRY_DELAYS_PATIENT
                 )
 
-                # Step 2: Extract securities
-                logger.info("Extracting securities from Flex Query response...")
-                securities_data = await ibkr_service.extract_securities(flex_data)
-
-                # Step 3: Upsert securities to database
-                securities_count = 0
-                conid_to_security_id = {}
-
-                for sec_data in securities_data:
-                    security = await security_repo.upsert(sec_data)
-                    conid_to_security_id[sec_data['conid']] = security.id
-                    securities_count += 1
-
-                logger.info(f"Synced {securities_count} securities")
-
-                # Step 4: Persist authoritative transaction history (Trades + CorporateActions).
-                # Tolerant of absent Flex sections; additive.
-                trade_repo = TradeRepository(db)
-                corp_action_repo = CorporateActionRepository(db)
-                app_settings = AppSettingsRepository(db)
-                trades_data = await ibkr_service.extract_trades(flex_data)
-                corp_actions_data = await ibkr_service.extract_corporate_actions(flex_data)
-                await persist_transactions(
-                    trade_repo, corp_action_repo, conid_to_security_id,
-                    trades_data, corp_actions_data,
-                )
-
-                # Record authoritative dividend income (gross/withholding/net) from
-                # <CashTransactions>. Flex-only (no Yahoo); tolerant of absent section.
-                from app.services.dividend_service import DividendService
-                cash_txns = await ibkr_service.extract_cash_transactions(flex_data)
-                await DividendService(db).sync_dividends_from_cash_transactions(
-                    cash_txns, conid_to_security_id
-                )
-
-                last_sync_date = await app_settings.get_last_sync_to_date()
-
-                # Step 5: Extract tax lots
-                logger.info("Extracting tax lots from Flex Query response...")
-                taxlots_data = await ibkr_service.extract_taxlots(flex_data)
-
-                # Step 6: Reconcile tax lots (preserves closed lot history)
-                recon = await reconcile_taxlots(
-                    taxlot_repo=taxlot_repo,
-                    currency_service=currency_service,
-                    conid_to_security_id=conid_to_security_id,
-                    taxlots_data=taxlots_data,
-                    report_to_date=flex_data['to_date'],
-                    trade_repo=trade_repo,
-                    corp_action_repo=corp_action_repo,
-                    last_sync_date=last_sync_date,
-                )
-
-                # Remember this statement's to_date as the next sync's window start.
-                if flex_data.get('to_date'):
-                    await app_settings.set_last_sync_to_date(flex_data['to_date'])
-
-                taxlots_count = recon["taxlots_synced"]
-                taxlots_skipped = recon["taxlots_skipped"]
-                skipped_currencies = recon["skipped_currencies"]
-                total_cost_basis_eur = recon["total_cost_basis_eur"]
-
-                # Invalidate benchmark timeline cache (tax lots changed)
-                bench_service = BenchmarkService(db)
-                cleared = await bench_service.clear_cache()
-                logger.info(f"Cleared {cleared} benchmark timeline cache entries (tax lots changed)")
+                # Steps 2-6, shared with POST /api/sync/ibkr and the offline XML ingest so
+                # every path reconciles in exactly the same order.
+                ingested = await ingest_flex_statement(db, flex_data)
 
                 # Commit transaction
                 await db.commit()
 
-                result = {
-                    "status": "success",
-                    "message": "Successfully synced data from IBKR",
-                    "securities_synced": securities_count,
-                    "taxlots_synced": taxlots_count,
-                    "taxlots_skipped": taxlots_skipped,
-                    "total_cost_basis_eur": float(total_cost_basis_eur),
-                    "timestamp": utc_iso(datetime.now())
-                }
-
                 # Same warnings as the manual endpoint: unsupported currencies plus any
                 # Flex XML schema drift the sanitizer worked around, so a scheduled sync
                 # surfaces it in /api/scheduler/status instead of only in the logs.
-                warnings = []
-                if skipped_currencies:
-                    warnings.append(
-                        f"Skipped {taxlots_skipped} taxlot(s) with unsupported currencies: {', '.join(sorted(skipped_currencies))}"
-                    )
-                warnings.extend(flex_data.get('flex_warnings') or [])
+                warnings = ingested.pop("warnings", [])
+                result = {
+                    "status": "success",
+                    "message": "Successfully synced data from IBKR",
+                    **ingested,
+                    "timestamp": utc_iso(datetime.now()),
+                }
                 if warnings:
                     result["warnings"] = warnings
 
-                logger.info(f"IBKR sync completed: {securities_count} securities, {taxlots_count} taxlots")
+                logger.info(
+                    f"IBKR sync completed: {ingested['securities_synced']} securities, "
+                    f"{ingested['taxlots_synced']} taxlots"
+                )
                 return result
 
             except Exception as e:
