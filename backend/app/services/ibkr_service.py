@@ -11,6 +11,7 @@ import logging
 import time
 import xml.etree.ElementTree as ET
 
+import requests
 from ibflex import client, parser, Types, AssetClass
 from ibflex import enums as ibflex_enums
 from ibflex.client import ResponseCodeError, BadResponseError
@@ -33,8 +34,21 @@ _RETRIEVE_PENDING_CODES = {
 }
 # Codes worth re-issuing SendRequest for. Only reachable before a reference code
 # exists, where there is nothing to poll and re-initiating is the sole option.
+#
+# `1001` is deliberately ABSENT even though it is transient. At the *request* step it
+# means IBKR tried to start generating and couldn't — i.e. a failed generation, which
+# is exactly what `1025` counts. Re-requesting after a 1001 is what locked the token on
+# 2026-07-26 (and, by the same mechanism, twice before):
+#     Code=1001 ... attempt 1/4, re-requesting in 120s  ->  Code=1025 Too many failed attempts
+# With five scheduled IBKR attempts a day, giving up on a 1001 costs a few hours of
+# freshness; re-requesting costs a multi-hour lockout of *every* sync. So we fail fast
+# and let the next scheduled job start a clean generation.
+#
+# The codes that remain all mean "throttled or busy, no generation job was created"
+# (1018 is the rate limit itself, 1009/1019/1021 are server-side transients), so for
+# those a slow retry is safe.
 _REQUEST_RETRYABLE_CODES = {
-    "1001", "1004", "1005", "1006", "1007", "1008", "1009", "1018", "1019", "1021"
+    "1004", "1005", "1006", "1007", "1008", "1009", "1018", "1019", "1021"
 }
 # How long to keep politely polling one reference code before giving up (seconds).
 # The interactive path must stay under nginx's proxy_read_timeout 300.
@@ -147,6 +161,7 @@ class IBKRService:
         logger.info(f"IBKR Flex statement requested, reference code {reference}")
 
         deadline = time.monotonic() + deadline_seconds
+        last_reason = "no response yet"
         while True:
             try:
                 response = client.submit_request(url=url, token=self.token, query=reference)
@@ -160,16 +175,31 @@ class IBKRService:
                 if e.code not in _RETRIEVE_PENDING_CODES:
                     raise
                 delay = _FLEX_RATE_LIMIT_MIN_DELAY if e.code == "1018" else _RETRIEVE_POLL_DELAY
+                last_reason = f"Code={e.code}: {e.msg}"
                 logger.info(
                     f"IBKR Flex statement {reference} not ready (Code={e.code}); "
                     f"re-retrieving the same reference code in {delay}s"
                 )
+            except requests.exceptions.RequestException as e:
+                # A transport failure (DNS hiccup, reset, timeout) never reached IBKR, so
+                # it costs nothing against the token — but the statement IS being
+                # generated, so recover by polling the same reference, never re-requesting.
+                delay = _RETRIEVE_POLL_DELAY
+                last_reason = f"{type(e).__name__}: {e}"
+                logger.warning(
+                    f"Network error retrieving IBKR Flex statement {reference} "
+                    f"({last_reason}); re-retrieving the same reference "
+                    f"code in {delay}s"
+                )
 
             if time.monotonic() + delay > deadline:
+                # Report what actually kept failing: "too large" is the usual cause, but a
+                # persistent network fault looks identical from here unless we say so.
                 raise TimeoutError(
                     f"IBKR Flex statement {reference} was still not ready after "
-                    f"{deadline_seconds}s of polling. The statement is probably too large — "
-                    "narrow the Flex Query period or sections."
+                    f"{deadline_seconds}s of polling (last: {last_reason}). If that is a "
+                    "not-ready code the statement is probably too large — narrow the Flex "
+                    "Query period or sections."
                 )
             time.sleep(delay)
 
@@ -273,9 +303,13 @@ class IBKRService:
             # document: an attribute it doesn't model, an enum value it doesn't know
             # (e.g. CashTransaction type="Broker Fees"), an unparseable date/decimal,
             # or an unknown currency code.
+            #
+            # Re-walk rather than reusing the pass-1 snapshot: that list still holds the
+            # rows pass 1 detached, so scrubbing it would both waste work and inflate the
+            # warning counts with attributes from rows nobody will ever parse.
             dropped_attrs: Dict[str, int] = {}
             drop_reasons: Dict[str, str] = {}
-            for elem in all_elements:
+            for elem in root.iter():
                 if not elem.attrib:
                     continue
                 flex_class = getattr(Types, elem.tag, None)
@@ -389,6 +423,16 @@ class IBKRService:
             except ResponseCodeError as e:
                 if e.code == "1025":
                     raise self._lockout_error(e) from e
+                if e.code == "1001":
+                    # A failed *generation*, which is what 1025 counts. Re-requesting here
+                    # is how we locked the token before, so stop and let the next
+                    # scheduled job ask for a fresh statement.
+                    raise RuntimeError(
+                        f"IBKR could not generate the Flex statement right now (Code=1001: "
+                        f"{e.msg}). Not re-requesting: repeating SendRequest after a 1001 is "
+                        "what trips the Code=1025 token lockout. The next scheduled sync will "
+                        "try again."
+                    ) from e
                 if e.code not in _REQUEST_RETRYABLE_CODES or attempt == max_attempts - 1:
                     raise
                 delay = delays[attempt]
@@ -408,6 +452,18 @@ class IBKRService:
                 logger.warning(
                     f"IBKR Flex bad/empty response ({e}); "
                     f"attempt {attempt + 1}/{max_attempts}, retrying in {delay}s"
+                )
+                await asyncio.sleep(delay)
+            except requests.exceptions.RequestException as e:
+                # Raised here only if SendRequest itself never reached IBKR (a DNS blip
+                # cost the whole 20:00 job on 2026-07-25). No statement was generated and
+                # nothing counted against the token, so retrying is free — unlike a 1001.
+                if attempt == max_attempts - 1:
+                    raise
+                delay = delays[attempt]
+                logger.warning(
+                    f"Network error reaching IBKR Flex ({type(e).__name__}: {e}); no request "
+                    f"reached IBKR, attempt {attempt + 1}/{max_attempts}, retrying in {delay}s"
                 )
                 await asyncio.sleep(delay)
 

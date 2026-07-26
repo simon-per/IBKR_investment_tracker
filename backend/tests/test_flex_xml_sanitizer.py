@@ -330,6 +330,28 @@ def test_all_aggregate_rows_are_kept_rather_than_emptying_the_section():
     assert any('only aggregate rows' in w for w in warnings)
 
 
+def test_attribute_counts_exclude_rows_that_were_already_dropped():
+    """
+    The warnings are the primary diagnostic for schema drift, so their counts must
+    describe rows that actually get parsed. Pass 2 used to scrub the pass-1 snapshot,
+    which still held the detached aggregate rows — so a sync reporting
+    `Trade.subCategory x290` had really only ingested 64 trades.
+    """
+    raw = _wrap(
+        '<Trades>'
+        + _trade(transactionID='TX1', levelOfDetail='EXECUTION')
+        + _trade(transactionID='TX2', levelOfDetail='ORDER')
+        + _trade(transactionID='TX3', levelOfDetail='ORDER')
+        + '</Trades>'
+    )
+
+    _, warnings = _svc()._sanitize_flex_xml(raw)
+
+    # One surviving row carries subCategory, not all three.
+    assert any('Trade.subCategory x1' in w for w in warnings)
+    assert not any('Trade.subCategory x3' in w for w in warnings)
+
+
 def test_rows_without_level_of_detail_are_never_dropped():
     raw = _wrap(
         '<Trades>'

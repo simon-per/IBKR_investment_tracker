@@ -23,9 +23,11 @@ from collections import defaultdict
 from decimal import Decimal
 from typing import Dict, List, Optional, Set
 
-from sqlalchemy import select
+from sqlalchemy import and_, select
 
 from app.models.security import Security
+from app.models.taxlot import TaxLot
+from app.models.trade import Trade
 from app.services.currency_service import CurrencyService
 from app.repositories.taxlot_repository import TaxLotRepository
 from app.repositories.trade_repository import TradeRepository
@@ -47,12 +49,35 @@ async def persist_transactions(
     Additive and side-effect-free with respect to reconciliation: this only
     records the authoritative transaction history. ``security_id`` is resolved
     from ``conid`` when the security exists locally (nullable otherwise, e.g. a
-    fully-sold security no longer in OpenPositions). Tolerant of empty inputs
-    (the Flex Query may not yet emit these sections).
+    security we have never held). Tolerant of empty inputs (the Flex Query may
+    not yet emit these sections).
     """
     # IBKR conid arrives as an int in conid_to_security_id but our parsers store
     # it as a string; normalize the map to string keys so resolution is reliable.
     conid_map = {str(k): v for k, v in conid_to_security_id.items()}
+
+    # That map is built from the statement's OpenPositions, so a security sold out
+    # completely has dropped off it — which left every SELL trade unlinked even though
+    # the security row was still sitting in the DB. Fill the gaps from the DB in one
+    # query, keyed on the same conid the statement uses.
+    unresolved = {
+        str(row["conid"])
+        for row in list(trades_data) + list(corp_actions_data)
+        if row.get("conid") is not None and str(row["conid"]) not in conid_map
+    }
+    if unresolved:
+        result = await trade_repo.session.execute(
+            select(Security.id, Security.conid).where(
+                Security.conid.in_([int(c) for c in unresolved if str(c).isdigit()])
+            )
+        )
+        recovered = {str(conid): sec_id for sec_id, conid in result.all()}
+        if recovered:
+            logger.info(
+                f"Resolved {len(recovered)} conid(s) from the database that were absent "
+                f"from this statement's open positions (fully-sold securities)"
+            )
+        conid_map.update(recovered)
 
     trades_saved = 0
     for t in trades_data:
@@ -357,6 +382,9 @@ async def reconcile_taxlots(
                 f"by {remaining}; closed lots may understate the sale"
             )
 
+    # --- Phase E: adopt real sale dates for lots closed before <Trades> existed ---
+    lots_restamped = await restamp_unsourced_closed_lots(taxlot_repo, trade_repo)
+
     logger.info(
         f"Reconciliation: {taxlots_count} synced, {lots_closed_full} fully closed, "
         f"{lots_closed_partial} partially closed, {taxlots_skipped} skipped"
@@ -368,5 +396,74 @@ async def reconcile_taxlots(
         "skipped_currencies": skipped_currencies,
         "lots_closed_full": lots_closed_full,
         "lots_closed_partial": lots_closed_partial,
+        "lots_restamped": lots_restamped,
         "total_cost_basis_eur": total_cost_basis_eur,
     }
+
+
+async def restamp_unsourced_closed_lots(
+    taxlot_repo: TaxLotRepository,
+    trade_repo: Optional[TradeRepository],
+) -> int:
+    """
+    Give a real sale date to lots that were closed before trade data existed.
+
+    Lots closed by the fallback heuristic carry the *sync* date they were noticed on
+    rather than the date they actually sold, and no ``close_source``. Once <Trades> is
+    ingested the truth is available, but Phase D only stamps lots it closes on this run —
+    so those older lots would keep a wrong date forever (CRM and NFLX both read
+    2026-04-17 when they actually sold on 2026-03-13).
+
+    A lot is only re-stamped when the match is unambiguous:
+      * exactly one SELL trade for that security has |quantity| equal to the lot's, and
+      * that trade is not newer than the recorded close date (the heuristic date is when
+        the drop was *detected*, so the real sale can only be earlier or the same day).
+
+    Anything less certain is left alone — a wrong date is better than a confidently wrong
+    one. Idempotent: a stamped lot has a ``close_source`` and is never revisited.
+    """
+    if trade_repo is None:
+        return 0
+
+    unsourced = (await taxlot_repo.session.execute(
+        select(TaxLot).where(
+            and_(
+                TaxLot.is_open == False,  # noqa: E712 - SQL comparison, not identity
+                TaxLot.close_source.is_(None),
+                TaxLot.security_id.isnot(None),
+            )
+        )
+    )).scalars().all()
+    if not unsourced:
+        return 0
+
+    sells_by_security: Dict[int, List] = defaultdict(list)
+    rows = (await trade_repo.session.execute(
+        select(Trade).where(Trade.security_id.isnot(None))
+    )).scalars().all()
+    for trade in rows:
+        if (trade.buy_sell or "").upper() == "SELL":
+            sells_by_security[trade.security_id].append(trade)
+
+    restamped = 0
+    for lot in unsourced:
+        candidates = [
+            t for t in sells_by_security.get(lot.security_id, [])
+            if t.quantity is not None and abs(t.quantity) == lot.quantity
+            and t.trade_date is not None
+            and (lot.close_date is None or t.trade_date <= lot.close_date)
+        ]
+        if len(candidates) != 1:
+            continue
+        trade = candidates[0]
+        logger.info(
+            f"Re-stamped closed lot id={lot.id} (security_id={lot.security_id}): "
+            f"close_date {lot.close_date} -> {trade.trade_date}, source heuristic -> trade"
+        )
+        lot.close_date = trade.trade_date
+        lot.close_source = "trade"
+        restamped += 1
+
+    if restamped:
+        await taxlot_repo.session.flush()
+    return restamped

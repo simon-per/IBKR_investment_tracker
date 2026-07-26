@@ -78,13 +78,63 @@ async def test_lockout_1025_is_never_retried(monkeypatch, no_sleep):
 
 
 @pytest.mark.asyncio
-async def test_transient_1001_retries_within_budget(monkeypatch, no_sleep):
+async def test_1001_at_the_request_step_is_never_re_requested(monkeypatch, no_sleep):
+    """
+    A 1001 from SendRequest means IBKR *tried to generate and failed* — precisely what
+    `Code=1025` counts. This test exists because the opposite behaviour was pinned here
+    and it locked the token on 2026-07-26:
+
+        Code=1001 ...; attempt 1/4, re-requesting in 120s  ->  Code=1025
+
+    With five scheduled IBKR jobs a day, giving up costs hours of freshness at worst;
+    re-requesting costs a lockout of every sync. So: exactly one SendRequest, no backoff.
+    Note this is the *request* step only — a 1001 while polling must keep retrieving, which
+    test_not_ready_statement_is_re_retrieved_never_re_requested covers.
+    """
     calls = _always_raise(
         monkeypatch,
         ResponseCodeError('1001', 'Statement could not be generated at this time.'),
     )
 
-    with pytest.raises(ResponseCodeError):
+    with pytest.raises(RuntimeError, match='Not re-requesting'):
+        await IBKRService(token='t', query_id='q').fetch_flex_data()
+
+    assert calls['n'] == 1
+    assert no_sleep == []
+
+
+@pytest.mark.asyncio
+async def test_1001_is_not_re_requested_even_on_the_patient_budget(monkeypatch, no_sleep):
+    """The scheduled jobs pass their own delays; that must not re-enable re-requesting."""
+    calls = _always_raise(
+        monkeypatch,
+        ResponseCodeError('1001', 'Statement could not be generated at this time.'),
+    )
+
+    with pytest.raises(RuntimeError, match='Not re-requesting'):
+        await IBKRService(token='t', query_id='q').fetch_flex_data(
+            retry_delays=FLEX_RETRY_DELAYS_PATIENT
+        )
+
+    assert calls['n'] == 1
+    assert no_sleep == []
+
+
+@pytest.mark.asyncio
+async def test_network_failure_before_a_reference_exists_is_retried(monkeypatch, no_sleep):
+    """
+    A DNS/connection failure never reached IBKR, so nothing was generated and nothing
+    counted against the token — retrying is free. A blip like this cost the whole 20:00
+    job on 2026-07-25.
+    """
+    import requests
+
+    calls = _always_raise(
+        monkeypatch,
+        requests.exceptions.ConnectionError('Failed to resolve gdcdyn.interactivebrokers.com'),
+    )
+
+    with pytest.raises(requests.exceptions.ConnectionError):
         await IBKRService(token='t', query_id='q').fetch_flex_data()
 
     assert calls['n'] == len(_FLEX_RETRY_DELAYS) + 1
@@ -197,6 +247,27 @@ def test_fatal_code_during_retrieve_does_not_re_request(monkeypatch):
         IBKRService(token='t', query_id='q')._download_statement(60)
 
     assert server.request_calls == 1
+
+
+def test_network_error_mid_poll_re_retrieves_the_same_reference(monkeypatch):
+    """
+    A transport failure while polling must not restart generation: the statement is
+    already being built, and re-requesting is what trips 1025. Recover by polling the
+    same reference code (the fake asserts the code never changes).
+    """
+    import requests
+
+    server = _FakeFlexServer([
+        requests.exceptions.ConnectionError('Temporary failure in name resolution'),
+        requests.exceptions.ReadTimeout('timed out'),
+        b'<FlexQueryResponse></FlexQueryResponse>',
+    ]).install(monkeypatch)
+
+    data = IBKRService(token='t', query_id='q')._download_statement(60)
+
+    assert data == b'<FlexQueryResponse></FlexQueryResponse>'
+    assert server.request_calls == 1
+    assert server.retrieve_calls == 3
 
 
 def test_retrieve_gives_up_at_the_deadline(monkeypatch):

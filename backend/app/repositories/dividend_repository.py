@@ -69,11 +69,28 @@ class DividendRepository:
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
-    async def has_ibkr_dividends(self) -> bool:
-        """True if any authoritative IBKR-sourced dividend rows exist."""
-        result = await self.session.execute(
-            select(func.count(DividendPayment.id)).where(DividendPayment.source == "ibkr")
-        )
+    async def has_ibkr_dividends(
+        self, start: Optional[date] = None, end: Optional[date] = None
+    ) -> bool:
+        """
+        True if authoritative IBKR-sourced dividend rows exist, optionally only within
+        [start, end].
+
+        Callers that report per year MUST pass the window. A Flex Query only returns cash
+        transactions inside its period, so a year-to-date sync leaves earlier years with
+        estimates only — asking globally would make a prior-year report filter to `ibkr`,
+        find nothing, and present 0.00 as authoritative.
+
+        The window uses `pay_date` falling back to `ex_date`, matching how TaxService
+        buckets a payment into a year, so the flag can never disagree with the rows shown.
+        """
+        stmt = select(func.count(DividendPayment.id)).where(DividendPayment.source == "ibkr")
+        on_date = func.coalesce(DividendPayment.pay_date, DividendPayment.ex_date)
+        if start is not None:
+            stmt = stmt.where(on_date >= start)
+        if end is not None:
+            stmt = stmt.where(on_date <= end)
+        result = await self.session.execute(stmt)
         return int(result.scalar() or 0) > 0
 
     async def get_uncomputed(self) -> List[DividendPayment]:

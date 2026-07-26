@@ -26,14 +26,31 @@ The IBKR Flex sync (`POST /api/sync/ibkr`) is Flex-only and touches **no** Yahoo
 IBKR allows **1 request/second and 10 requests/minute per token**, and one `ibflex.client.download()`
 is *several* HTTP requests (request statement, then poll until ready, each with 3 internal tries). An
 eager retry loop blows the cap and triggers **`Code=1025: Too many failed attempts`** — an undocumented
-token lockout lasting **hours** (observed ~14h) that blocks all syncing. This has happened twice, both
-times self-inflicted.
+token lockout lasting **hours** (observed ~14h) that blocks all syncing. This has happened **three times,
+every one self-inflicted** — twice by looping `download()`, once by re-requesting after a `1001` (below).
 
 Retrying *during* a lockout can extend it. When locked: do nothing and let the schedule recover it.
 
 Budgets in `ibkr_service.py`: `_FLEX_RETRY_DELAYS = [30]` (2 attempts, interactive path) and
 `FLEX_RETRY_DELAYS_PATIENT = [120, 300, 600]` (scheduled jobs). `1025` fails fast with guidance; `1018`
 always backs off >= 60s. Pinned by `tests/test_flex_retry_policy.py`.
+
+**`1001` means the opposite thing at each step, and getting that wrong caused a third lockout
+(2026-07-26).** While *retrieving*, it means "not ready" — keep polling the same reference. From
+*SendRequest*, it means IBKR tried to generate and failed, which is exactly what `1025` counts:
+
+```
+Code=1001 ...; attempt 1/4, re-requesting in 120s   ->   Code=1025 Too many failed attempts
+```
+
+So `1001` is in `_RETRIEVE_PENDING_CODES` but deliberately **not** in `_REQUEST_RETRYABLE_CODES` — it
+fails fast and the next scheduled job asks for a fresh statement. With five IBKR attempts a day, giving up
+costs hours of freshness; re-requesting costs a lockout of every sync. The codes still retryable at the
+request step (`1009`/`1018`/`1019`/`1021`) all mean "throttled or busy, no generation job was created".
+
+Genuine transport errors (`requests.RequestException`: DNS, reset, timeout) **are** retried — they never
+reached IBKR, so they cost nothing against the token. Mid-poll they re-retrieve the same reference; before
+a reference exists they re-issue SendRequest. A DNS blip used to kill a whole job.
 
 ### The two-step rule (why we don't use `client.download()`)
 
@@ -47,7 +64,8 @@ docs are explicit:
 `ibflex.client.download()` polls correctly for `1009`/`1019`/`1018` but **not `1001`** — it raises, so any
 outer retry calls `download()` again and starts a *brand-new generation job*. Do that a few times and
 IBKR blocks the token: **`1025` counts failed *generations*, not request volume** (volume is `1018`,
-which we never saw). Both lockouts came from this.
+which we never saw). The first two lockouts came from this; the third came from re-requesting on `1001`,
+the same mistake one layer up.
 
 So `IBKRService._download_statement()` drives the two steps itself using ibflex's public pieces
 (`request_statement`, `submit_request`, `check_statement_response`, `STMT_URL`): **SendRequest once**,
@@ -155,6 +173,16 @@ Migrations: `cd backend && alembic upgrade head` (the container CMD runs this on
 2. **Corporate actions** → deterministic reclassification (split/spinoff/merger), not a sale
 3. **Fallback heuristic** (quantity drop + `COST_CONSERVED_RATIO`) → `close_source='heuristic'`
 
+`restamp_unsourced_closed_lots()` then fixes lots closed *before* `<Trades>` existed: those carry the
+date the sync **noticed** the drop, not the sale date (CRM and NFLX read 2026-04-17 for a 2026-03-13
+sale). A lot is only re-stamped when exactly one SELL for that security matches its quantity and isn't
+newer than the recorded close date — ambiguity is left alone rather than guessed. Idempotent (a stamped
+lot has a `close_source`), so it self-disables.
+
+Note `conid_to_security_id` is built from the statement's **OpenPositions**, so a security sold out
+entirely isn't in it; `persist_transactions` falls back to a DB lookup by conid, otherwise every SELL
+trade lands with `security_id = NULL`.
+
 **Empty-statement wipe guard:** if incoming tax lots are empty but the DB holds open lots, the sync
 **aborts** instead of marking everything sold. A successful-but-empty statement is treated as a failure.
 This guard has already saved the data through several failed syncs.
@@ -172,7 +200,10 @@ dividend income and allows reclaiming foreign withholding via **DA-1** — so th
 dividend income + withholding, then realized gains, then a year-end holdings snapshot (Steuerwert).
 
 Two honesty flags, both badged in the UI and CSV:
-- `dividend_source`: `ibkr` (real withholding) vs `yfinance_estimate` (gross guess, no withholding)
+- `dividend_source`: `ibkr` (real withholding) vs `yfinance_estimate` (gross guess, no withholding).
+  Decided **per requested year** (`has_ibkr_dividends(start, end)`), never globally: a YTD Flex Query
+  can't carry a prior year's cash transactions, so a global check made 2025 filter to `ibkr`, match
+  nothing and report **0.00 labelled authoritative**. The two sources are never summed.
 - `realized_source`: `trades` (IBKR FIFO) vs `closed_lot_estimate` (market price at close date — was
   ~8% off on a spot check, hence the badge)
 
@@ -272,7 +303,7 @@ security has no prices. Verify a ticker in a browser before adding a mapping, an
 |---|---|
 | `has no attribute` / `is not a valid` in a sync | IBKR schema drift. `_sanitize_flex_xml` should absorb it — if not, extend it generically (never patch one field) + add a test |
 | `Code=1025` | Token lockout, usually self-inflicted. **Wait**, don't retry. The schedule recovers it |
-| `Code=1001` | Statement not ready — normal for a big YTD query; the patient budget or a later job handles it |
+| `Code=1001` | Not ready. Polled while retrieving; **fatal at the request step** — never re-request, a later job handles it |
 | Sync 200 but 0 trades | Flex Query section/period not covering them |
 | `dividend_source` stuck on `yfinance_estimate` | No `<CashTransactions>` ingested — check the section + Withholding Tax option |
 | Yahoo 404/429 | **Stop.** Wait 30-60 min. Check `yfinance >= 1.1.0` |
@@ -281,11 +312,17 @@ security has no prices. Verify a ticker in a browser before adding a mapping, an
 
 ---
 
-## Current state (2026-07-25)
+## Current state (2026-07-26)
 
-38 securities, 971 open tax lots, 4 closed lots, 1356 dividend rows.
+**The first full Flex sync landed** (2026-07-25 22:30 UTC), so Trades/CashTransactions/CorporateActions
+are live: 38 securities, 972 open tax lots, 4 closed lots, **64 trades**, 1 SPINOFF, 26 IBKR dividend rows
+(7.65 EUR withholding) alongside 1356 yfinance estimates. 2026 reports `dividend_source='ibkr'` and
+`realized_source='trades'`; GOOGL is 12.
 
-**Pending:** the first successful Flex sync since Trades/CorporateActions/CashTransactions were enabled.
-Until it lands: `trades` empty, `dividend_source='yfinance_estimate'`, `realized_source=
-'closed_lot_estimate'`, `close_source='heuristic'`, and GOOGL shows 10 of 12 shares (a 2026-07-24 buy of
-2 arrived after the sync broke). All fixes are deployed; it's gated only on the IBKR lockout clearing.
+Cross-checked against IBKR via the MCP connector: IBKR lists **282 YTD trades = 218 `CASH`** (FX
+conversions, correctly filtered out) **+ 64 `STK`**, and the 64 match ours symbol-for-symbol. Same-day,
+same-price pairs (e.g. NU 7 @ 17.205 twice on 2026-02-04) are **genuine separate fills**, not duplicates.
+
+**Prior years remain estimates** — a YTD query can't reach them. Backfilling 2025 needs a one-off period
+change in the Flex Query (see the tax section); until then 2025 correctly reports
+`dividend_source='yfinance_estimate'`.

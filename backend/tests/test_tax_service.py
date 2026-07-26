@@ -232,6 +232,78 @@ async def test_unpriceable_holding_is_omitted_not_counted_as_zero():
 
 
 @pytest.mark.asyncio
+async def test_dividend_source_is_decided_per_year_not_globally():
+    """
+    A year-to-date Flex Query only carries the current year's cash transactions, so
+    earlier years keep yfinance estimates. Deciding the preference globally made the 2025
+    report filter to source='ibkr', match nothing, and present 0.00 *labelled ibkr* — an
+    estimate silently replaced by a confident zero, which is what the flag exists to stop.
+    """
+    engine, session = await _make_session()
+    try:
+        repo = DividendRepository(session)
+        # Authoritative row, current year only.
+        await repo.upsert_payment({
+            "security_id": 1, "ex_date": date(2026, 5, 2), "pay_date": date(2026, 5, 2),
+            "currency": "EUR", "shares_held": Decimal("0"),
+            "gross_amount_eur": Decimal("100"), "withholding_tax_eur": Decimal("15"),
+            "net_amount_eur": Decimal("85"), "source": "ibkr", "last_computed": datetime.now(),
+        })
+        # Estimate for the prior year — all 2025 has.
+        await repo.upsert_payment({
+            "security_id": 1, "ex_date": date(2025, 5, 2), "pay_date": date(2025, 5, 2),
+            "currency": "EUR", "shares_held": Decimal("0"),
+            "gross_amount_eur": Decimal("40"), "withholding_tax_eur": Decimal("0"),
+            "net_amount_eur": Decimal("40"), "source": "yfinance_estimate",
+            "last_computed": datetime.now(),
+        })
+        await session.commit()
+
+        prior = await TaxService(session).get_tax_report(2025)
+        assert prior["dividend_source"] == "yfinance_estimate"
+        assert prior["dividend_totals"]["gross"] == 40.0
+        assert len(prior["dividend_income"]) == 1
+
+        current = await TaxService(session).get_tax_report(2026)
+        assert current["dividend_source"] == "ibkr"
+        assert current["dividend_totals"] == {"gross": 100.0, "withholding": 15.0, "net": 85.0}
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_estimates_are_never_summed_with_authoritative_rows():
+    """Within one year the two sources must never be added together."""
+    engine, session = await _make_session()
+    try:
+        repo = DividendRepository(session)
+        await repo.upsert_payment({
+            "security_id": 1, "ex_date": date(2026, 3, 1), "pay_date": date(2026, 3, 1),
+            "currency": "EUR", "shares_held": Decimal("0"),
+            "gross_amount_eur": Decimal("100"), "withholding_tax_eur": Decimal("15"),
+            "net_amount_eur": Decimal("85"), "source": "ibkr", "last_computed": datetime.now(),
+        })
+        await repo.upsert_payment({
+            "security_id": 1, "ex_date": date(2026, 3, 2), "pay_date": date(2026, 3, 2),
+            "currency": "EUR", "shares_held": Decimal("0"),
+            "gross_amount_eur": Decimal("99"), "withholding_tax_eur": Decimal("0"),
+            "net_amount_eur": Decimal("99"), "source": "yfinance_estimate",
+            "last_computed": datetime.now(),
+        })
+        await session.commit()
+
+        report = await TaxService(session).get_tax_report(2026)
+
+        assert report["dividend_source"] == "ibkr"
+        assert report["dividend_totals"]["gross"] == 100.0  # not 199
+        assert len(report["dividend_income"]) == 1
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_realized_falls_back_to_closed_lots_when_no_sell_trades():
     """
     Without ingested <Trades>, the tax report must still report the lots the DB

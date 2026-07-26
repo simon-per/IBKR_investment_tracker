@@ -52,8 +52,13 @@ class TaxService:
         base_fx = await portfolio._load_base_fx()
 
         # --- Dividend income (prefer authoritative IBKR rows with withholding) ---
+        # The preference is decided *per year*, not globally: a year-to-date Flex Query
+        # only carries this year's cash transactions, so earlier years still hold nothing
+        # but yfinance estimates. Deciding globally made 2025 filter to `ibkr`, match zero
+        # rows, and report 0.00 flagged as authoritative — worse than the estimate it
+        # replaced.
         div_repo = DividendRepository(self.db)
-        use_ibkr = await div_repo.has_ibkr_dividends()
+        use_ibkr = await div_repo.has_ibkr_dividends(start=start, end=end)
         stmt = (
             select(DividendPayment, Security)
             .join(Security, DividendPayment.security_id == Security.id)
@@ -61,6 +66,10 @@ class TaxService:
         )
         if use_ibkr:
             stmt = stmt.where(DividendPayment.source == "ibkr")
+        else:
+            # No IBKR rows this year, so estimates are all there is. Excluding `ibkr`
+            # explicitly keeps the two from ever being summed together.
+            stmt = stmt.where(DividendPayment.source != "ibkr")
         rows = (await self.db.execute(stmt)).all()
 
         dividend_income: List[Dict] = []
