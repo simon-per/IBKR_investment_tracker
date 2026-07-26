@@ -180,14 +180,19 @@ class IBKRService:
                     f"IBKR Flex statement {reference} not ready (Code={e.code}); "
                     f"re-retrieving the same reference code in {delay}s"
                 )
-            except requests.exceptions.RequestException as e:
-                # A transport failure (DNS hiccup, reset, timeout) never reached IBKR, so
-                # it costs nothing against the token — but the statement IS being
-                # generated, so recover by polling the same reference, never re-requesting.
+            except (requests.exceptions.RequestException, BadResponseError) as e:
+                # Either a transport failure (DNS hiccup, reset, timeout) that never
+                # reached IBKR, or a reply we couldn't parse — ibflex raises
+                # BadResponseError for an empty/garbled body, which is usually the server
+                # being busy. Both happen *after* a reference code exists, so the
+                # statement is still being generated: recover by polling the same
+                # reference. Letting either escape to the outer loop would re-issue
+                # SendRequest and start a second generation job, which is precisely how
+                # the token gets locked with 1025.
                 delay = _RETRIEVE_POLL_DELAY
                 last_reason = f"{type(e).__name__}: {e}"
                 logger.warning(
-                    f"Network error retrieving IBKR Flex statement {reference} "
+                    f"Recoverable failure retrieving IBKR Flex statement {reference} "
                     f"({last_reason}); re-retrieving the same reference "
                     f"code in {delay}s"
                 )
@@ -445,7 +450,10 @@ class IBKRService:
                 )
                 await asyncio.sleep(delay)
             except BadResponseError as e:
-                # Malformed/empty response — typically the server being busy. Treat as transient.
+                # Only reachable from SendRequest itself — a malformed reply *during*
+                # polling is handled inside _download_statement against the same
+                # reference code. Here no statement exists yet, so re-requesting is the
+                # only option and is safe.
                 if attempt == max_attempts - 1:
                     raise
                 delay = delays[attempt]

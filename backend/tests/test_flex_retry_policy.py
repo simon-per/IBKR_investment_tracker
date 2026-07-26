@@ -270,6 +270,24 @@ def test_network_error_mid_poll_re_retrieves_the_same_reference(monkeypatch):
     assert server.retrieve_calls == 3
 
 
+def test_unparseable_reply_mid_poll_re_retrieves_the_same_reference(monkeypatch):
+    """
+    ibflex raises BadResponseError for an empty/garbled body, which check_statement_response
+    does *during* retrieve. It used to escape to the outer loop and re-issue SendRequest —
+    a second generation job after a reference already existed, i.e. the 1025 mechanism.
+    """
+    server = _FakeFlexServer([
+        BadResponseError(SimpleNamespace(content=b'')),
+        b'<FlexQueryResponse></FlexQueryResponse>',
+    ]).install(monkeypatch)
+
+    data = IBKRService(token='t', query_id='q')._download_statement(60)
+
+    assert data == b'<FlexQueryResponse></FlexQueryResponse>'
+    assert server.request_calls == 1
+    assert server.retrieve_calls == 2
+
+
 def test_retrieve_gives_up_at_the_deadline(monkeypatch):
     """A statement that never becomes ready must time out, not poll forever."""
     server = _FakeFlexServer(
