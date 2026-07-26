@@ -1,6 +1,6 @@
 import logging
 from typing import Any, Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,6 +8,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.sync_run import SyncRun
 
 logger = logging.getLogger(__name__)
+
+
+def utc_iso(value: Optional[datetime]) -> Optional[str]:
+    """
+    Serialize a timestamp so a browser can't misread it.
+
+    The container runs on UTC and these columns hold naive UTC datetimes, so a bare
+    `isoformat()` emits "2026-07-26T06:02:46" — which `new Date(...)` in the browser
+    parses as *local* time. The dashboard therefore showed the 08:00 Europe/Berlin sync
+    as having run at 06:02, right beside a "Next: 13:00" that APScheduler had correctly
+    tagged "+02:00". Two clocks on one line, and a real failure looked like a different,
+    later one. Stamping UTC explicitly makes the browser convert instead of guess.
+    """
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.isoformat()
 
 
 class SyncRunRepository:
@@ -75,7 +93,7 @@ class SyncRunRepository:
             "type": run.sync_type,
             "status": run.status,
             "message": run.message,
-            "timestamp": run.finished_at.isoformat() if run.finished_at else None,
+            "timestamp": utc_iso(run.finished_at),
             "details": run.details,
             "warnings": run.warnings,
         }

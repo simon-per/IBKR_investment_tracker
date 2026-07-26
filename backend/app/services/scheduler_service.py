@@ -22,7 +22,7 @@ from app.repositories.trade_repository import TradeRepository
 from app.repositories.corporate_action_repository import CorporateActionRepository
 from app.repositories.app_settings_repository import AppSettingsRepository
 from app.repositories.market_price_repository import MarketPriceRepository
-from app.repositories.sync_run_repository import SyncRunRepository
+from app.repositories.sync_run_repository import SyncRunRepository, utc_iso
 from app.services.benchmark_service import BenchmarkService, BENCHMARKS
 from app.models.benchmark_price import BenchmarkPrice
 from sqlalchemy import select, distinct
@@ -146,7 +146,7 @@ class SchedulerService:
                     "taxlots_synced": taxlots_count,
                     "taxlots_skipped": taxlots_skipped,
                     "total_cost_basis_eur": float(total_cost_basis_eur),
-                    "timestamp": datetime.now().isoformat()
+                    "timestamp": utc_iso(datetime.now())
                 }
 
                 # Same warnings as the manual endpoint: unsupported currencies plus any
@@ -170,7 +170,7 @@ class SchedulerService:
                 return {
                     "status": "error",
                     "message": f"Failed to sync IBKR data: {str(e)}",
-                    "timestamp": datetime.now().isoformat()
+                    "timestamp": utc_iso(datetime.now())
                 }
 
     async def sync_market_data(self, days_back: int = 730) -> dict:
@@ -201,7 +201,7 @@ class SchedulerService:
                         "message": "No securities found to sync",
                         "securities_processed": 0,
                         "prices_fetched": 0,
-                        "timestamp": datetime.now().isoformat()
+                        "timestamp": utc_iso(datetime.now())
                     }
 
                 total_prices = 0
@@ -236,7 +236,7 @@ class SchedulerService:
                     "message": f"Synced market data for {len(securities)} securities",
                     "securities_processed": len(securities),
                     "prices_fetched": total_prices,
-                    "timestamp": datetime.now().isoformat()
+                    "timestamp": utc_iso(datetime.now())
                 }
 
                 if errors:
@@ -252,7 +252,7 @@ class SchedulerService:
                 return {
                     "status": "error",
                     "message": f"Failed to sync market data: {str(e)}",
-                    "timestamp": datetime.now().isoformat()
+                    "timestamp": utc_iso(datetime.now())
                 }
 
     async def sync_exchange_rates(self, days_back: int = 30) -> dict:
@@ -285,7 +285,7 @@ class SchedulerService:
                     return {
                         "status": "success",
                         "currencies_synced": 0,
-                        "timestamp": datetime.now().isoformat()
+                        "timestamp": utc_iso(datetime.now())
                     }
 
                 logger.info(f"Syncing exchange rates for currencies: {currencies}")
@@ -329,7 +329,7 @@ class SchedulerService:
                     "status": "success",
                     "currencies_synced": total_rates,
                     "currencies": list(currencies),
-                    "timestamp": datetime.now().isoformat()
+                    "timestamp": utc_iso(datetime.now())
                 }
                 logger.info(f"Exchange rate sync completed: {total_rates} currencies updated")
                 return result
@@ -340,7 +340,7 @@ class SchedulerService:
                 return {
                     "status": "error",
                     "message": f"Failed to sync exchange rates: {str(e)}",
-                    "timestamp": datetime.now().isoformat()
+                    "timestamp": utc_iso(datetime.now())
                 }
 
     async def sync_benchmark_prices(self) -> dict:
@@ -421,7 +421,7 @@ class SchedulerService:
                     "status": "success",
                     "sync": sync_res,
                     "compute": compute_res,
-                    "timestamp": datetime.now().isoformat()
+                    "timestamp": utc_iso(datetime.now())
                 }
 
             except Exception as e:
@@ -429,7 +429,7 @@ class SchedulerService:
                 return {
                     "status": "error",
                     "message": f"Failed to sync dividends: {str(e)}",
-                    "timestamp": datetime.now().isoformat()
+                    "timestamp": utc_iso(datetime.now())
                 }
 
     async def full_sync_job(self):
@@ -473,7 +473,7 @@ class SchedulerService:
         # Track result
         self.last_sync_result = {
             "type": "full_sync",
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": utc_iso(datetime.now()),
             "ibkr_result": ibkr_result,
             "fx_result": fx_result,
             "market_result": market_result,
@@ -522,7 +522,7 @@ class SchedulerService:
         # Track result
         self.last_sync_result = {
             "type": "market_data_only",
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": utc_iso(datetime.now()),
             "fx_result": fx_result,
             "market_result": market_result,
             "benchmark_result": bench_result,
@@ -586,7 +586,7 @@ class SchedulerService:
 
         self.last_sync_result = {
             "type": "ibkr_sync",
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": utc_iso(datetime.now()),
             "ibkr_result": ibkr_result,
             "fx_result": fx_result,
             "status": ibkr_result.get("status", "error"),

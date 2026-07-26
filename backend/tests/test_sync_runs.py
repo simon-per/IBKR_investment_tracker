@@ -7,7 +7,7 @@ container restart — and auto-deploy restarts on each push. That left the daily
 restarted since". These tests pin the durable record and, importantly, that writing
 it can never break a sync.
 """
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
@@ -16,7 +16,7 @@ from sqlalchemy.pool import StaticPool
 from app.database import Base
 import app.models  # noqa: F401
 from app.models.sync_run import SyncRun
-from app.repositories.sync_run_repository import SyncRunRepository
+from app.repositories.sync_run_repository import SyncRunRepository, utc_iso
 from app.services.scheduler_service import SchedulerService
 
 
@@ -131,3 +131,27 @@ async def test_scheduler_record_run_survives_a_broken_database(monkeypatch):
     # Must return normally, logging rather than raising — the jobs call this last, after
     # last_sync_result is already set, so a throw here would turn a good sync into a crash.
     await svc._record_run({"type": "ibkr_sync", "status": "success"}, datetime.now())
+
+
+def test_timestamps_are_utc_tagged_so_browsers_convert_them():
+    """
+    The dashboard renders `new Date(timestamp).toLocaleString()`. A bare naive
+    isoformat() is parsed as *local* time, so the 08:00 Europe/Berlin sync displayed as
+    06:02 next to a correctly-offset "Next: 13:00" — making one failure look like two.
+    """
+    run = SyncRun(
+        sync_type="full_sync", status="error", message="boom",
+        finished_at=datetime(2026, 7, 26, 6, 2, 46),  # naive UTC, as stored
+    )
+
+    stamped = SyncRunRepository.to_dict(run)["timestamp"]
+
+    assert stamped == "2026-07-26T06:02:46+00:00"
+    # An offset must be present, otherwise the browser guesses.
+    assert stamped.endswith("+00:00")
+    assert utc_iso(None) is None
+
+
+def test_already_aware_timestamps_are_not_shifted():
+    aware = datetime(2026, 7, 26, 6, 2, 46, tzinfo=timezone.utc)
+    assert utc_iso(aware) == "2026-07-26T06:02:46+00:00"
