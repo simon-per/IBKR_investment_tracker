@@ -151,6 +151,23 @@ class MarketPriceRepository:
         await self.session.flush()
         return int(result.rowcount or 0)
 
+    async def delete_all_for_security(self, security_id: int) -> int:
+        """
+        Drop every cached price for a security.
+
+        For when the prices themselves are wrong rather than merely stale — a mapping
+        that pointed at the wrong instrument, which is only repaired by removing what it
+        produced. The dates become "missing" again and a scheduled job refills them, so
+        this costs no ad-hoc Yahoo call.
+
+        Returns the number of rows removed.
+        """
+        result = await self.session.execute(
+            delete(MarketPrice).where(MarketPrice.security_id == security_id)
+        )
+        await self.session.flush()
+        return int(result.rowcount or 0)
+
     async def get_date_range_for_security(
         self, security_id: int
     ) -> Optional[tuple[date, date]]:

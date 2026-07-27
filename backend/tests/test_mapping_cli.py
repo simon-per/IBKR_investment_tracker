@@ -1,0 +1,288 @@
+"""
+Tests for the ticker-mapping CLI (`app/cli/manage_mappings.py`).
+
+`ticker_mappings` is tier 1 of price resolution, so a wrong row silently redirects a
+position's prices to a different company — and because tier 1 wins, it keeps doing so even
+after the suffix logic that would have been right is fixed. That is the SBI@TSE failure
+(a Toronto CAD holding priced off a US fund, 61% high, for months).
+
+What these tests pin is therefore mostly about refusing and reporting, not about writing:
+an explicit currency contradiction is rejected outright, a suffix-less ticker for a foreign
+listing is called out, and a disagreement already in the table is surfaced by `list` rather
+than waiting to be noticed in the portfolio total.
+
+Offline: no Yahoo, no IBKR, no network at all.
+"""
+import json
+from datetime import date
+from decimal import Decimal
+
+import pytest
+import pytest_asyncio
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.pool import StaticPool
+
+from app.database import Base
+import app.models  # noqa: F401  register all mappers
+from app.models.market_price import MarketPrice
+from app.models.security import Security
+from app.models.sync_run import SyncRun
+from app.models.ticker_mapping import TickerMapping
+from app.cli import manage_mappings as cli
+from app.cli.manage_mappings import MappingError, build_parser, implied_currency
+from app.repositories.ticker_mapping_repository import TickerMappingRepository
+from app.services.market_data_service import MarketDataService
+
+
+@pytest_asyncio.fixture
+async def db(monkeypatch):
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session = AsyncSession(engine, expire_on_commit=False)
+    session.add_all([
+        # Serabi Gold: Toronto, CAD — the security the original bug mispriced.
+        Security(id=1, isin="GB00BG5NDX91", symbol="SBI", description="SERABI GOLD PLC",
+                 currency="CAD", conid=322447809, asset_category="STK", exchange="TSE"),
+        # A plain US listing, where a bare Yahoo ticker is correct.
+        Security(id=2, isin="US0231351067", symbol="AMZN", description="AMAZON",
+                 currency="USD", conid=3691937, asset_category="STK", exchange="NASDAQ"),
+    ])
+    for day, price in [(date(2026, 7, 24), 7.70), (date(2026, 7, 27), 7.65)]:
+        session.add(MarketPrice(security_id=1, date=day, close_price=Decimal(str(price)),
+                                currency="CAD", source="yahoo_finance"))
+    session.add(MarketPrice(security_id=2, date=date(2026, 7, 24), close_price=Decimal("231"),
+                            currency="USD", source="yahoo_finance"))
+    await session.commit()
+
+    class _Ctx:
+        async def __aenter__(self):
+            return session
+
+        async def __aexit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(cli, "AsyncSessionLocal", lambda: _Ctx())
+    try:
+        yield session
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+def args(*argv):
+    return build_parser().parse_args(list(argv))
+
+
+async def _mappings(db, symbol=None):
+    stmt = select(TickerMapping)
+    if symbol:
+        stmt = stmt.where(TickerMapping.ibkr_symbol == symbol)
+    return list((await db.execute(stmt)).scalars().all())
+
+
+async def _prices(db, security_id):
+    return list((await db.execute(
+        select(MarketPrice).where(MarketPrice.security_id == security_id)
+    )).scalars().all())
+
+
+async def _runs(db):
+    return list((await db.execute(select(SyncRun))).scalars().all())
+
+
+# --- what a ticker implies on its own ------------------------------------------------
+
+
+def test_implied_currency_reads_suffixes_overrides_and_admits_ignorance():
+    service = MarketDataService.__new__(MarketDataService)
+
+    assert implied_currency(service, "SBI.TO") == "CAD"
+    assert implied_currency(service, "2330.TW") == "TWD"
+    assert implied_currency(service, "005930.KS") == "KRW"
+    # A hand-checked override outranks the suffix: SMH.L is a USD ETF listed in London.
+    assert implied_currency(service, "SMH.L") == "USD"
+    # A bare ticker genuinely implies nothing, and saying "None" is what lets `set`
+    # distinguish "contradicts the security" from "cannot tell".
+    assert implied_currency(service, "SOXQ") is None
+
+
+# --- set -----------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_set_creates_then_updates_and_always_stamps_manual(db):
+    assert await cli.run(args("set", "SBI", "TSE", "SBI.TO", "--notes", "Toronto")) == 0
+
+    rows = await _mappings(db, "SBI")
+    assert len(rows) == 1 and rows[0].yahoo_ticker == "SBI.TO"
+    assert rows[0].source == "manual"
+
+    assert await cli.run(args("set", "SBI", "TSE", "SBI.V")) == 0
+
+    rows = await _mappings(db, "SBI")
+    assert len(rows) == 1                      # updated, not duplicated
+    assert rows[0].yahoo_ticker == "SBI.V"
+    assert rows[0].source == "manual"
+
+
+@pytest.mark.asyncio
+async def test_a_ticker_contradicting_the_securitys_currency_is_refused(db):
+    """SBI.L implies GBP against a CAD security. Refusing matters because the failure is
+    invisible downstream: prices do arrive, they are just the wrong company's."""
+    assert await cli.run(args("set", "SBI", "TSE", "SBI.L")) == 1
+
+    assert await _mappings(db, "SBI") == []
+    runs = await _runs(db)
+    assert [r.status for r in runs] == ["error"]
+    assert "CAD" in runs[0].message and "GBP" in runs[0].message
+
+
+@pytest.mark.asyncio
+async def test_a_bare_ticker_for_a_foreign_listing_warns_but_is_allowed(db, capsys):
+    """Exactly the shape of the original bug — but a bare ticker implies no currency, so it
+    cannot be *proved* wrong, and an operator may know better than the suffix map. Warn
+    loudly; don't block."""
+    assert await cli.run(args("set", "SBI", "TSE", "SBI")) == 0
+
+    out = capsys.readouterr().out
+    assert "WARNING" in out and "no suffix" in out
+    assert (await _mappings(db, "SBI"))[0].yahoo_ticker == "SBI"
+
+
+@pytest.mark.asyncio
+async def test_a_bare_ticker_for_a_us_listing_is_silent(db, capsys):
+    """The common, correct case: NASDAQ has no suffix, so AMZN is right and must not be
+    nagged about, or the warning above becomes noise people learn to ignore."""
+    assert await cli.run(args("set", "AMZN", "NASDAQ", "AMZN")) == 0
+
+    assert "WARNING" not in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_set_stores_a_mapping_for_a_security_that_does_not_exist_yet(db, capsys):
+    """Pinning a mapping ahead of the statement that first carries the security is the
+    reason this ran tonight for 2330@TWSE — it has to be allowed."""
+    assert await cli.run(args("set", "2330", "TWSE", "2330.TW")) == 0
+
+    out = capsys.readouterr().out
+    assert "no security matches" in out
+    assert (await _mappings(db, "2330"))[0].yahoo_ticker == "2330.TW"
+
+
+@pytest.mark.asyncio
+async def test_set_dry_run_writes_nothing(db):
+    assert await cli.run(args("set", "SBI", "TSE", "SBI.TO", "--dry-run")) == 0
+
+    assert await _mappings(db, "SBI") == []
+    assert await _runs(db) == []
+
+
+@pytest.mark.asyncio
+async def test_set_records_the_edit_in_sync_runs(db):
+    """A mapping change being invisible is why SBI went unnoticed for months."""
+    await cli.run(args("set", "SBI", "TSE", "SBI.TO"))
+
+    runs = await _runs(db)
+    assert [r.sync_type for r in runs] == ["manual_mapping"]
+    assert runs[0].details["action"] == "set"
+    assert runs[0].details["yahoo_ticker"] == "SBI.TO"
+
+
+# --- disable --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_disable_stops_the_lookup_but_keeps_the_row(db):
+    await cli.run(args("set", "SBI", "TSE", "SBI.TO"))
+
+    assert await cli.run(args("disable", "SBI", "TSE")) == 0
+
+    # get_mapping filters on is_active, so resolution falls back to the suffix logic...
+    assert await TickerMappingRepository(db).get_mapping("SBI", "TSE") is None
+    # ...while what was tried survives for the next person to read.
+    rows = await _mappings(db, "SBI")
+    assert len(rows) == 1 and rows[0].is_active is False
+
+
+@pytest.mark.asyncio
+async def test_purge_prices_clears_only_that_securitys_prices(db):
+    """The documented recovery in one step. Scope matters: purging a neighbour's cache
+    would trigger a needless Yahoo refetch, which rule 1 exists to avoid."""
+    await cli.run(args("set", "SBI", "TSE", "SBI"))
+
+    assert await cli.run(args("disable", "SBI", "TSE", "--purge-prices")) == 0
+
+    assert await _prices(db, 1) == []
+    assert len(await _prices(db, 2)) == 1        # AMZN untouched
+
+
+@pytest.mark.asyncio
+async def test_disable_dry_run_changes_nothing(db):
+    await cli.run(args("set", "SBI", "TSE", "SBI.TO"))
+
+    assert await cli.run(args("disable", "SBI", "TSE", "--purge-prices", "--dry-run")) == 0
+
+    assert await TickerMappingRepository(db).get_mapping("SBI", "TSE") is not None
+    assert len(await _prices(db, 1)) == 2
+
+
+@pytest.mark.asyncio
+async def test_disabling_something_that_is_not_mapped_fails_cleanly(db):
+    assert await cli.run(args("disable", "GHOST", "NOWHERE")) == 1
+
+    runs = await _runs(db)
+    assert [r.status for r in runs] == ["error"]
+
+
+@pytest.mark.asyncio
+async def test_purge_prices_without_a_security_refuses_rather_than_half_working(db):
+    await cli.run(args("set", "2330", "TWSE", "2330.TW"))
+
+    assert await cli.run(args("disable", "2330", "TWSE", "--purge-prices")) == 1
+
+    # The mapping must still be active: the command was refused, not partly applied.
+    assert await TickerMappingRepository(db).get_mapping("2330", "TWSE") is not None
+
+
+# --- list -----------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_surfaces_a_currency_disagreement_already_in_the_table(db, capsys):
+    """The whole point of the command: a bad row should be visible here rather than being
+    discovered as a 61% overstatement in the portfolio total."""
+    db.add(TickerMapping(ibkr_symbol="SBI", ibkr_exchange="TSE", yahoo_ticker="SBI.L",
+                         source="auto", is_active=True))
+    await db.commit()
+
+    assert await cli.run(args("list")) == 0
+
+    out = capsys.readouterr().out
+    assert "CURRENCY DISAGREEMENT" in out
+    assert "security is CAD, ticker implies GBP" in out
+
+
+@pytest.mark.asyncio
+async def test_list_reports_a_clean_table_and_the_price_counts(db, capsys):
+    await cli.run(args("set", "SBI", "TSE", "SBI.TO"))
+    capsys.readouterr()
+
+    assert await cli.run(args("list")) == 0
+
+    out = capsys.readouterr().out
+    assert "No currency disagreements." in out
+    assert "SBI@TSE" in out and "SBI.TO" in out
+    assert "2" in out          # SBI's two cached prices
+
+
+@pytest.mark.asyncio
+async def test_list_is_fine_with_an_empty_table(db, capsys):
+    assert await cli.run(args("list")) == 0
+    assert "No ticker mappings." in capsys.readouterr().out

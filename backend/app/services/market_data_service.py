@@ -286,6 +286,7 @@ class MarketDataService:
             '.T': 'JPY',   # Tokyo
             '.TO': 'CAD',  # Toronto
             '.TW': 'TWD',  # Taiwan
+            '.KS': 'KRW',  # Korea — EXCHANGE_SUFFIXES maps KRX here, but this map didn't
             '.AX': 'AUD',  # Australia
         }
 

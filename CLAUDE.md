@@ -210,7 +210,8 @@ Tests: `tests/test_flex_xml_sanitizer.py`, `tests/test_flex_ingestion_e2e.py`.
 - **exchange_rates** / **market_prices** — caches. **ticker_mappings** — IBKR→Yahoo symbols.
 - **app_settings** — `base_currency`, `last_sync_to_date`. Plus fundamentals + earnings tables.
 - **sync_runs** — one row per sync attempt (`sync_type` ∈ `ibkr` | `ibkr_sync` | `full_sync` |
-  `market_data_only` | `ibkr_manual_xml` | `manual_prices`, `status`, `message`, `details`, `warnings`). Timestamps are
+  `market_data_only` | `ibkr_manual_xml` | `manual_prices` | `manual_mapping`, `status`, `message`,
+  `details`, `warnings`). Timestamps are
   serialized UTC-aware via `utc_iso()` — a bare naive `isoformat()` is parsed as *local* by the browser,
   which once made an 08:00 sync display as 06:02.
   `SchedulerService.last_sync_result` is in-memory only and auto-deploy restarts on every push, so
@@ -346,7 +347,7 @@ cd backend && venv\Scripts\activate && uvicorn app.main:app --reload --port 8000
 cd frontend && npm run dev          # http://localhost:5173
 ```
 
-Tests (143, all offline — no IBKR, Yahoo or FX-provider calls):
+Tests (159, all offline — no IBKR, Yahoo or FX-provider calls):
 ```bash
 cd backend && ./venv/Scripts/python.exe -m pytest tests/ -q
 ```
@@ -385,9 +386,35 @@ mismatch. Result: the position was carried 61% high (7.70 vs 4.78 CAD).
 
 Two guards now: prices carry **the currency Yahoo reports** (read from the history metadata already in
 the response — no extra request), and a variation whose currency disagrees with the security's is
-**rejected, not adopted, and not saved**. Tests: `tests/test_market_data_service.py`. When a mapping is
-wrong, delete the `ticker_mappings` row *and* the poisoned `market_prices` rows, then let a scheduled
-job refill them — incremental caching fetches only missing dates, so this costs no ad-hoc Yahoo calls.
+**rejected, not adopted, and not saved**. Tests: `tests/test_market_data_service.py`.
+
+### Managing mappings — `app/cli/manage_mappings.py`
+
+This table decides where every price comes from and was the last one still edited by hand-written SQL
+over ssh, where a typo mis-prices a position and looks like a real price. Use the CLI instead:
+
+```bash
+docker exec backend-portfolio-backend-1 python -m app.cli.manage_mappings list
+docker exec backend-portfolio-backend-1 python -m app.cli.manage_mappings set 2330 TWSE 2330.TW
+docker exec backend-portfolio-backend-1 python -m app.cli.manage_mappings disable SBI TSE --purge-prices
+```
+
+- **`list`** prints the security's currency beside the one its Yahoo ticker implies. A disagreement
+  between those columns *is* the SBI bug, so it's flagged explicitly rather than left to be noticed in
+  the portfolio total.
+- **`set`** stamps `source='manual'` and **refuses** a ticker whose suffix contradicts the security
+  (`SBI.L` → GBP under a CAD security). It reuses `_get_currency_from_ticker()`, so the CLI and the
+  fetch path can't drift apart. A *bare* ticker implies no currency and so can't be refused — for a
+  foreign listing it warns loudly instead, since that's the exact SBI shape. Storing a mapping before
+  the security exists is allowed on purpose: that's how you pin one ahead of the statement.
+- **`disable`** sets `is_active=False` rather than deleting (`get_mapping()` already filters on it), so
+  the row stops being consulted while the record of what was tried survives. **`--purge-prices`** is the
+  whole recovery in one step: drop the prices the bad mapping produced and let a scheduled job refill
+  them — incremental caching fetches only missing dates, so it costs **no ad-hoc Yahoo call**.
+- `--dry-run` on both mutating commands; every edit records a `sync_runs` row (`manual_mapping`),
+  because a mapping change being invisible is why SBI went unnoticed for months.
+
+Tests: `tests/test_mapping_cli.py`.
 
 **Currency** — Frankfurter at `https://api.frankfurter.dev/v1` (`.app` now 301-redirects here).
 Batch-fetches date ranges (one call per ~30 days) and carries the last known rate forward across
@@ -441,7 +468,7 @@ Tests: `tests/test_currency_fallback.py`.
 | A position shows 0.00 / `market_price: null` | No cached price. The market-data sync's `warnings[]` now names it. Fix the `ticker_mappings` row, or fill it with `app/cli/import_prices.py` from IBKR bars |
 | The chart steps at a split date | Cached pre-split closes. A *new* split purges them automatically; for an older one delete that security's `market_prices` and let 08:00 refill |
 | A new currency appears | Nothing to do if it's in `WARM_CURRENCIES` or the ECB set. Otherwise add it there — one edit, no extra request |
-| A position's value is far off IBKR's | Suspect the `ticker_mappings` row before the price feed: compare `market_prices.close_price` against IBKR's `market_price` in the *same* currency |
+| A position's value is far off IBKR's | Suspect the `ticker_mappings` row before the price feed: run `manage_mappings list` and look for a currency disagreement, then compare `market_prices.close_price` against IBKR's `market_price` in the *same* currency |
 | App total ≠ IBKR total | Compare against `gross_position_value`, **not** net liquidation (which adds cash); and intraday the app holds the last *close* while IBKR quotes live |
 | Site "down" in the browser | Often TIM home DNS, not the server — verify with `Test-NetConnection`, not `nslookup` |
 | Deploy says health FAILED | Usually the premature check; re-curl `/health` after ~15s |
@@ -462,9 +489,18 @@ prices (the 13:00 UTC market-data job runs before the US open, so US names still
 normal, the 20:00/22:00 jobs close it), **+713** TSMC not yet in any statement, plus **~169** from the
 SBI mapping bug (both fixed, see the ticker/currency section).
 
-Watch after the next sync that carries 2026-07-27: **35** positions including `2330@TWSE`, and
-`taxlots_skipped: 0` with no "unsupported currencies" warning. Both the 13:00 and 20:00 IBKR jobs hit a
-plain `1001` and failed fast without re-requesting, which is correct — so 2330 waits for 08:00.
+**Two positions are pending the next statement: `2330@TWSE` (TSMC) and `SOXQ` (NASDAQ), both bought
+2026-07-27.** All three of today's IBKR jobs returned a statement ending 2026-07-24 — the 13:00 and
+20:00 ones hit a plain `1001` and failed fast without re-requesting, which is correct — so both wait
+for **08:00**. Expect **40 securities**, `taxlots_skipped: 0`, and no "unsupported currencies" warning.
+
+The prep that mattered is already done: `reconcile_taxlots` values a lot at its `open_date`, so both
+new lots need a 2026-07-27 rate, and `USD/EUR 0.87804` + `TWD/EUR 0.02715797` are cached. Without the
+TWD row, TSMC's lot would have been skipped and the holding would simply not have appeared.
+`2330/TWSE → 2330.TW` is pinned as `manual`. **SOXQ deliberately has no mapping**: `NASDAQ` resolves to
+an empty suffix, so the bare `SOXQ` is already what tier 2 produces — and with no suffix,
+`_get_yahoo_ticker_variations()` returns that one candidate alone, so the bare-symbol auto-save that
+poisoned SBI is never reached. A mapping there would be inert.
 
 **SBI reads 4.79 CAD / 276.83 CHF again.** Its poisoned rows were deleted (backup:
 `/root/ibkr-backups/sbi-poisoned-2026-07-27.json`) and the last month refilled from Client Portal daily
