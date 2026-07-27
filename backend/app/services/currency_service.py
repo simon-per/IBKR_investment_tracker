@@ -212,7 +212,7 @@ class CurrencyService:
         target_date: date,
         to_currency: str,
         days_back: int = 30
-    ) -> None:
+    ) -> bool:
         """
         Batch fetch exchange rates for a date range.
         Uses Frankfurter's range endpoint: /start_date..end_date
@@ -222,6 +222,12 @@ class CurrencyService:
             target_date: Target date (end of range)
             to_currency: Target currency (EUR)
             days_back: How many days before target_date to fetch (default: 30)
+
+        Returns:
+            True if rates came back and were cached; False if the provider errored or
+            answered with nothing. Callers that report a count need this: swallowing the
+            error *and* counting the currency as done reported "14 currencies synced" on
+            a run where one fetch had actually failed.
         """
         from datetime import timedelta
 
@@ -242,8 +248,11 @@ class CurrencyService:
                 logger.debug(f"Batch response status: {response.status_code}")
 
                 if response.status_code >= 400:
-                    logger.warning(f"Batch fetch failed (status {response.status_code}), will try individual dates")
-                    return
+                    logger.warning(
+                        f"Batch fetch for {from_currency}/{to_currency} failed "
+                        f"(status {response.status_code})"
+                    )
+                    return False
 
                 data = response.json()
 
@@ -264,10 +273,22 @@ class CurrencyService:
                             await self._cache_rate(from_currency, to_currency, rate_date, rate_decimal)
 
                 logger.debug(f"Cached {len(rates_by_date)} rates")
+                # An empty `rates` is a *successful* request that carried no data — the
+                # provider drifting out of step with SUPPORTED_CURRENCIES looks exactly
+                # like this. Report it as a miss so the caller falls through instead of
+                # counting a currency it never actually got a rate for.
+                return bool(rates_by_date)
 
             except Exception as e:
-                logger.error(f"Batch fetch error: {e}")
-                # Don't raise - we'll fall back to individual fetches if needed
+                # httpx transport errors routinely stringify to '', which made this line
+                # read "Batch fetch error: " and say nothing about what broke or where.
+                logger.error(
+                    f"Batch fetch error for {from_currency}/{to_currency} "
+                    f"over {start_date}..{end_date}: {type(e).__name__}: {e}"
+                )
+                # Don't raise: get_exchange_rate() decides what an empty cache means,
+                # and can now reach the fallback provider instead of giving up.
+                return False
 
     async def _fetch_fallback_table(self) -> Optional[Dict[str, Decimal]]:
         """
@@ -393,14 +414,27 @@ class CurrencyService:
         secondary = sorted(wanted - set(primary))
 
         warmed_primary = 0
+        failed = []
         for currency in primary:
             try:
-                await self._batch_fetch_rates(
+                if await self._batch_fetch_rates(
                     currency, target_date, to_currency, days_back=days_back
-                )
-                warmed_primary += 1
+                ):
+                    warmed_primary += 1
+                else:
+                    failed.append(currency)
             except Exception as e:  # _batch_fetch_rates already swallows, belt and braces
                 logger.error(f"Warm-up failed for {currency}: {e}")
+                failed.append(currency)
+
+        # A currency Frankfurter couldn't serve falls through to the fallback here for the
+        # same reason get_exchange_rate() does it: an outage should cost accuracy, not a
+        # day's worth of history for a currency that only accumulates forward.
+        if failed:
+            logger.warning(
+                f"Frankfurter did not answer for {', '.join(failed)} — trying the fallback"
+            )
+            secondary = sorted(set(secondary) | set(failed))
 
         # The fallback is latest-only, so re-fetching a currency already cached for this
         # date would return the same number. Skipping those makes the warm-up a no-op
@@ -437,12 +471,18 @@ class CurrencyService:
                 except Exception as e:
                     logger.error(f"Fallback warm-up failed for {currency}: {e}")
 
-        return {
+        summary = {
             "frankfurter": warmed_primary,
             "fallback": warmed_secondary,
             "fallback_available": table is not None if secondary else None,
             "currencies": sorted(wanted),
         }
+        if failed:
+            # Named, not just counted: a currency that failed both providers is the
+            # precondition for a position quietly disappearing, so it belongs in the
+            # sync record rather than only in the container log.
+            summary["frankfurter_failed"] = failed
+        return summary
 
     async def _fetch_from_api(
         self,

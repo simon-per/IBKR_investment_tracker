@@ -346,7 +346,7 @@ cd backend && venv\Scripts\activate && uvicorn app.main:app --reload --port 8000
 cd frontend && npm run dev          # http://localhost:5173
 ```
 
-Tests (140, all offline — no IBKR, Yahoo or FX-provider calls):
+Tests (143, all offline — no IBKR, Yahoo or FX-provider calls):
 ```bash
 cd backend && ./venv/Scripts/python.exe -m pytest tests/ -q
 ```

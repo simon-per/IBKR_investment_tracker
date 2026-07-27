@@ -269,6 +269,40 @@ async def test_warm_rates_costs_one_request_for_the_whole_non_ecb_set(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_warm_rates_routes_a_frankfurter_failure_to_the_fallback(monkeypatch, session):
+    """Same rule as get_exchange_rate: an outage should cost accuracy, not a whole day of
+    history. It also has to be *reported* — a currency that failed both providers is the
+    precondition for a position quietly disappearing."""
+    install_routed_http(
+        monkeypatch,
+        frankfurter={"rates": {}},            # up, but returns nothing for USD
+        fallback=FALLBACK_PAYLOAD,
+    )
+
+    summary = await CurrencyService(session).warm_rates(["USD"])
+
+    assert summary["frankfurter"] == 0
+    assert summary["frankfurter_failed"] == ["USD"]
+    assert summary["fallback"] == 1
+    rows = await _rows(session)
+    assert [(r.from_currency, r.source) for r in rows] == [
+        ("USD", CurrencyService.FALLBACK_SOURCE)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_clean_warm_up_reports_no_failures(monkeypatch, session):
+    install_routed_http(
+        monkeypatch, frankfurter=frankfurter_range_payload(0.878), fallback=FALLBACK_PAYLOAD
+    )
+
+    summary = await CurrencyService(session).warm_rates(["USD"])
+
+    assert summary["frankfurter"] == 1
+    assert "frankfurter_failed" not in summary
+
+
+@pytest.mark.asyncio
 async def test_warm_rates_survives_an_unavailable_fallback(monkeypatch, session):
     """Warm-up is bookkeeping for later; a provider being down must not fail the sync
     that called it."""
