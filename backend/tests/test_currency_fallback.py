@@ -83,6 +83,37 @@ def install_fake_http(monkeypatch, payload=FALLBACK_PAYLOAD, status_code=200):
     return calls
 
 
+def frankfurter_range_payload(rate, on=None):
+    """Shaped like Frankfurter's /start..end range reply: {rates: {date: {CUR: rate}}}."""
+    on = on or date.today()
+    return {"rates": {on.isoformat(): {"EUR": rate}}}
+
+
+def install_routed_http(monkeypatch, frankfurter, fallback):
+    """
+    Answer the two providers differently, so a test can fail one and not the other.
+
+    That distinction is the whole subject of these tests: the fallback trades accuracy
+    for availability, so exactly *when* it is reached is the behaviour worth pinning.
+    """
+    calls = []
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, url, **kwargs):
+            calls.append(url)
+            is_fallback = url == CurrencyService.FALLBACK_API_URL
+            return FakeResponse(fallback if is_fallback else frankfurter)
+
+    monkeypatch.setattr(cs.httpx, "AsyncClient", lambda *a, **k: FakeClient())
+    return calls
+
+
 async def _rows(session):
     result = await session.execute(select(ExchangeRate))
     return result.scalars().all()
@@ -121,16 +152,63 @@ async def test_old_date_still_raises_rather_than_backdating_todays_rate(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_fallback_is_never_consulted_for_a_frankfurter_currency(monkeypatch, session):
-    """USD must keep going to Frankfurter — the fallback is a hole-filler, not a
-    replacement, and silently switching providers would change every cached rate."""
-    calls = install_fake_http(monkeypatch, payload={"rates": {}})
+async def test_no_provider_switch_while_frankfurter_answers(monkeypatch, session):
+    """The fallback must not creep in as a *replacement*. Its rates are today's applied
+    to a recent date; the ECB's are the real thing for the date asked. So as long as
+    Frankfurter answers, it wins and the fallback is never even contacted."""
+    calls = install_routed_http(
+        monkeypatch,
+        frankfurter=frankfurter_range_payload(0.878),
+        fallback=FALLBACK_PAYLOAD,
+    )
+
+    rate = await CurrencyService(session).get_exchange_rate("USD", date.today())
+
+    assert rate == Decimal("0.878")
+    assert CurrencyService.FALLBACK_API_URL not in calls
+    rows = await _rows(session)
+    assert [r.source for r in rows] == ["frankfurter"]
+
+
+@pytest.mark.asyncio
+async def test_frankfurter_outage_is_rescued_by_the_fallback_and_tagged(monkeypatch, session):
+    """USD is in SUPPORTED_CURRENCIES, so this used to raise — and a raise means
+    reconcile_taxlots() skips the lot and the position vanishes from the portfolio and
+    the tax report. One provider being down should degrade the rate, not delete a
+    holding, so the fallback is now the last resort for *any* currency. The tag is what
+    keeps the approximation honest afterwards."""
+    calls = install_routed_http(
+        monkeypatch,
+        frankfurter={"rates": {}},          # up, but has nothing for us
+        fallback=FALLBACK_PAYLOAD,
+    )
+
+    rate = await CurrencyService(session).get_exchange_rate("USD", date.today())
+
+    assert abs(rate - Decimal("1") / Decimal("1.138971")) < Decimal("1e-8")
+    assert CurrencyService.FALLBACK_API_URL in calls
+    rows = await _rows(session)
+    assert [r.source for r in rows] == [CurrencyService.FALLBACK_SOURCE]
+
+
+@pytest.mark.asyncio
+async def test_frankfurter_outage_on_an_old_date_still_raises(monkeypatch, session):
+    """The rescue is strictly for recent dates. Applying today's rate to a 2025 lot
+    would write a fabricated historical rate the tax report then presents as fact, so an
+    old date keeps raising even when the fallback could technically answer."""
+    calls = install_routed_http(
+        monkeypatch,
+        frankfurter={"rates": {}},
+        fallback=FALLBACK_PAYLOAD,
+    )
+    stale = date.today() - timedelta(days=CurrencyService.FALLBACK_MAX_AGE_DAYS + 1)
 
     with pytest.raises(ValueError):
-        await CurrencyService(session).get_exchange_rate("USD", date.today())
+        await CurrencyService(session).get_exchange_rate("USD", stale)
 
-    assert calls, "expected Frankfurter to be queried"
-    assert all(CurrencyService.FALLBACK_API_URL not in url for url in calls)
+    # Frankfurter was asked; the fallback was refused on age before spending a request.
+    assert calls and CurrencyService.FALLBACK_API_URL not in calls
+    assert await _rows(session) == []
 
 
 @pytest.mark.asyncio
@@ -160,4 +238,101 @@ async def test_provider_failure_leaves_the_cache_untouched(monkeypatch, session)
     with pytest.raises(ValueError):
         await CurrencyService(session).get_exchange_rate("TWD", date.today())
 
+    assert await _rows(session) == []
+
+
+# --- warm-up ------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_warm_rates_costs_one_request_for_the_whole_non_ecb_set(monkeypatch, session):
+    """The provider returns all ~166 currencies in a single reply, so warming N of them
+    must cost one request, not N. This is the only reason warming a watchlist daily is
+    affordable — and daily is what builds the history, since there is no historical
+    endpoint to ask later."""
+    calls = install_routed_http(
+        monkeypatch,
+        frankfurter=frankfurter_range_payload(0.878),
+        fallback=FALLBACK_PAYLOAD,
+    )
+
+    summary = await CurrencyService(session).warm_rates(["TWD", "CHF", "USD"])
+
+    fallback_calls = [c for c in calls if c == CurrencyService.FALLBACK_API_URL]
+    assert len(fallback_calls) == 1
+    assert summary["frankfurter"] == 2          # CHF and USD via the ECB range endpoint
+    assert summary["fallback"] == 1             # TWD from the shared table
+
+    by_currency = {r.from_currency: r for r in await _rows(session)}
+    assert by_currency["TWD"].source == CurrencyService.FALLBACK_SOURCE
+    assert by_currency["USD"].source == "frankfurter"
+
+
+@pytest.mark.asyncio
+async def test_warm_rates_survives_an_unavailable_fallback(monkeypatch, session):
+    """Warm-up is bookkeeping for later; a provider being down must not fail the sync
+    that called it."""
+    install_routed_http(
+        monkeypatch,
+        frankfurter=frankfurter_range_payload(0.878),
+        fallback={"result": "error"},
+    )
+
+    summary = await CurrencyService(session).warm_rates(["TWD", "USD"])
+
+    assert summary["fallback"] == 0
+    assert summary["fallback_available"] is False
+    assert [r.from_currency for r in await _rows(session)] == ["USD"]
+
+
+@pytest.mark.asyncio
+async def test_warm_rates_skips_the_request_when_the_day_is_already_cached(
+    monkeypatch, session
+):
+    """Five jobs a day call this. The provider is latest-only, so re-asking returns the
+    same number — the second run of the day should cost nothing at all."""
+    service = CurrencyService(session)
+    calls = install_routed_http(
+        monkeypatch, frankfurter=frankfurter_range_payload(0.878), fallback=FALLBACK_PAYLOAD
+    )
+
+    await service.warm_rates(["TWD"])
+    assert calls == [CurrencyService.FALLBACK_API_URL]
+
+    summary = await service.warm_rates(["TWD"])
+
+    assert calls == [CurrencyService.FALLBACK_API_URL]   # still just the one
+    assert summary["fallback"] == 0
+    assert len(await _rows(session)) == 1
+
+
+@pytest.mark.asyncio
+async def test_warm_rates_does_not_claim_a_currency_neither_provider_carries(
+    monkeypatch, session
+):
+    """Counting it as warmed would report success for a currency that still cannot be
+    converted — and the symptom of that is a position quietly missing from the portfolio
+    and the tax report, months later."""
+    install_routed_http(
+        monkeypatch, frankfurter=frankfurter_range_payload(0.878), fallback=FALLBACK_PAYLOAD
+    )
+
+    summary = await CurrencyService(session).warm_rates(["TWD", "XYZ"])
+
+    assert summary["fallback"] == 1
+    assert [r.from_currency for r in await _rows(session)] == ["TWD"]
+
+
+@pytest.mark.asyncio
+async def test_warm_rates_ignores_the_target_currency_itself(monkeypatch, session):
+    """EUR->EUR is 1 by definition and has no row; asking for it must not spend a
+    request or write one."""
+    calls = install_routed_http(
+        monkeypatch, frankfurter=frankfurter_range_payload(0.878), fallback=FALLBACK_PAYLOAD
+    )
+
+    summary = await CurrencyService(session).warm_rates(["EUR"])
+
+    assert calls == []
+    assert summary["currencies"] == []
     assert await _rows(session) == []

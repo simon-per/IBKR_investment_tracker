@@ -33,6 +33,7 @@ from app.services.ibkr_service import IBKRService
 from app.repositories.taxlot_repository import TaxLotRepository
 from app.repositories.trade_repository import TradeRepository
 from app.repositories.corporate_action_repository import CorporateActionRepository
+from app.repositories.market_price_repository import MarketPriceRepository
 
 logger = logging.getLogger(__name__)
 
@@ -83,9 +84,17 @@ async def ingest_flex_statement(db, flex_data: Dict) -> Dict:
     # it records history without moving any lot on its own.
     trades_data = await ibkr_service.extract_trades(flex_data)
     corp_actions_data = await ibkr_service.extract_corporate_actions(flex_data)
-    await persist_transactions(
+    persisted = await persist_transactions(
         trade_repo, corp_action_repo, conid_to_security_id,
         trades_data, corp_actions_data,
+    )
+
+    # A split restates the cached price history as well as the share count, and only
+    # the lot side self-corrects. Drop the stale rows now so the next market-data sync
+    # rebuilds them; doing it here (rather than in the market-data job) keeps it tied to
+    # the one moment we know the action is new.
+    invalidated = await invalidate_prices_for_splits(
+        MarketPriceRepository(db), persisted["newly_restating_actions"]
     )
 
     # Real dividend income (gross/withholding/net) from <CashTransactions>. Flex-only.
@@ -122,6 +131,7 @@ async def ingest_flex_statement(db, flex_data: Dict) -> Dict:
             f"Skipped {recon['taxlots_skipped']} taxlot(s) with unsupported currencies: "
             f"{', '.join(sorted(recon['skipped_currencies']))}"
         )
+    warnings.extend(invalidated["notes"])
     warnings.extend(flex_data.get('flex_warnings') or [])
 
     return {
@@ -133,6 +143,7 @@ async def ingest_flex_statement(db, flex_data: Dict) -> Dict:
         "lots_restamped": recon["lots_restamped"],
         "trades_seen": len(trades_data),
         "corporate_actions_seen": len(corp_actions_data),
+        "prices_invalidated": invalidated["prices_invalidated"],
         "cash_transactions_seen": len(cash_txns),
         "total_cost_basis_eur": float(recon["total_cost_basis_eur"]),
         "account_id": flex_data['account_id'],
@@ -192,16 +203,84 @@ async def persist_transactions(
         await trade_repo.upsert(data)
         trades_saved += 1
 
+    # Which corporate actions are genuinely new, asked once for the whole batch. Every
+    # sync re-sends the same YTD rows, so "was this row already here" is the only thing
+    # separating a one-off reaction to a split from one that repeats daily.
+    already_known = await corp_repo.existing_ib_keys(
+        [str(ca.get("ib_key")) for ca in corp_actions_data if ca.get("ib_key")]
+    )
+
     corp_saved = 0
+    newly_restating: List[Dict] = []
     for ca in corp_actions_data:
         data = dict(ca)
         data["security_id"] = conid_map.get(str(ca["conid"]))
+        is_new = str(data.get("ib_key")) not in already_known
         await corp_repo.upsert(data)
         corp_saved += 1
 
+        if (
+            is_new
+            and (data.get("action_type") or "") in PRICE_RESTATING_ACTIONS
+            and data.get("security_id")
+            and data.get("action_date")
+        ):
+            newly_restating.append(data)
+
     if trades_saved or corp_saved:
         logger.info(f"Persisted {trades_saved} trade(s) and {corp_saved} corporate action(s)")
-    return {"trades_saved": trades_saved, "corporate_actions_saved": corp_saved}
+    return {
+        "trades_saved": trades_saved,
+        "corporate_actions_saved": corp_saved,
+        "newly_restating_actions": newly_restating,
+    }
+
+
+async def invalidate_prices_for_splits(
+    price_repo: MarketPriceRepository,
+    actions: List[Dict],
+) -> Dict:
+    """
+    Drop the cached prices a newly-seen split has invalidated.
+
+    Only ever called with actions that were *inserted* on this sync (see
+    ``persist_transactions``), which is what makes it idempotent: re-running the sync
+    finds the action already stored and purges nothing. Without that, every sync would
+    wipe and refetch the same history — precisely the kind of loop rule 1 exists to
+    prevent.
+
+    The cost is one extra Yahoo request per affected security, not one per date, because
+    the fetch path asks for a date *range*. The full history is rebuilt at the next
+    730-day `full_sync` (08:00); the 7-day jobs restore the current value sooner.
+    """
+    securities_purged, rows_deleted, notes = 0, 0, []
+
+    # One security can have several actions in a statement; purge to the latest date.
+    latest_by_security: Dict[int, Dict] = {}
+    for action in actions:
+        sec_id = action["security_id"]
+        current = latest_by_security.get(sec_id)
+        if current is None or action["action_date"] > current["action_date"]:
+            latest_by_security[sec_id] = action
+
+    for sec_id, action in latest_by_security.items():
+        deleted = await price_repo.delete_up_to(sec_id, action["action_date"])
+        if deleted:
+            securities_purged += 1
+            rows_deleted += deleted
+            note = (
+                f"{action.get('symbol') or f'security {sec_id}'}: "
+                f"{action['action_type']} on {action['action_date']} — dropped {deleted} "
+                f"cached price(s) up to that date so the restated series is refetched"
+            )
+            logger.info(note)
+            notes.append(note)
+
+    return {
+        "securities_purged": securities_purged,
+        "prices_invalidated": rows_deleted,
+        "notes": notes,
+    }
 
 
 class EmptyStatementError(Exception):
@@ -232,6 +311,23 @@ SPLIT_LIKE_ACTIONS = {
     "SPINOFF", "CONTRACTSPINOFF",
     "STOCKDIV",
     "ISSUECHANGE",
+    "CONTRACTCONSOLIDATION", "CONTRACTSPLIT",
+}
+
+# Corporate actions after which the *cached price history* is wrong, not just the
+# share count. Yahoo restates every historical close onto the new share basis, but
+# `get_missing_dates()` only ever fetches dates we don't already have — so the rows
+# cached before the event are never refreshed, and the chart gets a step change at
+# the split date that nothing detects. IBKR meanwhile restates the tax lot straight
+# away, so the two halves of the same position disagree.
+#
+# A deliberate *subset* of SPLIT_LIKE_ACTIONS: we fetch with `auto_adjust=False`, and
+# Yahoo's raw `Close` is adjusted for splits only. Spinoffs, stock dividends and issue
+# changes move the share count without rebasing `Close`, so purging on those would
+# throw away good data and buy a refetch for nothing.
+PRICE_RESTATING_ACTIONS = {
+    "FORWARDSPLIT", "FORWARDSPLITISSUE",
+    "REVERSESPLIT",
     "CONTRACTCONSOLIDATION", "CONTRACTSPLIT",
 }
 

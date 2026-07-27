@@ -132,6 +132,37 @@ identically. It records a `sync_runs` row with `sync_type='ibkr_manual_xml'`. To
 There is deliberately **no upload endpoint**: `/api/` is proxied publicly and unauthenticated, and a route
 that rewrites tax lots is a far larger surface than a CLI run over ssh.
 
+### Offline price import — the escape hatch from a wrong or missing feed
+
+`app/cli/import_prices.py` is the price-side twin, for when Yahoo can't be called (rule 1) or can't
+resolve a listing at all. It takes a JSON file of daily closes and writes them through the same
+`MarketPriceRepository.bulk_create()` upsert the sync uses, so it is re-runnable and a later Yahoo
+fetch overwrites cleanly. Records `sync_type='manual_prices'`. Touches no network.
+
+```bash
+docker cp prices.json backend-portfolio-backend-1:/tmp/prices.json
+docker exec backend-portfolio-backend-1 python -m app.cli.import_prices /tmp/prices.json --dry-run
+docker exec backend-portfolio-backend-1 python -m app.cli.import_prices /tmp/prices.json
+```
+
+```json
+{"symbol": "SBI", "exchange": "TSE", "currency": "CAD", "source": "ibkr",
+ "prices": [{"date": "2026-07-27", "close": 4.79}]}
+```
+
+**IBKR's Client Portal is the good source for this** (`get_price_history` via the MCP connector):
+independent of Flex, so it spends no token budget and can't trip `1025`, and it quotes the listing's
+own currency. That's how SBI was refilled — 2 years of daily CAD bars, `source='ibkr'`.
+
+A **currency mismatch against the security refuses the whole file**, mirroring the guard on Yahoo
+auto-discovery, because writing USD closes under a CAD security is the exact bug this CLI repairs.
+A malformed row also rejects the whole file: a partially-applied series is indistinguishable
+afterwards from a complete one. Ambiguous `symbol` (ASML is two rows) refuses rather than guessing —
+pass `--security-id`. Tests: `tests/test_price_import_cli.py`.
+
+Note the trade-off: once a date has a price, `get_missing_dates()` never re-fetches it, so an
+imported window stays imported (visible in `market_prices.source`) until something deletes it.
+
 ### `_sanitize_flex_xml()` — why it exists
 
 ibflex 0.15 (released 2021) converts **every** XML attribute onto a frozen dataclass and raises
@@ -179,7 +210,7 @@ Tests: `tests/test_flex_xml_sanitizer.py`, `tests/test_flex_ingestion_e2e.py`.
 - **exchange_rates** / **market_prices** — caches. **ticker_mappings** — IBKR→Yahoo symbols.
 - **app_settings** — `base_currency`, `last_sync_to_date`. Plus fundamentals + earnings tables.
 - **sync_runs** — one row per sync attempt (`sync_type` ∈ `ibkr` | `ibkr_sync` | `full_sync` |
-  `market_data_only` | `ibkr_manual_xml`, `status`, `message`, `details`, `warnings`). Timestamps are
+  `market_data_only` | `ibkr_manual_xml` | `manual_prices`, `status`, `message`, `details`, `warnings`). Timestamps are
   serialized UTC-aware via `utc_iso()` — a bare naive `isoformat()` is parsed as *local* by the browser,
   which once made an 08:00 sync display as 06:02.
   `SchedulerService.last_sync_result` is in-memory only and auto-deploy restarts on every push, so
@@ -215,6 +246,22 @@ This guard has already saved the data through several failed syncs.
 `get_realized_totals()` prefers `trades` (exact) and falls back to a market-price approximation over
 closed lots. `realized_rows_from_closed_lots()` is **shared** by the portfolio totals and the tax report
 so the two can never disagree — they did once, and that was a bug.
+
+**A split also invalidates the cached prices.** Yahoo restates historical `Close` after a split, but
+`get_missing_dates()` only fetches dates we *don't* have, so pre-split rows are never refreshed while
+IBKR restates the lot quantity immediately — leaving a step change in the chart that nothing detects.
+So `invalidate_prices_for_splits()` deletes `market_prices` up to and including the action date
+(`MarketPriceRepository.delete_up_to`), and the next market-data sync refetches them — one extra
+request per security, since fetching is range-based.
+
+Two details carry the weight. `PRICE_RESTATING_ACTIONS` is a deliberate **subset** of
+`SPLIT_LIKE_ACTIONS`: we fetch with `auto_adjust=False` and Yahoo rebases raw `Close` for splits only,
+so `SPINOFF`/`STOCKDIV`/`ISSUECHANGE` are excluded as pure churn. And it fires **only for actions
+newly inserted on this sync** (`CorporateActionRepository.existing_ib_keys()`) — the YTD statement
+resends every action every time, so without that check all five daily jobs would wipe and refetch the
+same history forever. Reported in `warnings[]` and as `prices_invalidated`.
+Limitation: the 7-day jobs restore the current value, but the full history only comes back at the next
+**08:00** 730-day `full_sync`. Tests: `tests/test_split_price_invalidation.py`.
 
 ---
 
@@ -255,6 +302,17 @@ The 13:00/20:00 IBKR-only jobs exist because a transient `Code=1001` at 08:00 us
 freshness. They deliberately **skip** market data and yfinance dividends — see rule 1. Pinned by
 `tests/test_scheduler_jobs.py`. Status: `GET /api/scheduler/status`.
 
+**A price that never arrives is otherwise silent.** `portfolio_service` values a position with no price
+at **0.00** and moves on, so deleting SBI's poisoned prices took 446.93 CHF off the total with nothing
+reporting it. `find_stale_priced_securities()` now runs after every market-data sync and warns when a
+security **with open lots** has no cached price at all, or none newer than `STALE_PRICE_DAYS` (5 —
+enough to absorb a weekend plus a holiday). Closed-out holdings are excluded: they legitimately stop
+getting prices, and warning on them would be permanent noise.
+
+`_collect_warnings()` hoists each step's warnings to the top of the job's result, because `_record_run`
+reads `result["warnings"]` and a job's own dict never had that key — so warnings were being buried in
+`details` and never rendered as warnings.
+
 ---
 
 ## Deployment
@@ -288,7 +346,7 @@ cd backend && venv\Scripts\activate && uvicorn app.main:app --reload --port 8000
 cd frontend && npm run dev          # http://localhost:5173
 ```
 
-Tests (58, all offline — no IBKR or Yahoo calls):
+Tests (140, all offline — no IBKR, Yahoo or FX-provider calls):
 ```bash
 cd backend && ./venv/Scripts/python.exe -m pytest tests/ -q
 ```
@@ -340,12 +398,32 @@ never include TWD, RUB, QAR or SAR. That is not cosmetic: an unconvertible curre
 `reconcile_taxlots()` skip the lot, so the holding vanishes from the portfolio *and* the tax report
 (counted in `taxlots_skipped`, reported in `warnings[]`). Buying TSMC on TWSE hit exactly this.
 
-So `CurrencyService` falls back to `https://open.er-api.com/v6/latest/EUR` **only** for currencies
-outside `SUPPORTED_CURRENCIES`, tagging rows `source='er-api-latest'`. It is EUR-based
-(`rate = rates[to] / rates[from]`) and **latest-only — there is no free historical endpoint**, so it is
-used only within `FALLBACK_MAX_AGE_DAYS` (7) of today and refuses older dates rather than backdating a
-current rate onto an old tax lot. History accumulates forward as syncs cache each day. Never raises;
-`get_exchange_rate()` owns that decision. Tests: `tests/test_currency_fallback.py`.
+So `CurrencyService` falls back to `https://open.er-api.com/v6/latest/EUR`, tagging rows
+`source='er-api-latest'`. It is EUR-based (`rate = rates[to] / rates[from]`) and **latest-only — there
+is no free historical endpoint**, so it is used only within `FALLBACK_MAX_AGE_DAYS` (7) of today and
+refuses older dates rather than backdating a current rate onto an old tax lot. Never raises;
+`get_exchange_rate()` owns that decision.
+
+`get_exchange_rate()` resolves in this order, and the order is the design:
+**cache → Frankfurter → carry-forward → fallback → carry-forward → raise.**
+
+- Carry-forward comes *before* the fallback because Friday's real ECB rate beats today's
+  approximation over a weekend. It preserves the source tag of the row it copies.
+- The fallback now also covers currencies that *are* in `SUPPORTED_CURRENCIES` when Frankfurter
+  answers with nothing. That demotes the hardcoded list from load-bearing to advisory: a provider
+  outage or the ECB list drifting degrades the rate instead of erasing a position (a raise here makes
+  `reconcile_taxlots()` skip the lot, so the holding disappears from the portfolio *and* the tax
+  report). It is never reached while Frankfurter is answering — no silent provider switching.
+
+**`WARM_CURRENCIES`** (`TWD, CNH, AED, SAR, QAR, KWD, RUB, CLP, COP`) is warmed daily by
+`sync_exchange_rates` alongside the currencies actually held, via `warm_rates()`. Only currencies
+Frankfurter *cannot* serve are listed, because those are the ones whose history can only accumulate
+forward — an ECB rate is retrievable at any time, so warming it would be waste. The whole set costs
+**one** request (`_fetch_fallback_table()` returns all ~166 at once), which is what makes daily
+affordable. Without it, TWD only got a rate on days a lot happened to need one, so missing the 7-day
+window once meant the lot was skipped forever. Extending the list is one edit and no extra request.
+
+Tests: `tests/test_currency_fallback.py`.
 
 ---
 
@@ -360,6 +438,9 @@ current rate onto an old tax lot. History accumulates forward as syncs cache eac
 | `dividend_source` stuck on `yfinance_estimate` | No `<CashTransactions>` ingested — check the section + Withholding Tax option |
 | Yahoo 404/429 | **Stop.** Wait 30-60 min. Check `yfinance >= 1.1.0` |
 | A position is missing from the portfolio | Check `taxlots_skipped` + `warnings[]` on the sync run — usually a currency neither FX provider covers |
+| A position shows 0.00 / `market_price: null` | No cached price. The market-data sync's `warnings[]` now names it. Fix the `ticker_mappings` row, or fill it with `app/cli/import_prices.py` from IBKR bars |
+| The chart steps at a split date | Cached pre-split closes. A *new* split purges them automatically; for an older one delete that security's `market_prices` and let 08:00 refill |
+| A new currency appears | Nothing to do if it's in `WARM_CURRENCIES` or the ECB set. Otherwise add it there — one edit, no extra request |
 | A position's value is far off IBKR's | Suspect the `ticker_mappings` row before the price feed: compare `market_prices.close_price` against IBKR's `market_price` in the *same* currency |
 | App total ≠ IBKR total | Compare against `gross_position_value`, **not** net liquidation (which adds cash); and intraday the app holds the last *close* while IBKR quotes live |
 | Site "down" in the browser | Often TIM home DNS, not the server — verify with `Test-NetConnection`, not `nslookup` |
@@ -382,7 +463,14 @@ normal, the 20:00/22:00 jobs close it), **+713** TSMC not yet in any statement, 
 SBI mapping bug (both fixed, see the ticker/currency section).
 
 Watch after the next sync that carries 2026-07-27: **35** positions including `2330@TWSE`, and
-`taxlots_skipped: 0` with no "unsupported currencies" warning.
+`taxlots_skipped: 0` with no "unsupported currencies" warning. Both the 13:00 and 20:00 IBKR jobs hit a
+plain `1001` and failed fast without re-requesting, which is correct — so 2330 waits for 08:00.
+
+**SBI is filled from IBKR, not Yahoo.** Its poisoned rows were deleted (backup:
+`/root/ibkr-backups/sbi-poisoned-2026-07-27.json`) and refilled with 2 years of daily CAD bars pulled
+from Client Portal via `app/cli/import_prices.py`, tagged `source='ibkr'`; a `manual` `SBI/TSE → SBI.TO`
+mapping now prevents re-auto-discovery onto the bare symbol. Because those dates are no longer
+"missing", Yahoo won't re-fetch them — deliberate.
 
 **The first full Flex sync landed** (2026-07-25 22:30 UTC), so Trades/CashTransactions/CorporateActions
 are live: 38 securities, 972 open tax lots, 4 closed lots, **64 trades**, 1 SPINOFF, 26 IBKR dividend rows

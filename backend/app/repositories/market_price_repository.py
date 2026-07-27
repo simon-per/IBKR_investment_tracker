@@ -4,7 +4,7 @@ Handles database operations for historical market prices.
 """
 from typing import List, Optional
 from datetime import date, timedelta
-from sqlalchemy import select, and_, func
+from sqlalchemy import select, and_, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from decimal import Decimal
 
@@ -129,6 +129,27 @@ class MarketPriceRepository:
             await self.upsert(price_data)
             count += 1
         return count
+
+    async def delete_up_to(self, security_id: int, cutoff_date: date) -> int:
+        """
+        Drop cached prices for a security on or before ``cutoff_date``.
+
+        Used to invalidate a price history a corporate action has restated. The rows
+        simply become "missing dates" again, and because fetching is range-based the
+        whole span is rebuilt by a single request on the next market-data sync.
+
+        Returns the number of rows removed.
+        """
+        result = await self.session.execute(
+            delete(MarketPrice).where(
+                and_(
+                    MarketPrice.security_id == security_id,
+                    MarketPrice.date <= cutoff_date
+                )
+            )
+        )
+        await self.session.flush()
+        return int(result.rowcount or 0)
 
     async def get_date_range_for_security(
         self, security_id: int

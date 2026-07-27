@@ -30,6 +30,23 @@ class CorporateActionRepository:
         await self.session.flush()
         return action
 
+    async def existing_ib_keys(self, ib_keys: List[str]) -> set:
+        """
+        Which of these ``ib_key``s are already stored.
+
+        Lets a caller tell an insert from an update across a batch of ``upsert()``
+        calls in one query. That distinction is what makes the split-driven price-cache
+        purge idempotent: without it, every sync would re-purge the same split and
+        trigger a re-fetch of the whole history behind it.
+        """
+        keys = [k for k in ib_keys if k]
+        if not keys:
+            return set()
+        result = await self.session.execute(
+            select(CorporateAction.ib_key).where(CorporateAction.ib_key.in_(keys))
+        )
+        return {row[0] for row in result.all()}
+
     async def get_by_conid_in_range(
         self, conid: str, start: Optional[date], end: date
     ) -> List[CorporateAction]:

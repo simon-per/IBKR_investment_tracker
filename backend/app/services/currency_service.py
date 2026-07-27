@@ -3,7 +3,7 @@ Currency Service
 Handles currency conversion to EUR using Frankfurter API.
 Caches exchange rates in the database to minimize API calls.
 """
-from typing import Dict, Optional, Tuple
+from typing import Dict, Iterable, Optional, Tuple
 from datetime import date
 from decimal import Decimal
 import httpx
@@ -33,10 +33,12 @@ class CurrencyService:
         'RON', 'SEK', 'SGD', 'THB', 'TRY', 'USD', 'ZAR'
     }
 
-    # Secondary provider, consulted *only* for currencies Frankfurter doesn't carry.
-    # Before this existed a TWD position (TSMC on TWSE) could not be converted at all,
-    # so reconcile_taxlots() skipped the lot and the holding silently vanished from the
-    # portfolio and the tax report.
+    # Secondary provider. Primarily for currencies Frankfurter doesn't carry — before it
+    # existed a TWD position (TSMC on TWSE) could not be converted at all, so
+    # reconcile_taxlots() skipped the lot and the holding silently vanished from the
+    # portfolio and the tax report — but also the last resort for a currency that *is*
+    # in the set below when Frankfurter answers with nothing, so neither that hardcoded
+    # list nor a single third party can decide on its own whether a position exists.
     #
     # The free tier serves the *latest* rates only — there is no historical endpoint
     # without a paid key. So this can never reconstruct an old rate, and we refuse to
@@ -50,6 +52,26 @@ class CurrencyService:
     FALLBACK_API_URL = "https://open.er-api.com/v6/latest/EUR"
     FALLBACK_SOURCE = "er-api-latest"
     FALLBACK_MAX_AGE_DAYS = 7
+
+    # Currencies we keep a daily rate for even while nothing is held in them.
+    #
+    # Only the ones Frankfurter *cannot* serve are listed: for an ECB currency the
+    # history is a request away whenever it's first needed, but for these there is no
+    # historical endpoint at all, so the only history that will ever exist is the one we
+    # accumulate from today forward. Warming them daily turns "you must sync within
+    # FALLBACK_MAX_AGE_DAYS of the buy, or the lot is skipped forever" into "whenever
+    # the statement arrives, the rate is already there".
+    #
+    # Chosen for markets an IBKR account can actually reach; all verified present in
+    # the provider's table. Extending it is one edit and costs no extra request — the
+    # whole set is satisfied by the single response that already returns all 166.
+    WARM_CURRENCIES = {
+        'TWD',  # Taiwan — TSMC, held since 2026-07-27
+        'CNH',  # offshore yuan, which is what IBKR quotes (onshore CNY is an ECB rate)
+        'AED', 'SAR', 'QAR', 'KWD',  # Gulf exchanges
+        'RUB',  # the Flex parser already has to repair RUS -> RUB
+        'CLP', 'COP',  # Latin America beyond BRL/MXN, which the ECB does cover
+    }
 
     def __init__(self, session: AsyncSession):
         self.session = session
@@ -90,25 +112,53 @@ class CurrencyService:
             # If not in cache, try to fetch a range of recent rates (batch fetch)
             # This is more efficient than fetching one date at a time
             await self._batch_fetch_rates(from_currency, target_date, to_currency)
-        else:
-            await self._fetch_fallback_rate(from_currency, target_date, to_currency)
 
-        # Check cache again after fetching
+            cached_rate = await self._get_cached_rate(from_currency, target_date, to_currency)
+            if cached_rate:
+                return cached_rate
+
+            # Weekend or holiday: the ECB simply doesn't publish, and Friday's real rate
+            # is a better answer than today's approximation — so carry forward *before*
+            # considering the fallback, not after.
+            carried = await self._carry_forward(from_currency, target_date, to_currency)
+            if carried is not None:
+                return carried
+
+        # Either the currency is outside the ECB set, or Frankfurter had nothing at all
+        # for it: a provider outage, or SUPPORTED_CURRENCIES having drifted out of step
+        # with what the ECB actually publishes. Both used to raise here, which means a
+        # hardcoded list — and a single third party — decided whether a position existed.
+        # Trying the fallback last keeps that list advisory rather than load-bearing.
+        await self._fetch_fallback_rate(from_currency, target_date, to_currency)
+
         cached_rate = await self._get_cached_rate(from_currency, target_date, to_currency)
         if cached_rate:
             return cached_rate
 
-        # If still not found (weekend/holiday), use carry-forward strategy
-        # Get the most recent rate before this date
-        recent = await self._get_most_recent_rate(from_currency, target_date, to_currency)
-        if recent:
-            rate, source = recent
-            # Cache this carried-forward rate for the requested date, keeping the
-            # provider tag of the row it came from so the audit trail survives.
-            await self._cache_rate(from_currency, to_currency, target_date, rate, source=source)
-            return rate
+        carried = await self._carry_forward(from_currency, target_date, to_currency)
+        if carried is not None:
+            return carried
 
         raise ValueError(f"No exchange rate available for {from_currency} on or before {target_date}")
+
+    async def _carry_forward(
+        self,
+        from_currency: str,
+        target_date: date,
+        to_currency: str
+    ) -> Optional[Decimal]:
+        """
+        Reuse the most recent rate on or before ``target_date`` (weekends, holidays).
+
+        Caches it under the requested date keeping the provider tag of the row it came
+        from, so the audit trail survives the copy.
+        """
+        recent = await self._get_most_recent_rate(from_currency, target_date, to_currency)
+        if not recent:
+            return None
+        rate, source = recent
+        await self._cache_rate(from_currency, to_currency, target_date, rate, source=source)
+        return rate
 
     async def _get_cached_rate(
         self,
@@ -219,17 +269,55 @@ class CurrencyService:
                 logger.error(f"Batch fetch error: {e}")
                 # Don't raise - we'll fall back to individual fetches if needed
 
+    async def _fetch_fallback_table(self) -> Optional[Dict[str, Decimal]]:
+        """
+        Fetch the fallback provider's whole rate table in one request.
+
+        The endpoint is EUR-based and returns all ~166 currencies at once, so warming N
+        of them must cost one request, not N. Never raises: returns None and lets the
+        caller decide what an unavailable provider means.
+        """
+        async with httpx.AsyncClient() as client:
+            try:
+                logger.debug(f"Fetching fallback FX table from {self.FALLBACK_API_URL}")
+                response = await client.get(self.FALLBACK_API_URL, timeout=10.0)
+
+                if response.status_code >= 400:
+                    logger.warning(f"Fallback FX provider returned {response.status_code}")
+                    return None
+
+                data = response.json()
+                if data.get("result") != "success":
+                    logger.warning(f"Fallback FX provider reported failure: {data.get('result')}")
+                    return None
+
+                rates = data.get("rates") or {}
+                if not rates:
+                    logger.warning("Fallback FX provider returned an empty rate table")
+                    return None
+
+                table = {code: Decimal(str(value)) for code, value in rates.items()}
+                # The provider quotes "X per 1 EUR" and omits the base itself.
+                table.setdefault(self.BASE_CURRENCY, Decimal("1"))
+                return table
+
+            except Exception as e:
+                logger.error(f"Fallback FX table fetch error: {e}")
+                return None
+
     async def _fetch_fallback_rate(
         self,
         from_currency: str,
         target_date: date,
-        to_currency: str
+        to_currency: str,
+        table: Optional[Dict[str, Decimal]] = None
     ) -> None:
         """
-        Fetch a rate for a currency Frankfurter doesn't carry, and cache it.
+        Fetch a rate the primary provider couldn't supply, and cache it.
 
-        Only called for currencies outside SUPPORTED_CURRENCIES. The provider is
-        EUR-based and latest-only, so:
+        ``table`` lets a caller that already holds a fetched table (see ``warm_rates``)
+        reuse it instead of issuing another request. The provider is EUR-based and
+        latest-only, so:
 
         - the rate for an arbitrary pair is derived as rates[to] / rates[from],
           with EUR itself implied at 1;
@@ -251,48 +339,110 @@ class CurrencyService:
             )
             return
 
-        async with httpx.AsyncClient() as client:
+        if table is None:
+            table = await self._fetch_fallback_table()
+        if not table:
+            return
+
+        from_rate = table.get(from_currency)
+        to_rate = table.get(to_currency)
+        if not from_rate or to_rate is None:
+            logger.warning(
+                f"Fallback FX provider has no rate for {from_currency}/{to_currency}"
+            )
+            return
+
+        # Provider is EUR-based: table[X] is "X per 1 EUR".
+        rate = to_rate / from_rate
+
+        existing = await self._get_cached_rate(from_currency, target_date, to_currency)
+        if not existing:
+            await self._cache_rate(
+                from_currency, to_currency, target_date, rate,
+                source=self.FALLBACK_SOURCE
+            )
+        logger.info(
+            f"Cached fallback rate {from_currency}/{to_currency}={rate} for {target_date}"
+        )
+
+    async def warm_rates(
+        self,
+        currencies: Iterable[str],
+        target_date: Optional[date] = None,
+        days_back: int = 30,
+        to_currency: str = "EUR",
+    ) -> Dict:
+        """
+        Make sure ``currencies`` have a usable rate for ``target_date``.
+
+        Called daily so a currency is never first looked up on the day a position in it
+        arrives. ECB currencies go through Frankfurter's range endpoint (one request
+        each, and their history is retrievable at any time anyway); every other currency
+        is satisfied from a **single** fallback-table request, which matters because for
+        those there is no historical endpoint — the only history that will ever exist is
+        the one these daily calls accumulate.
+
+        Never raises: a provider being down degrades the warm-up, it must not fail the
+        sync that called it.
+        """
+        target_date = target_date or date.today()
+        wanted = {c.strip().upper() for c in currencies if c and c.strip()}
+        wanted.discard(to_currency)
+
+        primary = sorted(c for c in wanted if c in self.SUPPORTED_CURRENCIES)
+        secondary = sorted(wanted - set(primary))
+
+        warmed_primary = 0
+        for currency in primary:
             try:
-                logger.debug(f"Fetching fallback rate for {from_currency} from {self.FALLBACK_API_URL}")
-                response = await client.get(self.FALLBACK_API_URL, timeout=10.0)
-
-                if response.status_code >= 400:
-                    logger.warning(
-                        f"Fallback FX provider returned {response.status_code} for {from_currency}"
-                    )
-                    return
-
-                data = response.json()
-                if data.get("result") != "success":
-                    logger.warning(f"Fallback FX provider reported failure: {data.get('result')}")
-                    return
-
-                rates = data.get("rates") or {}
-                rates.setdefault(self.BASE_CURRENCY, 1)
-
-                from_rate = rates.get(from_currency)
-                to_rate = rates.get(to_currency)
-                if not from_rate or to_rate is None:
-                    logger.warning(
-                        f"Fallback FX provider has no rate for {from_currency}/{to_currency}"
-                    )
-                    return
-
-                # Provider is EUR-based: rates[X] is "X per 1 EUR".
-                rate = Decimal(str(to_rate)) / Decimal(str(from_rate))
-
-                existing = await self._get_cached_rate(from_currency, target_date, to_currency)
-                if not existing:
-                    await self._cache_rate(
-                        from_currency, to_currency, target_date, rate,
-                        source=self.FALLBACK_SOURCE
-                    )
-                logger.info(
-                    f"Cached fallback rate {from_currency}/{to_currency}={rate} for {target_date}"
+                await self._batch_fetch_rates(
+                    currency, target_date, to_currency, days_back=days_back
                 )
+                warmed_primary += 1
+            except Exception as e:  # _batch_fetch_rates already swallows, belt and braces
+                logger.error(f"Warm-up failed for {currency}: {e}")
 
-            except Exception as e:
-                logger.error(f"Fallback FX fetch error for {from_currency}: {e}")
+        # The fallback is latest-only, so re-fetching a currency already cached for this
+        # date would return the same number. Skipping those makes the warm-up a no-op
+        # after the day's first run instead of one request on each of the five jobs.
+        outstanding = []
+        for currency in secondary:
+            if await self._get_cached_rate(currency, target_date, to_currency) is None:
+                outstanding.append(currency)
+        secondary = outstanding
+
+        warmed_secondary = 0
+        table = await self._fetch_fallback_table() if secondary else None
+        if secondary and not table:
+            logger.warning(
+                f"Fallback FX provider unavailable; {len(secondary)} currency(ies) not "
+                f"warmed for {target_date}: {', '.join(secondary)}"
+            )
+        elif table:
+            missing = [c for c in secondary if c not in table]
+            if missing:
+                # A currency neither provider carries can never be valued, so say so
+                # once here rather than leaving it to be discovered by a vanished
+                # position months from now.
+                logger.warning(
+                    f"Neither FX provider carries: {', '.join(missing)} — a position in "
+                    f"one of these would be skipped by reconciliation"
+                )
+            for currency in (c for c in secondary if c in table):
+                try:
+                    await self._fetch_fallback_rate(
+                        currency, target_date, to_currency, table=table
+                    )
+                    warmed_secondary += 1
+                except Exception as e:
+                    logger.error(f"Fallback warm-up failed for {currency}: {e}")
+
+        return {
+            "frankfurter": warmed_primary,
+            "fallback": warmed_secondary,
+            "fallback_available": table is not None if secondary else None,
+            "currencies": sorted(wanted),
+        }
 
     async def _fetch_from_api(
         self,

@@ -20,9 +20,35 @@ from app.repositories.security_repository import SecurityRepository
 from app.repositories.sync_run_repository import SyncRunRepository, utc_iso
 from app.services.benchmark_service import BenchmarkService, BENCHMARKS
 from app.models.benchmark_price import BenchmarkPrice
-from sqlalchemy import select, distinct
+from app.models.market_price import MarketPrice
+from app.models.security import Security
+from app.models.taxlot import TaxLot
+from sqlalchemy import select, distinct, func
 
 logger = logging.getLogger(__name__)
+
+# How old the newest cached price for a held security may be before we say so.
+# Generous enough to absorb a weekend plus a public holiday, and the 13:00 job running
+# before the US open, so a warning means something is actually wrong rather than "the
+# market was shut". Five days is roughly one trading week of silence.
+STALE_PRICE_DAYS = 5
+
+
+def _collect_warnings(job_result: dict, *step_results) -> None:
+    """
+    Hoist the steps' warnings to the top of a job's result dict.
+
+    `_record_run` reads `result["warnings"]`, and a job's own dict never had that key —
+    so anything a step reported was buried inside `details` and never rendered as a
+    warning. The steps that produce them (`ingest_flex_statement`'s skipped currencies
+    and split purges, `sync_market_data`'s stale prices) are exactly the events that
+    should be visible without opening the JSON.
+    """
+    warnings = []
+    for step in step_results:
+        warnings.extend((step or {}).get("warnings") or [])
+    if warnings:
+        job_result["warnings"] = warnings
 
 
 class SchedulerService:
@@ -163,6 +189,20 @@ class SchedulerService:
                     result["errors"] = errors
                     result["errors_count"] = len(errors)
 
+                # A fetch that returned nothing is not an error anywhere: the position
+                # simply gets no price, and _calculate_daily_value / the positions
+                # endpoint value it at 0.00 and move on. SBI@TSE lost 446.93 CHF off the
+                # portfolio total that way with nothing, anywhere, saying so.
+                #
+                # Guarded on its own: this is a diagnostic, and it must never be the
+                # reason a sync that actually fetched prices reports failure.
+                try:
+                    stale = await self.find_stale_priced_securities(db)
+                    if stale:
+                        result["warnings"] = stale
+                except Exception as e:
+                    logger.warning(f"Could not check for stale prices: {e}")
+
                 logger.info(f"Market data sync completed: {total_prices} prices fetched")
                 return result
 
@@ -174,6 +214,62 @@ class SchedulerService:
                     "message": f"Failed to sync market data: {str(e)}",
                     "timestamp": utc_iso(datetime.now())
                 }
+
+    async def find_stale_priced_securities(
+        self, db: AsyncSession, as_of: Optional[date] = None
+    ) -> list:
+        """
+        Held securities whose newest cached price is missing or too old.
+
+        Restricted to securities with open tax lots, because those are the only ones
+        whose price actually moves a number the user sees — a fully-sold security going
+        quiet is expected, not a fault.
+
+        Returns human-readable strings, ready for `warnings[]`, so the dashboard and
+        `/api/scheduler/history` surface them without needing to know the shape.
+        """
+        as_of = as_of or date.today()
+        cutoff = as_of - timedelta(days=STALE_PRICE_DAYS)
+
+        # Deliberately two queries rather than one join. Joining taxlots to
+        # market_prices multiplies them — a security with 100 open lots and 730 cached
+        # closes is 73,000 rows to aggregate, and the portfolio holds 972 lots against
+        # 21,000 prices. Two indexed scans and a dict lookup cost nothing by comparison.
+        held = await db.execute(
+            select(Security.id, Security.symbol, Security.exchange)
+            .join(TaxLot, TaxLot.security_id == Security.id)
+            .where(TaxLot.is_open == True)  # noqa: E712 — SQLAlchemy needs the operator
+            .group_by(Security.id)
+        )
+        held_rows = held.all()
+        if not held_rows:
+            return []
+
+        newest = await db.execute(
+            select(MarketPrice.security_id, func.max(MarketPrice.date))
+            .where(MarketPrice.security_id.in_([row[0] for row in held_rows]))
+            .group_by(MarketPrice.security_id)
+        )
+        newest_by_security = dict(newest.all())
+
+        warnings = []
+        for security_id, symbol, exchange in held_rows:
+            name = f"{symbol}@{exchange}" if exchange else str(symbol)
+            latest = newest_by_security.get(security_id)
+            if latest is None:
+                warnings.append(
+                    f"{name}: no cached price at all — the position is being "
+                    f"valued at 0.00. Check the ticker_mappings row and the Yahoo symbol"
+                )
+            elif latest < cutoff:
+                warnings.append(
+                    f"{name}: newest price is {latest} "
+                    f"({(as_of - latest).days} days old) — the price feed looks broken"
+                )
+
+        if warnings:
+            logger.warning(f"{len(warnings)} security(ies) with missing or stale prices")
+        return warnings
 
     async def sync_exchange_rates(self, days_back: int = 30) -> dict:
         """
@@ -193,40 +289,28 @@ class SchedulerService:
                 security_repo = SecurityRepository(db)
                 currency_service = CurrencyService(db)
 
-                # Get all unique non-EUR currencies from securities
+                # Currencies actually held, plus the ones we keep warm on spec.
                 securities = await security_repo.get_all(limit=1000)
-                currencies = set()
-                for sec in securities:
-                    if sec.currency and sec.currency != "EUR":
-                        currencies.add(sec.currency)
+                held = {
+                    sec.currency for sec in securities
+                    if sec.currency and sec.currency != "EUR"
+                }
 
-                if not currencies:
-                    logger.info("No non-EUR currencies found")
-                    return {
-                        "status": "success",
-                        "currencies_synced": 0,
-                        "timestamp": utc_iso(datetime.now())
-                    }
+                # WARM_CURRENCIES are the ones the fallback provider has to serve, and it
+                # is latest-only: their history exists only because this job records a
+                # rate every day. Warming them costs one extra request for the whole set,
+                # and it is what lets a position in a new currency be valued from the day
+                # its statement lands rather than from the day we happen to notice.
+                currencies = held | currency_service.WARM_CURRENCIES
 
-                logger.info(f"Syncing exchange rates for currencies: {currencies}")
+                logger.info(f"Syncing exchange rates for currencies: {sorted(currencies)}")
 
                 today = date.today()
-                total_rates = 0
 
-                for currency in currencies:
-                    try:
-                        # Use the currency service's batch fetch to get rates
-                        target_date = today
-                        await currency_service._batch_fetch_rates(
-                            from_currency=currency,
-                            target_date=target_date,
-                            to_currency="EUR",
-                            days_back=days_back
-                        )
-                        logger.info(f"Fetched exchange rates for {currency}")
-                        total_rates += 1
-                    except Exception as e:
-                        logger.error(f"Failed to fetch rates for {currency}: {e}")
+                warmed = await currency_service.warm_rates(
+                    currencies, target_date=today, days_back=days_back
+                )
+                total_rates = warmed["frankfurter"] + warmed["fallback"]
 
                 # Also keep EUR->base rates fresh for the selectable base currencies
                 # (CHF/USD) so switching the display currency is instant.
@@ -248,7 +332,8 @@ class SchedulerService:
                 result = {
                     "status": "success",
                     "currencies_synced": total_rates,
-                    "currencies": list(currencies),
+                    "currencies": sorted(currencies),
+                    "held_currencies": sorted(held),
                     "timestamp": utc_iso(datetime.now())
                 }
                 logger.info(f"Exchange rate sync completed: {total_rates} currencies updated")
@@ -400,6 +485,7 @@ class SchedulerService:
             "dividend_result": div_result,
             "status": ibkr_result.get("status", "error"),
         }
+        _collect_warnings(self.last_sync_result, ibkr_result, market_result)
         await self._record_run(self.last_sync_result, started_at)
 
         logger.info("=" * 80)
@@ -448,6 +534,7 @@ class SchedulerService:
             "benchmark_result": bench_result,
             "status": market_result.get("status", "error"),
         }
+        _collect_warnings(self.last_sync_result, market_result)
         await self._record_run(self.last_sync_result, started_at)
 
         logger.info("=" * 80)
@@ -511,6 +598,7 @@ class SchedulerService:
             "fx_result": fx_result,
             "status": ibkr_result.get("status", "error"),
         }
+        _collect_warnings(self.last_sync_result, ibkr_result)
         await self._record_run(self.last_sync_result, started_at)
 
         logger.info("=" * 80)
