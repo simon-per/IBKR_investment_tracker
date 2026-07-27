@@ -62,6 +62,7 @@ class MarketDataService:
         'SEHK': '.HK',       # Hong Kong
         'TSE': '.T',         # Tokyo by default; CAD listings use Toronto (.TO)
         'KRX': '.KS',        # Korea
+        'TWSE': '.TW',       # Taiwan
 
         # Other
         'TSX': '.TO',        # Toronto
@@ -207,6 +208,24 @@ class MarketDataService:
                     return []
 
                 if prices:
+                    # A variation that returns data is not necessarily the right
+                    # instrument. The last variation tried is the bare symbol, which
+                    # readily collides with an unrelated US listing of the same
+                    # ticker — and because the mapping is then saved, the wrong
+                    # instrument becomes sticky and shadows the suffix logic forever
+                    # (this is how SBI@TSE, a Toronto CAD stock, ended up priced off a
+                    # USD fund for months). The quote currency is the cheap check that
+                    # catches it, so reject a mismatch instead of adopting it.
+                    fetched_currency = prices[0]['currency']
+                    if security.currency and fetched_currency != security.currency:
+                        logger.warning(
+                            f"Rejecting {alt_ticker} for {security.symbol}@{security.exchange}: "
+                            f"quoted in {fetched_currency}, but the security is "
+                            f"{security.currency} — almost certainly a different instrument"
+                        )
+                        prices = []
+                        continue
+
                     # Success! Save this mapping for future use
                     logger.info(f"Success with {alt_ticker}, saving mapping")
                     await self.ticker_mapping_repo.upsert_mapping(
@@ -250,6 +269,7 @@ class MarketDataService:
             '.HK': 'HKD',  # Hong Kong
             '.T': 'JPY',   # Tokyo
             '.TO': 'CAD',  # Toronto
+            '.TW': 'TWD',  # Taiwan
             '.AX': 'AUD',  # Australia
         }
 
@@ -285,19 +305,34 @@ class MarketDataService:
             # Note: yfinance 1.1.0+ handles sessions and User-Agent internally
             def _fetch_history():
                 yf_ticker = yf.Ticker(ticker)
-                return yf_ticker.history(
+                hist = yf_ticker.history(
                     start=start_date,
                     end=end_date + timedelta(days=1),  # yfinance end is exclusive
                     auto_adjust=False  # Get actual close prices, not adjusted
                 )
+                # Yahoo states the quote currency in the metadata of the response we
+                # just received, so reading it costs no extra request (rule 1).
+                reported = None
+                try:
+                    reported = (yf_ticker.history_metadata or {}).get('currency')
+                except Exception:
+                    pass
+                return hist, reported
 
-            hist = await asyncio.to_thread(_fetch_history)
+            hist, reported_currency = await asyncio.to_thread(_fetch_history)
 
             if hist.empty:
                 return [], False  # No data, but not rate limited
 
-            # Determine the correct currency for this ticker
+            # Prefer the currency Yahoo reports over one inferred from the ticker
+            # suffix. Inference is a guess, and when it guesses wrong the prices are
+            # mislabelled rather than rejected: bare `SBI` matched a US fund quoted in
+            # USD, which _get_currency_from_ticker then stamped CAD (its "no suffix, so
+            # use the security's currency" fallback), overstating the position by 61%.
+            # Uppercasing keeps London's 'GBp' mapping to 'GBP' exactly as before.
             price_currency = self._get_currency_from_ticker(ticker, security)
+            if reported_currency and len(reported_currency) == 3:
+                price_currency = reported_currency.upper()
 
             prices = []
             for date_index, row in hist.iterrows():
