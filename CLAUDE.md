@@ -466,11 +466,15 @@ Watch after the next sync that carries 2026-07-27: **35** positions including `2
 `taxlots_skipped: 0` with no "unsupported currencies" warning. Both the 13:00 and 20:00 IBKR jobs hit a
 plain `1001` and failed fast without re-requesting, which is correct — so 2330 waits for 08:00.
 
-**SBI is filled from IBKR, not Yahoo.** Its poisoned rows were deleted (backup:
-`/root/ibkr-backups/sbi-poisoned-2026-07-27.json`) and refilled with 2 years of daily CAD bars pulled
-from Client Portal via `app/cli/import_prices.py`, tagged `source='ibkr'`; a `manual` `SBI/TSE → SBI.TO`
-mapping now prevents re-auto-discovery onto the bare symbol. Because those dates are no longer
-"missing", Yahoo won't re-fetch them — deliberate.
+**SBI reads 4.79 CAD / 276.83 CHF again.** Its poisoned rows were deleted (backup:
+`/root/ibkr-backups/sbi-poisoned-2026-07-27.json`) and the last month refilled from Client Portal daily
+CAD bars via `app/cli/import_prices.py` — 20 rows, `2026-06-29..07-27`, `source='ibkr'`. A `manual`
+`SBI/TSE → SBI.TO` mapping (id 20) now prevents re-auto-discovery onto the bare symbol.
+
+Only a month, not the two years intended: the IBKR MCP connector dropped mid-task. The dates before
+2026-06-29 are still "missing", so **the next 730-day `full_sync` (08:00) should backfill them from
+Yahoo via `SBI.TO`** — check the chart then. If it doesn't, pull the rest from Client Portal and import
+it the same way; the imported month itself will not be re-fetched, since those dates now exist.
 
 **The first full Flex sync landed** (2026-07-25 22:30 UTC), so Trades/CashTransactions/CorporateActions
 are live: 38 securities, 972 open tax lots, 4 closed lots, **64 trades**, 1 SPINOFF, 26 IBKR dividend rows
