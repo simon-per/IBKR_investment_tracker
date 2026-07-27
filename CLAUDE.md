@@ -313,12 +313,39 @@ for q in ['select count(*) from securities','select count(*) from taxlots where 
 
 **Ticker mapping** (`market_data_service.py`) — three tiers: custom `ticker_mappings` row → exchange
 suffix → try variations (`.DE`, `.F`, `.L`, bare), then auto-save what worked.
-`EXCHANGE_SUFFIXES`: `XETRA`/`IBIS2`→`.DE`, `LSEETF`→`.L`, `AEB`→`.AS`. Add new exchanges here when a
-security has no prices. Verify a ticker in a browser before adding a mapping, and delete wrong
-`market_prices` rows before re-syncing.
+`EXCHANGE_SUFFIXES`: `XETRA`/`IBIS2`→`.DE`, `LSEETF`→`.L`, `AEB`→`.AS`, `KRX`→`.KS`, `TWSE`→`.TW`;
+`TSE` is Tokyo (`.T`) **except** for CAD listings, where IBKR means Toronto (`.TO`). Add new exchanges
+here when a security has no prices, and verify a ticker in a browser first.
 
-**Currency** — Frankfurter at `https://api.frankfurter.app` (**not** `.dev`). Batch-fetches date ranges
-(one call per ~30 days) and carries the last known rate forward across weekends/holidays.
+**A wrong auto-discovered mapping is sticky and silent** — the failure that put `SBI@TSE` (Toronto, CAD)
+on a US fund for months. The last variation tried is the **bare symbol**, which readily matches an
+unrelated US listing of the same ticker; it fetched cleanly, so it was auto-saved — and because tier 1
+(`ticker_mappings`) is consulted *first*, that row then shadowed the `.TO` suffix logic even after the
+logic was fixed. `_get_currency_from_ticker()` compounded it: with no suffix to read it fell back to
+"use the security's currency", stamping USD prices **CAD**, so nothing downstream could see the
+mismatch. Result: the position was carried 61% high (7.70 vs 4.78 CAD).
+
+Two guards now: prices carry **the currency Yahoo reports** (read from the history metadata already in
+the response — no extra request), and a variation whose currency disagrees with the security's is
+**rejected, not adopted, and not saved**. Tests: `tests/test_market_data_service.py`. When a mapping is
+wrong, delete the `ticker_mappings` row *and* the poisoned `market_prices` rows, then let a scheduled
+job refill them — incremental caching fetches only missing dates, so this costs no ad-hoc Yahoo calls.
+
+**Currency** — Frankfurter at `https://api.frankfurter.dev/v1` (`.app` now 301-redirects here).
+Batch-fetches date ranges (one call per ~30 days) and carries the last known rate forward across
+weekends/holidays.
+
+Frankfurter republishes the **ECB reference rates**, so its list is fixed at the ECB's 30 + EUR and will
+never include TWD, RUB, QAR or SAR. That is not cosmetic: an unconvertible currency makes
+`reconcile_taxlots()` skip the lot, so the holding vanishes from the portfolio *and* the tax report
+(counted in `taxlots_skipped`, reported in `warnings[]`). Buying TSMC on TWSE hit exactly this.
+
+So `CurrencyService` falls back to `https://open.er-api.com/v6/latest/EUR` **only** for currencies
+outside `SUPPORTED_CURRENCIES`, tagging rows `source='er-api-latest'`. It is EUR-based
+(`rate = rates[to] / rates[from]`) and **latest-only — there is no free historical endpoint**, so it is
+used only within `FALLBACK_MAX_AGE_DAYS` (7) of today and refuses older dates rather than backdating a
+current rate onto an old tax lot. History accumulates forward as syncs cache each day. Never raises;
+`get_exchange_rate()` owns that decision. Tests: `tests/test_currency_fallback.py`.
 
 ---
 
@@ -332,12 +359,30 @@ security has no prices. Verify a ticker in a browser before adding a mapping, an
 | Sync 200 but 0 trades | Flex Query section/period not covering them |
 | `dividend_source` stuck on `yfinance_estimate` | No `<CashTransactions>` ingested — check the section + Withholding Tax option |
 | Yahoo 404/429 | **Stop.** Wait 30-60 min. Check `yfinance >= 1.1.0` |
+| A position is missing from the portfolio | Check `taxlots_skipped` + `warnings[]` on the sync run — usually a currency neither FX provider covers |
+| A position's value is far off IBKR's | Suspect the `ticker_mappings` row before the price feed: compare `market_prices.close_price` against IBKR's `market_price` in the *same* currency |
+| App total ≠ IBKR total | Compare against `gross_position_value`, **not** net liquidation (which adds cash); and intraday the app holds the last *close* while IBKR quotes live |
 | Site "down" in the browser | Often TIM home DNS, not the server — verify with `Test-NetConnection`, not `nslookup` |
 | Deploy says health FAILED | Usually the premature check; re-curl `/health` after ~15s |
 
 ---
 
-## Current state (2026-07-26)
+## Current state (2026-07-27)
+
+**The token lockout is over and the scheduled path works end to end again** — the 08:00 `full_sync`
+succeeded over the Flex API, the first API success since `1025`. The 13:00 job hit a plain `1001` and
+did exactly what it should: one SendRequest, fail fast, no re-request.
+
+**Reconciled against IBKR to 0.12%.** Compare the app against `gross_position_value` (60,973.17 CHF),
+never net liquidation (61,609.11 = positions + 633.04 cash + 2.91 accrued dividends) — "buying power" is
+a margin metric derived from that same cash, not a separate bucket. Revaluing all 34 app positions at
+IBKR's live prices left a **−72.50 CHF** residual (FX timing). The visible gap was: **−1,062** stale
+prices (the 13:00 UTC market-data job runs before the US open, so US names still hold the prior close —
+normal, the 20:00/22:00 jobs close it), **+713** TSMC not yet in any statement, plus **~169** from the
+SBI mapping bug (both fixed, see the ticker/currency section).
+
+Watch after the next sync that carries 2026-07-27: **35** positions including `2330@TWSE`, and
+`taxlots_skipped: 0` with no "unsupported currencies" warning.
 
 **The first full Flex sync landed** (2026-07-25 22:30 UTC), so Trades/CashTransactions/CorporateActions
 are live: 38 securities, 972 open tax lots, 4 closed lots, **64 trades**, 1 SPINOFF, 26 IBKR dividend rows
