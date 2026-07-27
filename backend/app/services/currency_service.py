@@ -3,7 +3,7 @@ Currency Service
 Handles currency conversion to EUR using Frankfurter API.
 Caches exchange rates in the database to minimize API calls.
 """
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 from datetime import date
 from decimal import Decimal
 import httpx
@@ -23,17 +23,33 @@ class CurrencyService:
     FRANKFURTER_API_URL = "https://api.frankfurter.dev/v1"
     BASE_CURRENCY = "EUR"
 
-    # Currencies supported by Frankfurter API (as of 2024)
-    # Source: https://www.frankfurter.app/docs/
-    # Currencies supported by Frankfurter API
-    # Note: RUB (Russian Ruble), QAR (Qatari Riyal), SAR (Saudi Riyal) are NOT supported
-    # Positions in these currencies will be skipped during sync
+    # Currencies Frankfurter serves. It republishes the ECB reference rates, so the
+    # list is exactly the ECB's 30 + EUR and does not grow — anything outside it
+    # (TWD, RUB, QAR, SAR, ...) has to come from FALLBACK_API_URL below.
     SUPPORTED_CURRENCIES = {
         'AUD', 'BGN', 'BRL', 'CAD', 'CHF', 'CNY', 'CZK', 'DKK',
         'EUR', 'GBP', 'HKD', 'HUF', 'IDR', 'ILS', 'INR', 'ISK',
         'JPY', 'KRW', 'MXN', 'MYR', 'NOK', 'NZD', 'PHP', 'PLN',
         'RON', 'SEK', 'SGD', 'THB', 'TRY', 'USD', 'ZAR'
     }
+
+    # Secondary provider, consulted *only* for currencies Frankfurter doesn't carry.
+    # Before this existed a TWD position (TSMC on TWSE) could not be converted at all,
+    # so reconcile_taxlots() skipped the lot and the holding silently vanished from the
+    # portfolio and the tax report.
+    #
+    # The free tier serves the *latest* rates only — there is no historical endpoint
+    # without a paid key. So this can never reconstruct an old rate, and we refuse to
+    # pretend otherwise: it is used only for dates within FALLBACK_MAX_AGE_DAYS of
+    # today, and the row is tagged `er-api-latest` so a today's-rate-applied-to-a-recent-
+    # date approximation is never mistaken for a real historical quote. Older dates keep
+    # raising, which preserves the existing skip-with-warning behaviour.
+    #
+    # In practice the window is enough: rates are cached per date as syncs run, so
+    # history accumulates forward from the first day a currency appears.
+    FALLBACK_API_URL = "https://open.er-api.com/v6/latest/EUR"
+    FALLBACK_SOURCE = "er-api-latest"
+    FALLBACK_MAX_AGE_DAYS = 7
 
     def __init__(self, session: AsyncSession):
         self.session = session
@@ -58,36 +74,38 @@ class CurrencyService:
             Exchange rate as Decimal
 
         Raises:
-            ValueError: If currency is not supported by Frankfurter API
+            ValueError: If no rate can be obtained for the currency on that date
         """
         # If currencies are the same, return 1.0
         if from_currency == to_currency:
             return Decimal("1.0")
 
-        # Check if currency is supported
-        if from_currency not in self.SUPPORTED_CURRENCIES:
-            raise ValueError(f"Currency {from_currency} is not supported by Frankfurter API")
-
-        # Check database cache first
+        # Check database cache first. This runs before the provider split so a rate
+        # already cached from either provider is reused without another request.
         cached_rate = await self._get_cached_rate(from_currency, target_date, to_currency)
         if cached_rate:
             return cached_rate
 
-        # If not in cache, try to fetch a range of recent rates (batch fetch)
-        # This is more efficient than fetching one date at a time
-        await self._batch_fetch_rates(from_currency, target_date, to_currency)
+        if from_currency in self.SUPPORTED_CURRENCIES:
+            # If not in cache, try to fetch a range of recent rates (batch fetch)
+            # This is more efficient than fetching one date at a time
+            await self._batch_fetch_rates(from_currency, target_date, to_currency)
+        else:
+            await self._fetch_fallback_rate(from_currency, target_date, to_currency)
 
-        # Check cache again after batch fetch
+        # Check cache again after fetching
         cached_rate = await self._get_cached_rate(from_currency, target_date, to_currency)
         if cached_rate:
             return cached_rate
 
         # If still not found (weekend/holiday), use carry-forward strategy
         # Get the most recent rate before this date
-        rate = await self._get_most_recent_rate(from_currency, target_date, to_currency)
-        if rate:
-            # Cache this carried-forward rate for the requested date
-            await self._cache_rate(from_currency, to_currency, target_date, rate)
+        recent = await self._get_most_recent_rate(from_currency, target_date, to_currency)
+        if recent:
+            rate, source = recent
+            # Cache this carried-forward rate for the requested date, keeping the
+            # provider tag of the row it came from so the audit trail survives.
+            await self._cache_rate(from_currency, to_currency, target_date, rate, source=source)
             return rate
 
         raise ValueError(f"No exchange rate available for {from_currency} on or before {target_date}")
@@ -114,10 +132,16 @@ class CurrencyService:
         from_currency: str,
         target_date: date,
         to_currency: str
-    ) -> Optional[Decimal]:
+    ) -> Optional[Tuple[Decimal, str]]:
         """
-        Get the most recent exchange rate on or before the target date.
-        Used for weekends/holidays when specific date isn't available.
+        Get the most recent exchange rate on or before the target date, with the
+        provider that produced it. Used for weekends/holidays when the specific
+        date isn't available.
+
+        The `date <= target_date` bound is what stops a currency we only learned
+        about recently from being projected backwards onto older lots: a rate first
+        cached today is invisible to a request for last year, which still raises and
+        so keeps the caller's skip-with-warning path.
         """
         result = await self.session.execute(
             select(ExchangeRate)
@@ -130,7 +154,7 @@ class CurrencyService:
             .limit(1)
         )
         exchange_rate = result.scalar_one_or_none()
-        return exchange_rate.rate if exchange_rate else None
+        return (exchange_rate.rate, exchange_rate.source) if exchange_rate else None
 
     async def _batch_fetch_rates(
         self,
@@ -194,6 +218,81 @@ class CurrencyService:
             except Exception as e:
                 logger.error(f"Batch fetch error: {e}")
                 # Don't raise - we'll fall back to individual fetches if needed
+
+    async def _fetch_fallback_rate(
+        self,
+        from_currency: str,
+        target_date: date,
+        to_currency: str
+    ) -> None:
+        """
+        Fetch a rate for a currency Frankfurter doesn't carry, and cache it.
+
+        Only called for currencies outside SUPPORTED_CURRENCIES. The provider is
+        EUR-based and latest-only, so:
+
+        - the rate for an arbitrary pair is derived as rates[to] / rates[from],
+          with EUR itself implied at 1;
+        - a target date older than FALLBACK_MAX_AGE_DAYS is refused outright rather
+          than answered with today's rate. Silently backdating would put an invented
+          historical rate on an old tax lot, which the tax report would then present
+          as fact. Leaving it unfetched keeps the caller's existing behaviour of
+          skipping the lot and reporting it in `warnings[]`.
+
+        Never raises: like _batch_fetch_rates it simply leaves the cache unpopulated,
+        and get_exchange_rate() decides what that means.
+        """
+        age = abs((date.today() - target_date).days)
+        if age > self.FALLBACK_MAX_AGE_DAYS:
+            logger.warning(
+                f"No historical rate available for {from_currency} on {target_date}: "
+                f"Frankfurter does not carry it and the fallback provider serves only "
+                f"current rates ({age} days old > {self.FALLBACK_MAX_AGE_DAYS})"
+            )
+            return
+
+        async with httpx.AsyncClient() as client:
+            try:
+                logger.debug(f"Fetching fallback rate for {from_currency} from {self.FALLBACK_API_URL}")
+                response = await client.get(self.FALLBACK_API_URL, timeout=10.0)
+
+                if response.status_code >= 400:
+                    logger.warning(
+                        f"Fallback FX provider returned {response.status_code} for {from_currency}"
+                    )
+                    return
+
+                data = response.json()
+                if data.get("result") != "success":
+                    logger.warning(f"Fallback FX provider reported failure: {data.get('result')}")
+                    return
+
+                rates = data.get("rates") or {}
+                rates.setdefault(self.BASE_CURRENCY, 1)
+
+                from_rate = rates.get(from_currency)
+                to_rate = rates.get(to_currency)
+                if not from_rate or to_rate is None:
+                    logger.warning(
+                        f"Fallback FX provider has no rate for {from_currency}/{to_currency}"
+                    )
+                    return
+
+                # Provider is EUR-based: rates[X] is "X per 1 EUR".
+                rate = Decimal(str(to_rate)) / Decimal(str(from_rate))
+
+                existing = await self._get_cached_rate(from_currency, target_date, to_currency)
+                if not existing:
+                    await self._cache_rate(
+                        from_currency, to_currency, target_date, rate,
+                        source=self.FALLBACK_SOURCE
+                    )
+                logger.info(
+                    f"Cached fallback rate {from_currency}/{to_currency}={rate} for {target_date}"
+                )
+
+            except Exception as e:
+                logger.error(f"Fallback FX fetch error for {from_currency}: {e}")
 
     async def _fetch_from_api(
         self,
@@ -264,7 +363,8 @@ class CurrencyService:
         from_currency: str,
         to_currency: str,
         target_date: date,
-        rate: Decimal
+        rate: Decimal,
+        source: str = "frankfurter"
     ) -> None:
         """Cache exchange rate in database"""
         exchange_rate = ExchangeRate(
@@ -272,7 +372,7 @@ class CurrencyService:
             from_currency=from_currency,
             to_currency=to_currency,
             rate=rate,
-            source="frankfurter"
+            source=source
         )
         self.session.add(exchange_rate)
         await self.session.flush()
