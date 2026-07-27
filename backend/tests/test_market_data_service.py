@@ -88,17 +88,29 @@ def _install_fake_yahoo(monkeypatch, responses):
     """Route yf.Ticker(...).history() through `responses`: {ticker: (close, currency)}."""
     monkeypatch.setattr(mds.random, "uniform", lambda *_: 0)
 
+    class FakePriceHistory:
+        def __init__(self):
+            self._history_metadata = None
+
     class FakeTicker:
         def __init__(self, ticker):
             self._ticker = ticker
-            self.history_metadata = {}
+            self._price_history = FakePriceHistory()
+
+        @property
+        def history_metadata(self):
+            # yfinance's public property re-requests at an intraday interval when
+            # 'tradingPeriods' is absent, which a daily history() never sets. Touching
+            # it would double our Yahoo traffic, so failing loudly here keeps that
+            # regression from slipping back in.
+            raise AssertionError("history_metadata issues a second Yahoo request")
 
         def history(self, **kwargs):
             entry = responses.get(self._ticker)
             if entry is None:
                 return pd.DataFrame()
             close, currency = entry
-            self.history_metadata = {"currency": currency}
+            self._price_history._history_metadata = {"currency": currency}
             return pd.DataFrame(
                 {"Close": [close]},
                 index=pd.to_datetime(["2026-07-24"]),

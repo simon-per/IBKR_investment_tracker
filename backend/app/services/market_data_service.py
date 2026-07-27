@@ -311,10 +311,16 @@ class MarketDataService:
                     auto_adjust=False  # Get actual close prices, not adjusted
                 )
                 # Yahoo states the quote currency in the metadata of the response we
-                # just received, so reading it costs no extra request (rule 1).
+                # just received, so reading it costs no extra request. Deliberately
+                # NOT the public `history_metadata` property: it re-requests at an
+                # intraday interval whenever 'tradingPeriods' is missing, which a daily
+                # history() never populates — that would have quietly doubled our
+                # Yahoo traffic to two requests per security. Read the cached dict
+                # instead, and degrade to suffix inference if yfinance moves it.
                 reported = None
                 try:
-                    reported = (yf_ticker.history_metadata or {}).get('currency')
+                    meta = getattr(yf_ticker._price_history, '_history_metadata', None)
+                    reported = (meta or {}).get('currency')
                 except Exception:
                     pass
                 return hist, reported
