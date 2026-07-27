@@ -245,15 +245,31 @@ class MarketDataService:
         'SMH.L': 'USD',
     }
 
-    def _get_currency_from_ticker(self, ticker: str, security: Security) -> str:
+    def _get_currency_from_ticker(
+        self,
+        ticker: str,
+        security: Security,
+        reported_currency: Optional[str] = None
+    ) -> str:
         """
-        Determine the currency for a Yahoo Finance ticker.
-        Checks explicit overrides first, then uses exchange suffix to infer
-        currency, falls back to security currency.
+        Determine the currency a Yahoo Finance ticker is quoted in.
+
+        Precedence: explicit override > what Yahoo reported > exchange-suffix
+        inference > the security's own currency.
+
+        `reported_currency` comes straight from the price response and is right far
+        more often than the suffix guess, but it still loses to an override — those
+        entries exist because someone checked the listing by hand after the automatic
+        answer proved wrong. The two tiers below it are guesses, and the last one is
+        the guess that mislabelled a USD instrument as CAD for SBI@TSE.
         """
         # Check explicit overrides first
         if ticker in self.TICKER_CURRENCY_OVERRIDES:
             return self.TICKER_CURRENCY_OVERRIDES[ticker]
+
+        # Uppercasing keeps London's 'GBp' mapping to 'GBP', as the suffix map does.
+        if reported_currency and len(reported_currency) == 3:
+            return reported_currency.upper()
 
         # Map of Yahoo Finance suffixes to currencies
         suffix_currency_map = {
@@ -330,15 +346,14 @@ class MarketDataService:
             if hist.empty:
                 return [], False  # No data, but not rate limited
 
-            # Prefer the currency Yahoo reports over one inferred from the ticker
-            # suffix. Inference is a guess, and when it guesses wrong the prices are
-            # mislabelled rather than rejected: bare `SBI` matched a US fund quoted in
-            # USD, which _get_currency_from_ticker then stamped CAD (its "no suffix, so
-            # use the security's currency" fallback), overstating the position by 61%.
-            # Uppercasing keeps London's 'GBp' mapping to 'GBP' exactly as before.
-            price_currency = self._get_currency_from_ticker(ticker, security)
-            if reported_currency and len(reported_currency) == 3:
-                price_currency = reported_currency.upper()
+            # Determine the correct currency for this ticker, preferring what Yahoo
+            # actually reported over a guess from the suffix. Guessing is what hid the
+            # SBI@TSE error: bare `SBI` matched a US fund quoted in USD, and the "no
+            # suffix, so use the security's currency" fallback stamped it CAD, so
+            # nothing downstream could see the position was 61% too high.
+            price_currency = self._get_currency_from_ticker(
+                ticker, security, reported_currency
+            )
 
             prices = []
             for date_index, row in hist.iterrows():

@@ -70,6 +70,24 @@ def test_to_suffix_infers_cad_price_currency():
     assert service._get_currency_from_ticker("SBI.TO", make_security()) == "CAD"
 
 
+def test_reported_currency_beats_the_suffix_guess():
+    service = make_service()
+
+    # .TO would infer CAD; Yahoo saying USD wins.
+    assert service._get_currency_from_ticker(
+        "SBI.TO", make_security(), "USD"
+    ) == "USD"
+
+
+def test_a_hand_checked_override_still_beats_the_reported_currency():
+    """SMH.L is a USD ETF listed in London. The override exists because the automatic
+    answer was wrong once already, so it has to outrank Yahoo's own field too."""
+    service = make_service()
+    security = make_security(symbol="SMH", exchange="LSEETF", currency="USD")
+
+    assert service._get_currency_from_ticker("SMH.L", security, "GBp") == "USD"
+
+
 @pytest.mark.asyncio
 async def test_twse_resolves_to_taiwan_yahoo_suffix():
     """TSMC arrived on a exchange nobody had held before; without TWSE in the table
