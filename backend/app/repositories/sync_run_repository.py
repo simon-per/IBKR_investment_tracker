@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.sync_run import SyncRun
+from app.redact import redact_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -51,12 +52,14 @@ class SyncRunRepository:
         exception on the error path. Returns None if it couldn't record.
         """
         try:
+            # A transport-error str(e) embeds the request URL, token included —
+            # nothing token-bearing may be persisted (served publicly by /scheduler).
             run = SyncRun(
                 sync_type=sync_type,
                 status=status,
-                message=(message or "")[:2000] or None,
-                details=details,
-                warnings=warnings or None,
+                message=redact_secrets(message or "")[:2000] or None,
+                details=redact_secrets(details),
+                warnings=redact_secrets(warnings) or None,
                 started_at=started_at,
                 finished_at=datetime.now(),
             )
@@ -89,11 +92,13 @@ class SyncRunRepository:
     @staticmethod
     def to_dict(run: SyncRun) -> Dict:
         """Shape a run like the in-memory last_sync_result, so consumers see one format."""
+        # Redact at read as well: rows written before the redaction existed (or
+        # restored from a backup) must not leak through the public endpoints.
         return {
             "type": run.sync_type,
             "status": run.status,
-            "message": run.message,
+            "message": redact_secrets(run.message),
             "timestamp": utc_iso(run.finished_at),
-            "details": run.details,
-            "warnings": run.warnings,
+            "details": redact_secrets(run.details),
+            "warnings": redact_secrets(run.warnings),
         }

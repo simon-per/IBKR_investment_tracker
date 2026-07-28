@@ -9,6 +9,7 @@ from typing import Dict, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
+from app.redact import redact_secrets
 from app.repositories.sync_run_repository import SyncRunRepository
 from app.services.scheduler_service import get_scheduler
 
@@ -26,7 +27,8 @@ async def _last_sync(scheduler, db: AsyncSession) -> Optional[Dict]:
     and wrongly conclude that no sync ran.
     """
     if scheduler.last_sync_result:
-        return scheduler.last_sync_result
+        # In-memory job results carry raw step errors; redact like the stored rows.
+        return redact_secrets(scheduler.last_sync_result)
     try:
         run = await SyncRunRepository(db).get_latest()
         return SyncRunRepository.to_dict(run) if run else None
@@ -53,12 +55,12 @@ async def trigger_sync_now():
     try:
         scheduler = get_scheduler()
         result = await scheduler.trigger_sync_now()
-        return result
+        return redact_secrets(result)
 
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to trigger sync: {str(e)}"
+            detail=redact_secrets(f"Failed to trigger sync: {str(e)}")
         )
 
 
@@ -99,7 +101,7 @@ async def get_scheduler_status(db: AsyncSession = Depends(get_db)):
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to get scheduler status: {str(e)}"
+            detail=redact_secrets(f"Failed to get scheduler status: {str(e)}")
         )
 
 
@@ -115,5 +117,5 @@ async def get_sync_history(limit: int = 20, db: AsyncSession = Depends(get_db)):
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to read sync history: {str(e)}"
+            detail=redact_secrets(f"Failed to read sync history: {str(e)}")
         )

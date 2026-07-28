@@ -10,6 +10,7 @@ from typing import Dict
 from datetime import datetime
 
 from app.database import get_db
+from app.redact import redact_secrets
 from app.services.ibkr_service import IBKRService
 from app.services.sync_helper import ingest_flex_statement
 from app.repositories.security_repository import SecurityRepository
@@ -77,7 +78,7 @@ async def sync_ibkr_data(db: AsyncSession = Depends(get_db)):
         )
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to sync IBKR data: {str(e)}"
+            detail=redact_secrets(f"Failed to sync IBKR data: {str(e)}")
         )
 
 
