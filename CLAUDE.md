@@ -429,8 +429,13 @@ windows. Cash-flow ingestion is a pure additive upsert with no delete, so it nee
 wipe guard, and an unconvertible currency skips one row rather than failing the sync.
 
 The cheap correctness check: `Σ monthly[].net_eur` must equal the current total cost basis, since every
-lot is either still open or was released. Tests: `tests/test_contributions.py`,
-`tests/test_cash_flow_ingest.py`.
+lot is either still open or was released. **Exact in EUR; approximate once projected.** Each leg is
+converted at its own date, so a lot bought and sold months apart contributes `+convert(cost, open_date)`
+and `−convert(cost, close_date)` — which cancel to zero only if the rate didn't move. Under CHF the
+residual is a fraction of a percent of *closed* cost basis and grows with FX drift, not with error. So
+run the identity against `taxlots.cost_basis_eur` (`Σ` of open lots) when you want it to the cent, and
+read a small non-zero gap in the base currency as FX, not as a dropped lot. Tests:
+`tests/test_contributions.py`, `tests/test_cash_flow_ingest.py`.
 
 ---
 
@@ -633,12 +638,18 @@ same statement afterwards is idempotent.
 `taxlots_skipped: 0`, `prices_invalidated: 0`, no "unsupported currencies" warning, and
 `find_stale_priced_securities()` returns empty — every held security has a current price.
 
-**The external cash ledger is live and verified against a real export.** The Flex Query now carries
+**The external cash ledger is live on production.** The Flex Query now carries
 Deposits & Withdrawals (at **Detail**) and the **Transfers** section (at **Transfer** level, not Lot —
 Lot would emit a row per transferred lot and bury the cash leg in the list that has to be audited).
-`App_OpenLots (7).xml` ingested **47 cash flows = 25 deposits + 22 in-kind transfers**, 0 skipped, and
+The statement ingested **47 cash flows = 25 deposits + 22 in-kind transfers**, 0 skipped, and
 **0 reclassified** — correct, because the transfer carried no cash (see the contributions section).
 No manual reclassification was needed, so the automatic guard has never had to fire on this account.
+`manage_cash_flows list` shows all 22 transfer rows as *not* counted, which is the audit to run before
+trusting any money-added figure.
+
+It reached production through the **offline path** (`ibkr_manual_xml`), not the Flex API: three
+consecutive IBKR-only jobs had returned a plain `1001`, so a browser download was ingested instead —
+no token spend, no `1025` exposure, and the next `full_sync` re-ingests the same statement idempotently.
 
 `deposits_from` lands a few days *before* the transfer date, so the ledger genuinely starts at the
 account's first funding. The set includes one real withdrawal (negative amount, sign preserved) and one
@@ -656,8 +667,9 @@ ledger start and not the transfer. All-time and 12M come out `spliced`; 6M and 3
 **deposits alone** and are already rotation-proof.
 Where both sources overlap they agree to within **~12%** — two independent derivations (lot cost basis
 vs. the cash ledger) landing that close is the best available evidence that the pre-ledger lot-based
-figures were sound. `Σ monthly[].net_eur` matches total cost basis **to the cent**, which is the identity
-check described in the contributions section.
+figures were sound. `Σ monthly[].net_eur` matches the open-lot cost basis **to the cent in EUR**; in CHF
+it lands a few francs off, which is the per-date FX projection on four closed lots and not an error —
+see the identity check in the contributions section.
 
 **That statement carried a large IBKR schema drift and needed no code change.** 20+ new attributes
 (`figi`, `issuerCountryCode`, `serialNumber`, `weight`, `subCategory`, `exDate`, `dividendType`,
