@@ -191,8 +191,17 @@ def _transfer_to_flow(transfer: Dict) -> Dict:
     direction = (transfer.get("direction") or "").upper()
     flow_type = {"IN": TRANSFER_IN, "OUT": TRANSFER_OUT}.get(direction, TRANSFER)
 
+    # IBKR sends type='FOP' (Free Of Payment) for these, which ibflex's TransferType
+    # enum (INTERNAL|ACATS) can't convert, so the sanitizer drops it and the parser
+    # yields 'UNKNOWN'. Leave it out of the description rather than prefixing every
+    # row with a non-word: manage_cash_flows list is where the transfer/deposit split
+    # gets audited, and that is the wrong place for noise.
+    transfer_type = transfer.get("transfer_type")
+    if transfer_type == "UNKNOWN":
+        transfer_type = None
+
     parts = [p for p in (
-        transfer.get("transfer_type"),
+        transfer_type,
         direction or None,
         f"from {transfer['company']}" if transfer.get("company") else None,
         transfer.get("symbol"),

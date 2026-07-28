@@ -354,6 +354,19 @@ contribution. `app/cli/manage_cash_flows.py` is the manual override — `list` m
 added, `reclassify <ib_key> --as TRANSFER_IN` fixes one, `--dry-run` on the mutating path, and every
 edit records a `sync_runs` row (`manual_cash_flow`).
 
+Three things this account's real data settled, so nobody re-investigates them:
+
+- **The 2026 transfer was entirely in-kind** — all 22 rows carry `cashTransfer=0`. So there is no
+  transfer cash to misclassify and `deposits_reclassified_as_transfer` is legitimately **0**. Read a zero
+  there as correct, not as the guard failing to fire.
+- **`Transfer.type` arrives as `FOP`** (Free Of Payment), which ibflex's `TransferType` enum
+  (`INTERNAL`/`ACATS`) cannot convert, so the sanitizer drops it and `transfer_type` is always
+  `'UNKNOWN'` here. `_transfer_to_flow` leaves `UNKNOWN` out of the description. **Do not extend the
+  enum** — same reasoning as everywhere else in the sanitizer.
+- **`deliveringBroker` is not modelled by ibflex** either, and `company` comes through empty, so a
+  transfer row cannot name Scalable Capital / Trading 212. `direction` *does* survive, which is what
+  `TRANSFER_IN` and `earliest_transfer_in_date()` depend on.
+
 ### Shared mechanics
 
 The deployment divisor is **clamped to elapsed history** (`partial: true` when clamped), so a
@@ -566,6 +579,24 @@ same statement afterwards is idempotent.
 
 `taxlots_skipped: 0`, `prices_invalidated: 0`, no "unsupported currencies" warning, and
 `find_stale_priced_securities()` returns empty — every held security has a current price.
+
+**The external cash ledger is live and verified against a real export.** The Flex Query now carries
+Deposits & Withdrawals (at **Detail**) and the **Transfers** section (at **Transfer** level, not Lot —
+Lot would emit a row per transferred lot and bury the cash leg in the list that has to be audited).
+`App_OpenLots (7).xml` ingested **47 cash flows = 25 deposits + 22 in-kind transfers**, 0 skipped, and
+**0 reclassified** — correct, because the transfer carried no cash (see the contributions section).
+No manual reclassification was needed, so the automatic guard has never had to fire on this account.
+
+`deposits_from = 2026-01-09` (which slightly predates the 2026-01-19 transfer), 12,526.60 EUR added,
+including one real withdrawal (−31.89 on 2026-03-26) and a CHF deposit (1,500 on 2026-07-24) that
+exercises the FX path. Note IBKR sends the **legacy** `type="Deposits/Withdrawals"` spelling, not
+`"Deposits & Withdrawals"` — ibflex maps both to `CashAction.DEPOSITWITHDRAW`, so nothing special is
+needed, but don't "fix" the enum comparison if that string looks wrong.
+
+Resulting windows: all-time and 12M are `added_covered: false` (they predate IBKR) and the UI omits
+Added for them; 6M and 3M are covered. **Deployed and Added agree closely where both exist** — 6M
+2,129 vs 1,871, 3M 2,713 vs 2,613 EUR/month — which is two independent sources (lot cost basis vs the
+cash ledger) cross-validating to within ~12%. Added 3M is **+40% on 6M**, i.e. the savings rate rose.
 
 **That statement carried a large IBKR schema drift and needed no code change.** 20+ new attributes
 (`figi`, `issuerCountryCode`, `serialNumber`, `weight`, `subCategory`, `exDate`, `dividendType`,

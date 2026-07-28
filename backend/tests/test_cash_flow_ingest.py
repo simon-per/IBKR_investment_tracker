@@ -178,8 +178,37 @@ async def test_transfer_direction_becomes_the_flow_type():
         assert rows["OUT1"].flow_type == TRANSFER_OUT
         # An in-kind transfer carries no cash but is still on the record.
         assert rows["IN1"].amount == Decimal("0")
+        assert "ACATS" in rows["IN1"].description
         assert "Scalable Capital" in rows["IN1"].description
         assert "18000" in rows["IN1"].description
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_unconvertible_transfer_type_is_left_out_of_the_description():
+    """
+    This account's transfers arrive as type='FOP', which ibflex's TransferType enum
+    cannot convert, so the sanitizer drops the attribute and the parser yields
+    'UNKNOWN'. That must not end up prefixing every row in the audit list.
+    """
+    engine, session = await _make_session()
+    try:
+        transfers = await _svc().extract_transfers(_flex(SimpleNamespace(Transfers=[
+            _transfer(type=None),   # what the sanitizer leaves behind for 'FOP'
+        ])))
+        assert transfers[0]["transfer_type"] == "UNKNOWN"
+
+        await persist_cash_flows(
+            CashFlowRepository(session), CurrencyService(session), [], transfers
+        )
+        await session.commit()
+
+        row = (await session.execute(select(CashFlow))).scalars().one()
+        assert "UNKNOWN" not in row.description
+        assert row.description.startswith("IN ")     # direction still leads
+        assert row.flow_type == TRANSFER_IN          # and it is still excluded
     finally:
         await session.close()
         await engine.dispose()
