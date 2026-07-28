@@ -475,47 +475,46 @@ Tests: `tests/test_currency_fallback.py`.
 
 ---
 
-## Current state (2026-07-27)
+## Current state (2026-07-28)
 
-**The token lockout is over and the scheduled path works end to end again** — the 08:00 `full_sync`
-succeeded over the Flex API, the first API success since `1025`. The 13:00 job hit a plain `1001` and
-did exactly what it should: one SendRequest, fail fast, no re-request.
+**40 securities, 36 open positions, 975 open tax lots, 67 trades, 62,178.99 CHF.** The 27 Jul
+statement was ingested **offline** from a browser download (`ibkr_manual_xml`, 04:16 UTC) rather than
+waiting on the Flex API, because three consecutive IBKR jobs had returned a plain `1001`. That is the
+escape hatch working as designed: no token spend, no `1025` exposure, and `full_sync` re-ingesting the
+same statement afterwards is idempotent.
 
-**Reconciled against IBKR to 0.12%.** Compare the app against `gross_position_value` (60,973.17 CHF),
-never net liquidation (61,609.11 = positions + 633.04 cash + 2.91 accrued dividends) — "buying power" is
-a margin metric derived from that same cash, not a separate bucket. Revaluing all 34 app positions at
-IBKR's live prices left a **−72.50 CHF** residual (FX timing). The visible gap was: **−1,062** stale
-prices (the 13:00 UTC market-data job runs before the US open, so US names still hold the prior close —
-normal, the 20:00/22:00 jobs close it), **+713** TSMC not yet in any statement, plus **~169** from the
-SBI mapping bug (both fixed, see the ticker/currency section).
+`taxlots_skipped: 0`, `prices_invalidated: 0`, no "unsupported currencies" warning, and
+`find_stale_priced_securities()` returns empty — every held security has a current price.
 
-**Two positions are pending the next statement: `2330@TWSE` (TSMC) and `SOXQ` (NASDAQ), both bought
-2026-07-27.** All three of today's IBKR jobs returned a statement ending 2026-07-24 — the 13:00 and
-20:00 ones hit a plain `1001` and failed fast without re-requesting, which is correct — so both wait
-for **08:00**. Expect **40 securities**, `taxlots_skipped: 0`, and no "unsupported currencies" warning.
+**That statement carried a large IBKR schema drift and needed no code change.** 20+ new attributes
+(`figi`, `issuerCountryCode`, `serialNumber`, `weight`, `subCategory`, `exDate`, `dividendType`,
+`origTransactionID`, `initialInvestment`, …) plus a `Trade.notes` value `RI` that ibflex can't convert
+to its enum tuple. `_sanitize_flex_xml()` dropped all of them generically. This is the case the
+sanitizer was written for — don't start patching attribute names.
 
-The prep that mattered is already done: `reconcile_taxlots` values a lot at its `open_date`, so both
-new lots need a 2026-07-27 rate, and `USD/EUR 0.87804` + `TWD/EUR 0.02715797` are cached. Without the
-TWD row, TSMC's lot would have been skipped and the holding would simply not have appeared.
-`2330/TWSE → 2330.TW` is pinned as `manual`. **SOXQ deliberately has no mapping**: `NASDAQ` resolves to
-an empty suffix, so the bare `SOXQ` is already what tier 2 produces — and with no suffix,
-`_get_yahoo_ticker_variations()` returns that one candidate alone, so the bare-symbol auto-save that
-poisoned SBI is never reached. A mapping there would be inert.
+**The two new positions both landed cleanly.** `2330@TWSE` (TSMC, 12 sh, TWD) and `SOXQ@NASDAQ`
+(7.5 sh, USD), both bought 2026-07-27. They worked because the FX rates their lots are valued at were
+already cached for that exact date (`reconcile_taxlots` uses `open_date`) — without the TWD row TSMC
+would have been silently skipped. `2330/TWSE → 2330.TW` is pinned `manual`; **SOXQ deliberately has no
+mapping** and resolved through the bare ticker, which is correct: `NASDAQ` gives an empty suffix, so
+that *is* what tier 2 produces, and with no suffix `_get_yahoo_ticker_variations()` returns a single
+candidate — the bare-symbol auto-save that poisoned SBI is never reached.
 
-**SBI reads 4.79 CAD / 276.83 CHF again.** Its poisoned rows were deleted (backup:
-`/root/ibkr-backups/sbi-poisoned-2026-07-27.json`) and the last month refilled from Client Portal daily
-CAD bars via `app/cli/import_prices.py` — 20 rows, `2026-06-29..07-27`, `source='ibkr'`. A `manual`
-`SBI/TSE → SBI.TO` mapping (id 20) now prevents re-auto-discovery onto the bare symbol.
+**SBI is fully repaired: 4.79 CAD / 276.83 CHF, 501 cached prices.** Its poisoned rows were deleted
+(backup: `/root/ibkr-backups/sbi-poisoned-2026-07-27.json`), 20 days were imported from Client Portal
+bars (`source='ibkr'`, `2026-06-29..07-27`) and Yahoo later filled the other 481 via the `manual`
+`SBI/TSE → SBI.TO` mapping. The two windows don't overlap — the imported dates were never re-fetched,
+exactly as `get_missing_dates()` implies. Yahoo's 27 Jul close for `SBI.TO` came back at **4.79 CAD**,
+identical to IBKR's own bar, which independently confirms both the mapping and the import.
 
-Only a month, not the two years intended: the IBKR MCP connector dropped mid-task. The dates before
-2026-06-29 are still "missing", so **the next 730-day `full_sync` (08:00) should backfill them from
-Yahoo via `SBI.TO`** — check the chart then. If it doesn't, pull the rest from Client Portal and import
-it the same way; the imported month itself will not be re-fetched, since those dates now exist.
+Dividends: 57 cash-transaction rows → 26 IBKR dividend payments (43.31 gross / 7.00 withholding /
+36.31 net EUR). 2026 reports `dividend_source='ibkr'` and `realized_source='trades'`; realized
+−105.40 EUR over 4 closed lots. The tax report's `holdings_snapshot_total` matches the portfolio
+summary to the cent, which is the shared-code guarantee holding.
 
-**The first full Flex sync landed** (2026-07-25 22:30 UTC), so Trades/CashTransactions/CorporateActions
-are live: 38 securities, 972 open tax lots, 4 closed lots, **64 trades**, 1 SPINOFF, 26 IBKR dividend rows
-(7.65 EUR withholding) alongside 1356 yfinance estimates. 2026 reports `dividend_source='ibkr'` and
-`realized_source='trades'`; GOOGL is 12.
+**Reconciled against IBKR to 0.12%** on 2026-07-27. Compare the app against `gross_position_value`,
+never net liquidation (which adds cash and accrued dividends) — "buying power" is a margin metric
+derived from that same cash, not a separate bucket.
 
 Cross-checked against IBKR via the MCP connector: IBKR lists **282 YTD trades = 218 `CASH`** (FX
 conversions, correctly filtered out) **+ 64 `STK`**, and the 64 match ours symbol-for-symbol. Same-day,
