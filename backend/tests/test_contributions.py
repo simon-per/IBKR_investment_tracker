@@ -1,6 +1,6 @@
 """
-Tests for PortfolioService.get_contributions — average money added per month,
-derived from tax lots because the Flex Query carries no deposit rows.
+Tests for PortfolioService.get_contributions — average capital deployed per
+month, from the cost basis of the lots opened in each month.
 
 EUR base so no FX data is needed, and ``as_of`` is pinned in every test so the
 trailing windows don't move with the calendar.
@@ -95,11 +95,17 @@ async def test_a_sale_releases_capital_in_its_close_month():
         report = await PortfolioService(session).get_contributions(as_of=date(2026, 3, 31))
 
         # Deployed in January, released in March: net zero overall.
-        assert _month(report, "2026-01") == {"month": "2026-01", "net_eur": 1000.0, "gross_eur": 1000.0}
-        assert _month(report, "2026-03") == {"month": "2026-03", "net_eur": -1000.0, "gross_eur": 0.0}
+        assert _month(report, "2026-01") == {"month": "2026-01", "gross_eur": 1000.0, "net_eur": 1000.0}
+        assert _month(report, "2026-03") == {"month": "2026-03", "gross_eur": 0.0, "net_eur": -1000.0}
         assert _window(report, "all")["net_eur"] == 0.0
-        # Gross still counts the purchase — that's the point of reporting both.
-        assert _window(report, "all")["gross_eur"] == 1000.0
+
+        # The average is deployment, so the sale does not erase the January buy:
+        # 1,000 was put to work regardless of it later coming back out.
+        # 2026-01-10..2026-03-31 is 80 days = 2.63 months, so 1,000 / 2.63.
+        w_all = _window(report, "all")
+        assert w_all["gross_eur"] == 1000.0
+        assert w_all["months"] == pytest.approx(2.63, abs=0.01)
+        assert w_all["avg_per_month_eur"] == pytest.approx(380.5, abs=0.5)
     finally:
         await session.close()
         await engine.dispose()
@@ -169,20 +175,30 @@ async def test_averages_per_window_and_the_cost_basis_identity():
 
         report = await PortfolioService(session).get_contributions(as_of=date(2026, 6, 30))
 
-        # 12 x 1,000 deployed + 500 deployed - 500 released = 12,000 net.
+        # 12 x 1,000 deployed + the 500 lot = 12,500 deployed; 500 came back out.
         w_all = _window(report, "all")
         assert w_all["gross_eur"] == 12500.0
         assert w_all["net_eur"] == 12000.0
 
-        # 3M window covers Apr/May/Jun buys (3,000) minus the June release (500).
+        # 3M covers the Apr/May/Jun buys. The June sale reduces net but must NOT
+        # reduce the average — the money was still deployed when it was deployed.
         w3 = _window(report, "3m")
         assert w3["months"] == 3.0
+        assert w3["gross_eur"] == 3000.0
         assert w3["net_eur"] == 2500.0
-        assert w3["avg_per_month_eur"] == pytest.approx(833.33, abs=0.01)
+        assert w3["avg_per_month_eur"] == pytest.approx(1000.0, abs=0.01)
 
         w6 = _window(report, "6m")
-        assert w6["net_eur"] == 5500.0
-        assert w6["avg_per_month_eur"] == pytest.approx(916.67, abs=0.01)
+        assert w6["gross_eur"] == 6000.0
+        assert w6["avg_per_month_eur"] == pytest.approx(1000.0, abs=0.01)
+
+        # The 12M window reaches back past the first lot, so its divisor is clamped
+        # to the 11.5 months that actually exist — 12,500 / 11.5, not / 12.
+        w12 = _window(report, "12m")
+        assert w12["partial"] is True
+        assert w12["months"] == pytest.approx(11.50, abs=0.02)
+        assert w12["gross_eur"] == 12500.0
+        assert w12["avg_per_month_eur"] == pytest.approx(1087.0, abs=1.0)
 
         # Identity: every lot is either still open or was released, so the monthly
         # net must sum to the cost basis of the open lots — 12,000.

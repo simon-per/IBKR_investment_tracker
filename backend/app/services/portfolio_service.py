@@ -241,19 +241,22 @@ class PortfolioService:
 
     async def get_contributions(self, as_of: Optional[date] = None) -> Dict:
         """
-        Average money added to the account per month, over several trailing windows.
+        Average capital *deployed* per month, over several trailing windows.
 
-        There is no record of cash deposits (the Flex Query only ingests dividends
-        and withholding), so contributions are derived from tax lots, which is a
-        complete source: the sync deletes only *open* lots, and a partial sale is
-        split pro-rata, so the cost basis of every purchase survives under its
-        original open_date for as long as the history goes back.
+        The headline figure is gross: the cost basis of every lot opened in the
+        month. That is deliberately a measure of money put to work, not of money
+        transferred in from outside — buying with proceeds from a sale is still
+        deployment, so it counts. Cash deposited but left uninvested is not
+        deployment and correctly does not appear.
 
-        Per month: capital deployed (lots OPENED) minus capital released (lots
-        CLOSED, at cost). Net rather than gross, so selling and rebuying nets to
-        zero instead of counting recycled money as fresh savings. Two limits this
-        cannot see: cash from a sale left undeployed reads as a negative month
-        until it is reinvested, and money deposited but never invested is invisible.
+        Tax lots are a complete source for this because the sync deletes only
+        *open* lots and splits a partial sale pro-rata under the original
+        open_date, so the cost basis of every purchase survives for as long as
+        the history goes back, already FX-converted at open_date.
+
+        ``net_eur`` is reported alongside (deployed minus the cost basis of lots
+        closed in the window) for context on how much came back out. It is not
+        what the average is computed from.
 
         ``as_of`` defaults to today and exists so tests can pin the windows.
         """
@@ -264,9 +267,10 @@ class PortfolioService:
             select(TaxLot.open_date, TaxLot.close_date, TaxLot.cost_basis_eur)
         )).all()
 
-        # Each lot contributes one positive leg on its open_date and, once sold, a
-        # negative leg on its close_date. Project into the base currency at the date
-        # the leg sits on, then everything downstream is plain date arithmetic.
+        # Each lot contributes one positive leg on its open_date (the deployment)
+        # and, once sold, a negative leg on its close_date (capital coming back).
+        # Project into the base currency at the date the leg sits on, then
+        # everything downstream is plain date arithmetic.
         legs: List[Tuple[date, Decimal]] = []
         first_open: Optional[date] = None
 
@@ -326,7 +330,9 @@ class PortfolioService:
                 "months": round(months, 2),
                 "net_eur": round(float(net), 2),
                 "gross_eur": round(float(gross), 2),
-                "avg_per_month_eur": round(float(net) / months, 2) if months > 0 else 0.0,
+                # Averaged over gross: the question is how much was put to work
+                # per month, not how much of it stayed there.
+                "avg_per_month_eur": round(float(gross) / months, 2) if months > 0 else 0.0,
                 "partial": partial,
             })
 

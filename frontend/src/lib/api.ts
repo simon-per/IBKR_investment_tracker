@@ -45,16 +45,16 @@ export interface ContributionWindow {
   label: 'all' | '12m' | '6m' | '3m';
   months: number;          // divisor used, clamped to available history
   // NOTE: *_eur fields carry values in the selected base_currency.
-  net_eur: number;         // capital deployed minus capital released
-  gross_eur: number;       // capital deployed only
-  avg_per_month_eur: number;
+  gross_eur: number;       // capital deployed (cost basis of lots opened) — the headline
+  net_eur: number;         // deployed minus released, for context only
+  avg_per_month_eur: number;  // gross_eur / months
   partial: boolean;        // history shorter than the nominal window
 }
 
 export interface ContributionMonthlyItem {
   month: string;           // "YYYY-MM"
-  net_eur: number;
-  gross_eur: number;
+  gross_eur: number;       // deployed in the month
+  net_eur: number;         // deployed minus released in the month
 }
 
 export interface ContributionsResponse {

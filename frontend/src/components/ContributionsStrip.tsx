@@ -26,12 +26,13 @@ function deltaColor(pct: number): string {
 }
 
 /**
- * Average money added to the account per month, over all time / 12M / 6M / 3M,
- * with each trailing window shown as a delta against the all-time average — the
- * comparison that reveals a savings rate slipping.
+ * Average capital deployed per month, over all time / 12M / 6M / 3M, with each
+ * trailing window shown as a delta against the all-time average — the comparison
+ * that reveals a slowing rate of investment.
  *
- * Derived from tax lots, not deposits (the Flex Query carries none): capital
- * deployed minus capital released. See PortfolioService.get_contributions.
+ * Gross: the cost basis of the lots opened in each month. Buying with proceeds
+ * from a sale is still deployment, so it counts; cash sitting uninvested is not,
+ * so it doesn't. See PortfolioService.get_contributions.
  */
 export function ContributionsStrip({ data, isLoading }: ContributionsStripProps) {
   const formatCurrency = useFormatCurrency()
@@ -56,7 +57,7 @@ export function ContributionsStrip({ data, isLoading }: ContributionsStripProps)
         <div className="flex flex-wrap items-start gap-x-10 gap-y-4">
           <div className="flex items-center gap-2 pt-1">
             <PiggyBank className="h-4 w-4 text-muted-foreground" />
-            <span className="text-sm font-medium">Avg Monthly Contribution</span>
+            <span className="text-sm font-medium">Avg Monthly Invested</span>
           </div>
 
           {data.windows.map(w => {
@@ -65,10 +66,10 @@ export function ContributionsStrip({ data, isLoading }: ContributionsStripProps)
               : null
 
             const title = [
-              `${WINDOW_LABELS[w.label]}: ${formatCurrency(w.net_eur)} net invested over ${w.months.toFixed(1)} months`,
-              `${formatCurrency(w.gross_eur)} bought before sales`,
+              `${WINDOW_LABELS[w.label]}: ${formatCurrency(w.gross_eur)} deployed over ${w.months.toFixed(1)} months`,
+              `${formatCurrency(w.net_eur)} of that is still invested after sales`,
               w.partial ? `* only ${w.months.toFixed(1)} months of history available` : null,
-              'Derived from tax lots, not cash deposits — proceeds from a sale that you have not reinvested yet count as a negative month.',
+              'Cost basis of the lots opened in the period, at the exchange rate on each purchase date.',
             ].filter(Boolean).join(' · ')
 
             return (

@@ -289,26 +289,27 @@ Frontend: `TaxTab.tsx`. It's a filing aid, not tax advice.
 
 ---
 
-## Contributions — average money added per month
+## Contributions — average capital deployed per month
 
 `GET /api/portfolio/contributions` → `PortfolioService.get_contributions()`, rendered as a slim strip
 (`ContributionsStrip.tsx`) below the KPI cards: all time / 12M / 6M / 3M, each trailing window shown as
-a delta against the all-time average, so a savings rate slipping is visible at a glance.
+a delta against the all-time average, so a slowing rate of investment is visible at a glance.
 
-**There are no deposit rows to work from.** The Flex Query only enables Dividends / Payment in Lieu /
-Withholding Tax, and `extract_cash_transactions` filters to those three *and* drops rows without a
-`conid` — deposits have neither (pinned by `tests/test_ibkr_parsers.py`). So contributions are derived
-from **tax lots**, which is a complete source only because of two properties worth not breaking:
-reconciliation deletes **open** lots only, and a partial sale is split **pro-rata** keeping the original
-`open_date` — so `Σ cost_basis_eur` grouped by `open_date` is conserved across syncs and reaches back to
-the first lot. `cost_basis_eur` is already FX-converted at `open_date`, so no per-row currency work.
+**The metric is deployment, not deposits** — the cost basis of the lots *opened* in each month. Buying
+with proceeds from a sale is still money put to work, so it counts; cash deposited and left uninvested
+is not deployment, so it doesn't appear. That framing is the point of the feature, not a limitation of
+it: **don't "fix" this into a net-contributions figure.**
+
+Tax lots are a complete source for this because of two properties worth not breaking: reconciliation
+deletes **open** lots only, and a partial sale is split **pro-rata** keeping the original `open_date`
+— so `Σ cost_basis_eur` grouped by `open_date` is conserved across syncs and reaches back to the first
+lot. `cost_basis_eur` is already FX-converted at `open_date`, so there is no per-row currency work.
 
 Each lot becomes a **positive leg** on `open_date` and, once sold, a **negative leg** on `close_date`
-for the same cost; a window is the sum of the legs inside it. Net rather than gross, so selling and
-rebuying nets to zero instead of counting recycled money as fresh savings — `gross_eur` is reported
-alongside for the tooltip. Two limits it cannot see, both stated in the UI tooltip: proceeds from a
-sale left undeployed read as a **negative month** until reinvested, and money deposited but never
-invested is invisible.
+for the same cost; a window sums the legs inside it. `avg_per_month_eur` divides **`gross_eur`** (the
+positive legs only). `net_eur` is carried for context — "how much of it is still invested" in the
+tooltip — and is what makes the correctness check below work; it is deliberately *not* what the average
+is computed from. Averaging net would let a sale retroactively erase a purchase that really happened.
 
 The divisor is **clamped to elapsed history** (`partial: true` when clamped), so a four-month-old
 portfolio can't report a 12-month average divided by 12; all-time divides by exact days, not whole
@@ -317,9 +318,10 @@ months, so a part-month isn't rounded away. `as_of` is injectable purely so test
 The cheap correctness check: `Σ monthly[].net_eur` must equal the current total cost basis, since every
 lot is either still open or was released. Tests: `tests/test_contributions.py`.
 
-To upgrade this from a proxy to the real thing, enable **Deposits & Withdrawals** on the Flex Query and
-persist those rows; note a YTD period only delivers the current year, so prior years would need a
-one-off longer-period browser export through `ingest_flex_xml.py`.
+Should a true external-cashflow figure ever be wanted, it is a *separate* metric, not a change to this
+one: it needs **Deposits & Withdrawals** enabled on the Flex Query and those rows persisted (a YTD
+period only delivers the current year, so prior years would need a one-off longer-period browser export
+through `ingest_flex_xml.py`).
 
 ---
 

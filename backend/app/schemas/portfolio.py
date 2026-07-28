@@ -273,19 +273,19 @@ class DividendSummaryResponse(BaseModel):
 
 
 class ContributionWindow(BaseModel):
-    """Average money added per month over one trailing window."""
+    """Average capital deployed per month over one trailing window."""
     label: str          # "all" | "12m" | "6m" | "3m"
     months: float       # divisor actually used (clamped to available history)
-    net_eur: float      # capital deployed minus capital released, over the window
-    gross_eur: float    # capital deployed only
-    avg_per_month_eur: float
+    gross_eur: float    # capital deployed (cost basis of lots opened) — the headline
+    net_eur: float      # deployed minus released, for context only
+    avg_per_month_eur: float   # gross_eur / months
     partial: bool       # True when history is shorter than the nominal window
 
 
 class ContributionMonthlyItem(BaseModel):
     month: str          # "YYYY-MM"
-    net_eur: float
-    gross_eur: float
+    gross_eur: float    # deployed in the month
+    net_eur: float      # deployed minus released in the month
 
 
 class ContributionsResponse(BaseModel):
