@@ -427,9 +427,6 @@ export function Dashboard() {
               isLoading={chartLoading || positionsLoading || xirrLoading}
             />
 
-            {/* Average money added per month */}
-            <ContributionsStrip data={contributions} isLoading={contributionsLoading} />
-
             {/* Portfolio Value Chart */}
             <Card>
               <CardHeader>
@@ -459,8 +456,12 @@ export function Dashboard() {
                     />
                   </div>
                 </div>
+                {/* Period metrics on the left, average money added on the right — the
+                    contributions strip lives here rather than in a card of its own, and
+                    sits outside the performanceMetrics guard so it survives without them. */}
+                <div className="mt-4 flex flex-wrap items-end justify-between gap-x-8 gap-y-3">
                 {performanceMetrics && (
-                  <div className="mt-4 space-y-2">
+                  <div className="space-y-2">
                     <div className="flex items-center gap-6 text-sm">
                       <div className="flex items-center gap-2">
                         <span className="text-muted-foreground">Period Performance:</span>
@@ -485,6 +486,8 @@ export function Dashboard() {
                     </div>
                   </div>
                 )}
+                  <ContributionsStrip data={contributions} isLoading={contributionsLoading} />
+                </div>
               </CardHeader>
               <CardContent>
                 <PortfolioValueChart
