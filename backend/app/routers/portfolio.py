@@ -19,6 +19,7 @@ from app.schemas.portfolio import (
     BenchmarkResponse,
     BenchmarkInfo,
     PerformanceAttributionResponse,
+    ContributionsResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,18 @@ async def get_portfolio_summary(db: AsyncSession = Depends(get_db)):
     summary = await portfolio_service.get_current_portfolio_summary()
 
     return summary
+
+
+@router.get("/contributions", response_model=ContributionsResponse)
+async def get_contributions(db: AsyncSession = Depends(get_db)):
+    """
+    Average money added to the account per month, over all time / 12M / 6M / 3M.
+
+    Derived from tax lots (capital deployed minus capital released), because the
+    Flex Query carries no deposit rows — see PortfolioService.get_contributions.
+    """
+    portfolio_service = PortfolioService(db)
+    return await portfolio_service.get_contributions()
 
 
 @router.get("/annualized-return", response_model=AnnualizedReturnResponse)

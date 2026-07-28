@@ -41,6 +41,29 @@ export interface TaxLotInfo {
   cost_basis_eur: number;
 }
 
+export interface ContributionWindow {
+  label: 'all' | '12m' | '6m' | '3m';
+  months: number;          // divisor used, clamped to available history
+  // NOTE: *_eur fields carry values in the selected base_currency.
+  net_eur: number;         // capital deployed minus capital released
+  gross_eur: number;       // capital deployed only
+  avg_per_month_eur: number;
+  partial: boolean;        // history shorter than the nominal window
+}
+
+export interface ContributionMonthlyItem {
+  month: string;           // "YYYY-MM"
+  net_eur: number;
+  gross_eur: number;
+}
+
+export interface ContributionsResponse {
+  windows: ContributionWindow[];
+  monthly: ContributionMonthlyItem[];
+  first_contribution_date: string | null;
+  base_currency: string;
+}
+
 export interface AnalystRating {
   strong_buy: number;
   buy: number;
@@ -411,6 +434,10 @@ class ApiClient {
 
   async getPortfolioSummary(): Promise<PortfolioSummary> {
     return this.request<PortfolioSummary>('/api/portfolio/summary');
+  }
+
+  async getContributions(): Promise<ContributionsResponse> {
+    return this.request<ContributionsResponse>('/api/portfolio/contributions');
   }
 
   async getAnnualizedReturn(startDate: string, endDate: string): Promise<AnnualizedReturnResponse> {

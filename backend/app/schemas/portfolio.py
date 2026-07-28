@@ -272,6 +272,29 @@ class DividendSummaryResponse(BaseModel):
     sync_in_progress: bool = False
 
 
+class ContributionWindow(BaseModel):
+    """Average money added per month over one trailing window."""
+    label: str          # "all" | "12m" | "6m" | "3m"
+    months: float       # divisor actually used (clamped to available history)
+    net_eur: float      # capital deployed minus capital released, over the window
+    gross_eur: float    # capital deployed only
+    avg_per_month_eur: float
+    partial: bool       # True when history is shorter than the nominal window
+
+
+class ContributionMonthlyItem(BaseModel):
+    month: str          # "YYYY-MM"
+    net_eur: float
+    gross_eur: float
+
+
+class ContributionsResponse(BaseModel):
+    windows: List[ContributionWindow]
+    monthly: List[ContributionMonthlyItem]
+    first_contribution_date: Optional[str] = None
+    base_currency: str
+
+
 class FundamentalsStatus(BaseModel):
     """Status of fundamentals data cache"""
     total_securities: int

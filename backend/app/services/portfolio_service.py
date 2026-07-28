@@ -3,6 +3,8 @@ Portfolio Service
 Calculates cost basis and market value for the portfolio over time.
 """
 import bisect
+import calendar
+from collections import defaultdict
 from typing import List, Dict, Optional, Tuple
 from datetime import date, timedelta
 from decimal import Decimal
@@ -18,6 +20,21 @@ from app.services.currency_service import CurrencyService
 from app.repositories.app_settings_repository import AppSettingsRepository
 
 logger = logging.getLogger(__name__)
+
+# Average calendar month, used only to express an elapsed span in months so a
+# part-month of history isn't rounded away.
+_DAYS_PER_MONTH = 365.25 / 12
+
+
+def _shift_months(from_date: date, months: int) -> date:
+    """
+    The same day-of-month ``months`` before ``from_date``, clamped to the length
+    of the target month (31 May - 3 months -> 28/29 Feb).
+    """
+    total = from_date.year * 12 + (from_date.month - 1) - months
+    year, month = divmod(total, 12)
+    month += 1
+    return date(year, month, min(from_date.day, calendar.monthrange(year, month)[1]))
 
 
 class BaseFx:
@@ -220,6 +237,104 @@ class PortfolioService:
             "date": daily_value["date"],
             "base_currency": base_fx.base_currency,
             **realized,
+        }
+
+    async def get_contributions(self, as_of: Optional[date] = None) -> Dict:
+        """
+        Average money added to the account per month, over several trailing windows.
+
+        There is no record of cash deposits (the Flex Query only ingests dividends
+        and withholding), so contributions are derived from tax lots, which is a
+        complete source: the sync deletes only *open* lots, and a partial sale is
+        split pro-rata, so the cost basis of every purchase survives under its
+        original open_date for as long as the history goes back.
+
+        Per month: capital deployed (lots OPENED) minus capital released (lots
+        CLOSED, at cost). Net rather than gross, so selling and rebuying nets to
+        zero instead of counting recycled money as fresh savings. Two limits this
+        cannot see: cash from a sale left undeployed reads as a negative month
+        until it is reinvested, and money deposited but never invested is invisible.
+
+        ``as_of`` defaults to today and exists so tests can pin the windows.
+        """
+        as_of = as_of or date.today()
+        base_fx = await self._load_base_fx()
+
+        rows = (await self.db.execute(
+            select(TaxLot.open_date, TaxLot.close_date, TaxLot.cost_basis_eur)
+        )).all()
+
+        # Each lot contributes one positive leg on its open_date and, once sold, a
+        # negative leg on its close_date. Project into the base currency at the date
+        # the leg sits on, then everything downstream is plain date arithmetic.
+        legs: List[Tuple[date, Decimal]] = []
+        first_open: Optional[date] = None
+
+        for open_date, close_date, cost_basis_eur in rows:
+            cost = cost_basis_eur or Decimal("0")
+            if open_date:
+                legs.append((open_date, base_fx.convert(cost, open_date)))
+                if first_open is None or open_date < first_open:
+                    first_open = open_date
+            if close_date:
+                legs.append((close_date, -base_fx.convert(cost, close_date)))
+
+        if first_open is None:
+            return {
+                "windows": [],
+                "monthly": [],
+                "first_contribution_date": None,
+                "base_currency": base_fx.base_currency,
+            }
+
+        monthly_net: Dict[str, Decimal] = defaultdict(Decimal)
+        monthly_gross: Dict[str, Decimal] = defaultdict(Decimal)
+        for on_date, amount in legs:
+            month = on_date.strftime("%Y-%m")
+            monthly_net[month] += amount
+            if amount > 0:
+                monthly_gross[month] += amount
+
+        monthly = [
+            {
+                "month": month,
+                "net_eur": round(float(monthly_net[month]), 2),
+                "gross_eur": round(float(monthly_gross[month]), 2),
+            }
+            for month in sorted(monthly_net)
+        ]
+
+        # Elapsed history caps every window's divisor: a four-month-old portfolio
+        # must not report a 12-month average divided by 12. Floored at one day so
+        # a portfolio opened today can't divide by zero.
+        history_months = max((as_of - first_open).days, 1) / _DAYS_PER_MONTH
+
+        windows = []
+        for label, span in (("all", None), ("12m", 12), ("6m", 6), ("3m", 3)):
+            if span is None:
+                start, months, partial = first_open, history_months, False
+            else:
+                partial = history_months < span
+                months = min(float(span), history_months)
+                start = max(_shift_months(as_of, span), first_open)
+
+            net = sum((a for d, a in legs if start <= d <= as_of), Decimal("0"))
+            gross = sum((a for d, a in legs if start <= d <= as_of and a > 0), Decimal("0"))
+
+            windows.append({
+                "label": label,
+                "months": round(months, 2),
+                "net_eur": round(float(net), 2),
+                "gross_eur": round(float(gross), 2),
+                "avg_per_month_eur": round(float(net) / months, 2) if months > 0 else 0.0,
+                "partial": partial,
+            })
+
+        return {
+            "windows": windows,
+            "monthly": monthly,
+            "first_contribution_date": first_open.isoformat(),
+            "base_currency": base_fx.base_currency,
         }
 
     async def _realized_from_trades(self, base_fx: BaseFx) -> Optional[Dict]:

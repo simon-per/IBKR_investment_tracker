@@ -8,6 +8,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { PortfolioValueChart } from './PortfolioValueChart'
 import { PortfolioSummaryCards } from './PortfolioSummaryCards'
 import { PerformanceMetricsCards } from './PerformanceMetricsCards'
+import { ContributionsStrip } from './ContributionsStrip'
 import { PositionsList } from './PositionsList'
 import { PerformanceAttribution } from './PerformanceAttribution'
 import { MonthlyReturnsHeatmap } from './MonthlyReturnsHeatmap'
@@ -103,6 +104,13 @@ export function Dashboard() {
   const { data: positions, isLoading: positionsLoading } = useQuery({
     queryKey: ['portfolio', 'positions'],
     queryFn: () => api.getPositions(),
+  })
+
+  // Fetch average monthly contributions
+  const { data: contributions, isLoading: contributionsLoading } = useQuery({
+    queryKey: ['portfolio', 'contributions'],
+    queryFn: () => api.getContributions(),
+    staleTime: 30 * 60 * 1000,
   })
 
   // Fetch benchmark comparisons (dynamic based on selection)
@@ -418,6 +426,9 @@ export function Dashboard() {
               metrics={kpiMetrics}
               isLoading={chartLoading || positionsLoading || xirrLoading}
             />
+
+            {/* Average money added per month */}
+            <ContributionsStrip data={contributions} isLoading={contributionsLoading} />
 
             {/* Portfolio Value Chart */}
             <Card>
