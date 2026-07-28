@@ -304,12 +304,15 @@ class ContributionsResponse(BaseModel):
     monthly: List[ContributionMonthlyItem]
     first_contribution_date: Optional[str] = None
     # The splice point: from here the deposit ledger is complete, so money_in switches
-    # from lot cost basis to real deposits.
+    # from lot cost basis to real deposits. What the statements claim to cover, clamped
+    # forward to the ledger's first row — the account is younger than the statement
+    # period that reports it, and the days before it opened are not covered by anything.
     coverage_from: Optional[str] = None
     # The first actual deposit row (>= coverage_from). Earlier deposits went to the
     # previous brokers, so nothing before this is knowable from IBKR.
     deposits_from: Optional[str] = None
-    # Why coverage starts where it does: the incoming broker transfer.
+    # Context for the pre-ledger era: when the holdings arrived from the previous
+    # brokers. Not the boundary — deposits usually predate the positions.
     transfer_in_date: Optional[str] = None
     base_currency: str
 
