@@ -328,10 +328,11 @@ partial sale **pro-rata** under the original `open_date`.
 Deposits take over the moment a ledger exists, because **lot cost basis cannot survive a rotation**:
 selling one ETF to buy another closes lots and opens new ones for the same money, so it is counted twice.
 That is not hypothetical — the Ireland-domiciled sleeve is being switched to US-domiciled ETFs for tax
-reasons. Simulated on real data (307 EUR lots, 22,691 EUR, rotated with no new cash), `money_in` held at
-1,959 / 2,574 / 1,854 / 2,604 per month across the four windows while deployment went 2,012 → 2,885,
-2,688 → 4,579, 2,129 → 5,911 and **2,713 → 10,277**. A deployment-led headline would have claimed four
-times the real 3-month contribution. Pinned by `test_a_rotation_does_not_inflate_money_in`.
+reasons. Simulated on the real lot set (every EUR lot rotated into a USD one, no new cash), `money_in`
+held **exactly flat in all four windows** while deployment roughly **doubled** all-time and went up
+**~4x** over 3M — the shorter the window, the worse the distortion, because the rotation fills more of
+it. A deployment-led headline would have claimed four times the real 3-month contribution. Pinned by
+`test_a_rotation_does_not_inflate_money_in`.
 
 **No double-count at the boundary**, because it is a single date: lots are summed strictly `< coverage_from`
 and deposits strictly `>= coverage_from`. A purchase funded by a deposit in the boundary month contributes
@@ -616,18 +617,19 @@ Lot would emit a row per transferred lot and bury the cash leg in the list that 
 **0 reclassified** — correct, because the transfer carried no cash (see the contributions section).
 No manual reclassification was needed, so the automatic guard has never had to fire on this account.
 
-`deposits_from = 2026-01-09` (which slightly predates the 2026-01-19 transfer), 12,526.60 EUR added,
-including one real withdrawal (−31.89 on 2026-03-26) and a CHF deposit (1,500 on 2026-07-24) that
-exercises the FX path. Note IBKR sends the **legacy** `type="Deposits/Withdrawals"` spelling, not
-`"Deposits & Withdrawals"` — ibflex maps both to `CashAction.DEPOSITWITHDRAW`, so nothing special is
-needed, but don't "fix" the enum comparison if that string looks wrong.
+`deposits_from` lands a few days *before* the transfer date, so the ledger genuinely starts at the
+account's first funding. The set includes one real withdrawal (negative amount, sign preserved) and one
+CHF deposit against an otherwise-EUR ledger, which is what exercises the FX path end to end. Note IBKR
+sends the **legacy** `type="Deposits/Withdrawals"` spelling, not `"Deposits & Withdrawals"` — ibflex maps
+both to `CashAction.DEPOSITWITHDRAW`, so nothing special is needed, but don't "fix" the enum comparison
+if that string looks wrong.
 
-`coverage_from = 2026-01-01` (the statement period start), so all-time and 12M are `spliced` while 6M and
-3M run on **deposits alone** and are already rotation-proof. Money in per month reads
-**1,959 / 2,574 / 1,854 / 2,604** (all / 12M / 6M / 3M) against deployment of 2,012 / 2,688 / 2,129 /
-2,713 — two independent sources agreeing to within ~12% wherever both exist, which is the best available
-evidence that the pre-ledger lot-based figures were sound. 3M is **+33% on all-time**: the savings rate
-rose. `Σ monthly[].net_eur` = 51,209.91, matching total cost basis to the cent.
+`coverage_from` = the statement period start (1 Jan of the current year, since the query is YTD), so
+all-time and 12M are `spliced` while 6M and 3M run on **deposits alone** and are already rotation-proof.
+Where both sources overlap they agree to within **~12%** — two independent derivations (lot cost basis
+vs. the cash ledger) landing that close is the best available evidence that the pre-ledger lot-based
+figures were sound. `Σ monthly[].net_eur` matches total cost basis **to the cent**, which is the identity
+check described in the contributions section.
 
 **That statement carried a large IBKR schema drift and needed no code change.** 20+ new attributes
 (`figi`, `issuerCountryCode`, `serialNumber`, `weight`, `subCategory`, `exDate`, `dividendType`,
