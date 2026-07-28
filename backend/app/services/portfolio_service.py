@@ -254,6 +254,10 @@ class PortfolioService:
           they have lots, so nothing was re-based to the transfer date).
         - From ``coverage_from`` onward, from **real deposits**.
 
+        ``coverage_from`` is what the statements claim to cover, clamped forward to the
+        first row the ledger actually holds — the account is routinely younger than the
+        statement period that reports it.
+
         The split exists because lot cost basis cannot survive a rotation: selling one
         ETF to buy another closes lots and opens new ones, so the same money is
         deployed twice. A deposit has a single leg and cannot be inflated that way, so
@@ -318,6 +322,17 @@ class PortfolioService:
         coverage_from = await AppSettingsRepository(self.db).get_cash_flows_covered_from()
         if coverage_from is None:
             coverage_from = deposits_from
+
+        # ...but never before the ledger's first row of any kind. A YTD statement in the
+        # account's first year starts on 1 January while the account was funded weeks
+        # later, and in that gap an empty deposit list means the money went to another
+        # broker — not that none was added. Taking the statement's word for it drops
+        # those purchases from both sides: past the lot cutoff, with no deposit to
+        # replace them. Clamping forward hands the gap back to lot cost basis, which is
+        # the correct source for any era the ledger does not reach.
+        ledger_starts_at = await flow_repo.earliest_flow_date()
+        if coverage_from and ledger_starts_at and ledger_starts_at > coverage_from:
+            coverage_from = ledger_starts_at
 
         if first_open is None:
             return {

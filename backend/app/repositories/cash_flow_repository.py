@@ -83,6 +83,21 @@ class CashFlowRepository:
         )
         return result.scalar()
 
+    async def earliest_flow_date(self) -> Optional[date]:
+        """
+        Date of the oldest row of ANY type — when the ledger first had anything to say.
+
+        Deliberately not filtered the way get_deposits() is. A transfer is never money
+        in, but it is still evidence that the account existed and was reporting, which
+        is the only question being asked here: the ledger cannot claim to cover dates
+        on which it holds no rows at all. A statement period routinely starts before
+        the account did (a Year-to-Date query in the account's first year), and in that
+        slice an empty deposit list means the money went to another broker, not that no
+        money was added — so the contributions splice clamps to this date.
+        """
+        result = await self.session.execute(select(func.min(CashFlow.flow_date)))
+        return result.scalar()
+
     async def count(self) -> int:
         result = await self.session.execute(select(func.count(CashFlow.id)))
         return int(result.scalar() or 0)

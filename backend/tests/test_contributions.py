@@ -314,7 +314,9 @@ async def test_money_in_splices_lots_before_coverage_and_deposits_after():
 
         report = await PortfolioService(session).get_contributions(as_of=date(2026, 6, 30))
 
-        assert report["coverage_from"] == "2026-01-01"
+        # Stored coverage says 1 Jan, but the ledger's first row is 5 Feb, so that is
+        # where the splice actually falls. No money moves — the lot is older than both.
+        assert report["coverage_from"] == "2026-02-05"
         assert report["deposits_from"] == "2026-02-05"
 
         # 3M starts after the boundary: deposits only, no lot contribution.
@@ -359,6 +361,77 @@ async def test_the_boundary_month_counts_deposits_not_purchases():
         assert w_all["money_in_eur"] == 1700.0
         # Deployment still sees both purchases; that is the difference between them.
         assert w_all["deployed_eur"] == 1750.0
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_coverage_cannot_start_before_the_ledger_has_any_row():
+    """
+    The real shape of this account's first weeks, and the reason the splice is clamped.
+
+    A Year-to-Date statement reports from 1 January, but the IBKR account was not funded
+    until the 9th. In that gap the deposits table is empty because the money was still
+    going to the previous broker — so taking the statement's coverage claim at face value
+    drops those purchases from BOTH sides: past the lot cutoff, with no deposit standing
+    in for them. The boundary therefore moves forward to the ledger's first row.
+    """
+    engine, session = await _make_session()
+    try:
+        session.add(_lot(date(2024, 5, 28), "5000"))          # pre-IBKR investing
+        session.add(_lot(date(2026, 1, 5), "156.61"))         # bought at the old broker
+        session.add(_flow(date(2026, 1, 9), "1000", "D1"))    # account funded
+        session.add(_flow(date(2026, 1, 10), "400", "D2"))
+        session.add(_flow(date(2026, 1, 19), "0", "TR1", flow_type=TRANSFER_IN))
+        session.add(_lot(date(2026, 1, 23), "200"))           # bought at IBKR, from D1/D2
+        await AppSettingsRepository(session).widen_cash_flows_covered_from(date(2026, 1, 1))
+        await session.commit()
+
+        report = await PortfolioService(session).get_contributions(as_of=date(2026, 3, 31))
+
+        # Not 2026-01-01, which is what the statement period claims.
+        assert report["coverage_from"] == "2026-01-09"
+
+        w_all = _window(report, "all")
+        assert w_all["money_in_method"] == "spliced"
+        assert w_all["deposits_eur"] == 1400.0
+        # 5,000 + 156.61 pre-ledger cost basis + 1,400 of deposits. The 23 Jan purchase
+        # is post-boundary and counts through the deposit that funded it, not twice.
+        assert w_all["money_in_eur"] == 6556.61
+        # Deployment still sees every purchase, which is the difference between them.
+        assert w_all["deployed_eur"] == 5356.61
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_transfer_row_alone_anchors_the_ledger_start():
+    """
+    The clamp keys on the ledger's first row of ANY type, not the first deposit.
+
+    An account opened by an in-kind transfer can trade before any cash is ever deposited.
+    Anchoring on the first deposit would leave that window on the lot side, where a
+    rotation inflates it — exactly what the splice exists to prevent.
+    """
+    engine, session = await _make_session()
+    try:
+        session.add(_lot(date(2025, 3, 10), "9000"))          # transferred-in history
+        session.add(_flow(date(2026, 1, 19), "0", "TR1", flow_type=TRANSFER_IN))
+        session.add(_lot(date(2026, 1, 25), "800"))           # funded by a sale, not cash
+        session.add(_flow(date(2026, 2, 5), "1000", "D1"))    # first actual deposit
+        await AppSettingsRepository(session).widen_cash_flows_covered_from(date(2026, 1, 1))
+        await session.commit()
+
+        report = await PortfolioService(session).get_contributions(as_of=date(2026, 3, 31))
+
+        assert report["coverage_from"] == "2026-01-19"        # the transfer, not 5 Feb
+        w_all = _window(report, "all")
+        # 9,000 pre-ledger + the 1,000 deposit. The 25 Jan purchase sits after the
+        # boundary and contributes nothing — no new money arrived to fund it.
+        assert w_all["money_in_eur"] == 10000.0
+        assert w_all["deployed_eur"] == 9800.0
     finally:
         await session.close()
         await engine.dispose()
@@ -419,7 +492,12 @@ async def test_a_withdrawal_reduces_money_in():
 
         report = await PortfolioService(session).get_contributions(as_of=date(2026, 3, 31))
 
-        assert _window(report, "all")["money_in_eur"] == 1500.0
+        w_all = _window(report, "all")
+        # The withdrawal is the thing under test: 2,000 in less 500 out.
+        assert w_all["deposits_eur"] == 1500.0
+        # Plus the January lot, which predates the ledger's first row (3 Feb) and so
+        # is measured from cost basis rather than dropped.
+        assert w_all["money_in_eur"] == 2500.0
     finally:
         await session.close()
         await engine.dispose()
@@ -481,8 +559,11 @@ async def test_base_currency_projection_scales_both_metrics():
         assert report["base_currency"] == "CHF"
         w_all = _window(report, "all")
         assert w_all["deployed_eur"] == 950.0    # 1000 EUR * 0.95
-        assert w_all["money_in_eur"] == 380.0    # 400 EUR * 0.95, deposits govern here
-        assert w_all["money_in_method"] == "deposits"
+        # Spliced, so both conversion paths run: the lot at its open_date and the
+        # deposit at its own flow_date. 950 + 380.
+        assert w_all["money_in_method"] == "spliced"
+        assert w_all["deposits_eur"] == 380.0    # 400 EUR * 0.95
+        assert w_all["money_in_eur"] == 1330.0
     finally:
         await session.close()
         await engine.dispose()

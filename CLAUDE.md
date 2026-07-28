@@ -347,6 +347,29 @@ established. It must be the period start, not the first deposit's date: a covere
 still covered, and using the first row would hand that week's purchases to the lot side *and* count its
 deposits.
 
+**But the period start is a claim, not evidence, and `get_contributions()` clamps it forward to
+`CashFlowRepository.earliest_flow_date()`** — the first row the ledger holds, of *any* type. **The account
+is younger than the statement that reports it**: a YTD query in the first year begins on 1 January while
+the account was funded weeks later, and in that gap the deposits table is empty because the money was
+still going to the previous broker. Believing the claim drops those purchases from **both** sides — past
+the lot cutoff, with no deposit standing in for them — so they vanish from money in with nothing
+reporting it. Clamping hands the gap back to lot cost basis, which is the right source for any era the
+ledger doesn't reach.
+
+Two details. It keys on the earliest row of **any** type, not the earliest deposit: an account opened by
+an in-kind transfer can trade before any cash is deposited, and anchoring on the first deposit would
+leave that window on the lot side where a rotation inflates it. A transfer is never money in, but it *is*
+evidence the account existed. And the clamp is applied at **read** time rather than stored, so it needs no
+migration, a later YTD sync can't undo it, and a prior-year import — planned for the 2025 tax backfill —
+can't silently move the boundary back into an era the ledger has nothing for.
+
+Do **not** "simplify" this by splicing at the transfer date instead. Deposits into the new account
+routinely start *before* the positions arrive, and those deposits fund purchases made after it; a
+transfer-date boundary drops them from the deposit side while their lots sit past the lot cutoff. On this
+account that is the larger error of the two. Tests:
+`test_coverage_cannot_start_before_the_ledger_has_any_row`,
+`test_a_transfer_row_alone_anchors_the_ledger_start`.
+
 ### `deployed_eur` — secondary, and deliberately still shown
 
 Cost basis of lots opened, the old headline. Once rotation starts it exceeds `money_in_eur`, and **that gap
@@ -624,8 +647,13 @@ sends the **legacy** `type="Deposits/Withdrawals"` spelling, not `"Deposits & Wi
 both to `CashAction.DEPOSITWITHDRAW`, so nothing special is needed, but don't "fix" the enum comparison
 if that string looks wrong.
 
-`coverage_from` = the statement period start (1 Jan of the current year, since the query is YTD), so
-all-time and 12M are `spliced` while 6M and 3M run on **deposits alone** and are already rotation-proof.
+`coverage_from` = the ledger's **first row**, in the second week of January — *not* the statement period
+start, which is 1 Jan because the query is YTD. The account's first deposit and its first execution land
+on the same day, so that is genuinely the date IBKR becomes the whole picture; the clamp described in the
+contributions section is what stops the pre-account days of January being claimed as covered and their
+purchases dropped. The incoming transfer arrives *later* than that date, which is why the boundary is the
+ledger start and not the transfer. All-time and 12M come out `spliced`; 6M and 3M run on
+**deposits alone** and are already rotation-proof.
 Where both sources overlap they agree to within **~12%** — two independent derivations (lot cost basis
 vs. the cash ledger) landing that close is the best available evidence that the pre-ledger lot-based
 figures were sound. `Σ monthly[].net_eur` matches total cost basis **to the cent**, which is the identity
