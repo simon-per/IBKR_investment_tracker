@@ -2,10 +2,11 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal, get_db
+from app.schemas.portfolio import DividendBreakdownResponse
 from app.services.dividend_service import DividendService
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,22 @@ async def get_dividend_summary(
             summary["sync_in_progress"] = True
 
     return summary
+
+
+@router.get("/breakdown", response_model=DividendBreakdownResponse)
+async def get_dividend_breakdown(
+    year: Optional[int] = Query(None, ge=2000, le=2100),
+    forecast: bool = Query(True),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Dividends grouped by month × symbol with per-security totals and optional
+    cadence-based forecast projections. Reads only cached data — unlike /summary
+    it never enqueues a sync, so it can never touch Yahoo.
+    """
+    return await DividendService(db).get_dividend_breakdown(
+        year=year, include_forecast=forecast
+    )
 
 
 @router.post("/sync")

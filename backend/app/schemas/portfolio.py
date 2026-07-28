@@ -3,7 +3,7 @@ Portfolio Schemas
 Pydantic models for portfolio API responses.
 """
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import Dict, List, Optional
 from datetime import date
 
 
@@ -270,6 +270,42 @@ class DividendSummaryResponse(BaseModel):
     total_eur: float
     last_updated: Optional[str] = None
     sync_in_progress: bool = False
+
+
+class DividendMonthBar(BaseModel):
+    """One month of the dividends chart: net amounts per symbol, actual vs forecast."""
+    month: str                      # "YYYY-MM"
+    actual: Dict[str, float]        # symbol -> net received (base currency)
+    forecast: Dict[str, float]      # symbol -> projected net (cadence-based)
+    actual_total_eur: float
+    forecast_total_eur: float
+
+
+class DividendSecurityRow(BaseModel):
+    """Per-security dividend totals for the selected window."""
+    security_id: int
+    symbol: str
+    description: str
+    payouts: int
+    gross_eur: float
+    withholding_eur: float
+    net_eur: float
+    forecast_payouts: int
+    forecast_net_eur: float
+    trailing_yield_pct: Optional[float] = None  # TTM net / current market value
+    source: Optional[str] = None    # 'ibkr' | 'estimate' | 'mixed'; None = forecast-only
+
+
+class DividendBreakdownResponse(BaseModel):
+    years: List[int]
+    year: Optional[int] = None      # None = all time
+    months: List[DividendMonthBar]
+    securities: List[DividendSecurityRow]
+    total_net_eur: float
+    total_forecast_net_eur: float
+    # Era-splice boundary: yfinance estimates strictly before, IBKR rows from here.
+    ibkr_from: Optional[str] = None
+    base_currency: str
 
 
 class ContributionWindow(BaseModel):
