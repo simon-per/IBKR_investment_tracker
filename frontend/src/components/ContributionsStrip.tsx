@@ -110,12 +110,19 @@ export function ContributionsStrip({ data, isLoading }: ContributionsStripProps)
                 <div className="text-lg font-semibold tabular-nums">
                   {formatCurrency(w.avg_money_in_per_month_eur)}
                   {w.partial && <span className="text-muted-foreground">*</span>}
+                  {/* Deployed rides along as a suffix rather than its own line: the
+                      gap between the two is the rotation signal, so it has to be
+                      visible without hovering, but it must not compete for the eye.
+                      Omitted under the 'deployed' method, where money in IS deployment
+                      and the suffix would just repeat the number beside it. */}
+                  {w.money_in_method !== 'deployed' && (
+                    <span className="ml-1 text-xs font-normal text-muted-foreground">
+                      /{w.avg_deployed_per_month_eur.toLocaleString('en-US', { maximumFractionDigits: 0 })}
+                    </span>
+                  )}
                 </div>
                 <div className={cn('text-xs tabular-nums', delta === null ? 'invisible' : deltaColor(delta))}>
                   {delta !== null && `${delta >= 0 ? '+' : ''}${delta.toFixed(0)}%`}
-                </div>
-                <div className="text-xs tabular-nums text-muted-foreground">
-                  {formatCurrency(w.avg_deployed_per_month_eur)} out
                 </div>
               </div>
             )
