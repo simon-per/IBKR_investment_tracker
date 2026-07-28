@@ -332,6 +332,41 @@ export interface DividendSummaryResponse {
   sync_in_progress: boolean;
 }
 
+export interface DividendMonthBar {
+  month: string;                    // "YYYY-MM"
+  // NOTE: values carry the selected base_currency.
+  actual: Record<string, number>;   // symbol -> net received
+  forecast: Record<string, number>; // symbol -> projected net (cadence-based)
+  actual_total_eur: number;
+  forecast_total_eur: number;
+}
+
+export interface DividendSecurityRow {
+  security_id: number;
+  symbol: string;
+  description: string;
+  payouts: number;
+  gross_eur: number;
+  withholding_eur: number;
+  net_eur: number;
+  forecast_payouts: number;
+  forecast_net_eur: number;
+  trailing_yield_pct: number | null;
+  source: 'ibkr' | 'estimate' | 'mixed' | null; // null = forecast-only row
+}
+
+export interface DividendBreakdownResponse {
+  years: number[];
+  year: number | null;              // null = all time
+  months: DividendMonthBar[];
+  securities: DividendSecurityRow[];
+  total_net_eur: number;
+  total_forecast_net_eur: number;
+  /** Era-splice boundary: estimates strictly before, IBKR actuals from here. */
+  ibkr_from: string | null;
+  base_currency: string;
+}
+
 export interface TaxDividendRow {
   symbol: string | null;
   description: string | null;
@@ -593,6 +628,14 @@ class ApiClient {
 
   async syncDividends(): Promise<{ status: string; message: string }> {
     return this.request('/api/dividends/sync', { method: 'POST' });
+  }
+
+  /** Read-only breakdown — unlike /summary it never enqueues a background sync. */
+  async getDividendBreakdown(year?: number): Promise<DividendBreakdownResponse> {
+    const params = new URLSearchParams();
+    if (year !== undefined) params.set('year', String(year));
+    const qs = params.toString();
+    return this.request<DividendBreakdownResponse>(`/api/dividends/breakdown${qs ? `?${qs}` : ''}`);
   }
 
   // Tax endpoints
