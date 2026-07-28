@@ -826,6 +826,110 @@ class IBKRService:
         logger.info(f"Extracted {len(txns)} dividend/withholding cash transaction(s) from Flex <CashTransactions>")
         return txns
 
+    async def extract_cash_flows(self, flex_data: Dict) -> List[Dict]:
+        """
+        Extract external deposits and withdrawals from <CashTransactions>.
+
+        A sibling of extract_cash_transactions rather than an extension of it,
+        because that one requires a ``conid`` to link a dividend to a security and
+        deposits have none — widening its filter would drop every row anyway.
+
+        Needs 'Deposits & Withdrawals' enabled on the Flex Query; returns [] when
+        the section is absent or the option is off, which is a normal state, not an
+        error. ``amount`` keeps IBKR's sign: deposits positive, withdrawals
+        negative. ``CashAction.DEPOSITWITHDRAW`` is a single enum value covering
+        both directions, so that sign is the only thing telling them apart.
+        """
+        statement = flex_data['statement']
+        ct_section = getattr(statement, 'CashTransactions', None)
+        if not ct_section:
+            return []
+
+        flows: List[Dict] = []
+        for ct in ct_section:
+            ct_type = getattr(ct, 'type', None)
+            if ct_type is not ibflex_enums.CashAction.DEPOSITWITHDRAW:
+                continue
+
+            # settleDate first: when the cash actually landed, not when it was announced.
+            flow_date = _as_date(getattr(ct, 'settleDate', None)) or _as_date(getattr(ct, 'dateTime', None)) \
+                or _as_date(getattr(ct, 'reportDate', None))
+            if not flow_date:
+                continue
+
+            amount = _dec(getattr(ct, 'amount', None))
+            if not amount:
+                # A zero or missing amount moves no money; keeping it would only add
+                # a row that every consumer has to skip.
+                continue
+
+            currency = getattr(ct, 'currency', None)
+            ib_key = (
+                getattr(ct, 'transactionID', None)
+                or f"CF-{_enum_name(ct_type)}-{flow_date}-{amount}-{currency}"
+            )
+
+            flows.append({
+                'ib_key': str(ib_key),
+                'flow_date': flow_date,
+                'flow_type': _enum_name(ct_type),  # DEPOSITWITHDRAW
+                'amount': amount,
+                'currency': currency,
+                'description': getattr(ct, 'description', None),
+            })
+
+        logger.info(f"Extracted {len(flows)} deposit/withdrawal(s) from Flex <CashTransactions>")
+        return flows
+
+    async def extract_transfers(self, flex_data: Dict) -> List[Dict]:
+        """
+        Extract position transfers (ACATS / internal) from the Flex <Transfers> section.
+
+        These are not money added — an incoming transfer moves capital that was
+        already saved somewhere else, so counting it as a contribution would show a
+        large fake deposit in a month with no new savings. They are recorded so that
+        cash arriving this way can be positively identified and excluded, and so an
+        in-kind transfer is still on the record at zero cash.
+
+        Returns [] if the section isn't enabled. ``cash_transfer`` is the cash leg
+        (often zero for an in-kind transfer); ``position_amount`` is the securities
+        value, kept for the description rather than treated as cash.
+        """
+        statement = flex_data['statement']
+        tr_section = getattr(statement, 'Transfers', None)
+        if not tr_section:
+            return []
+
+        transfers: List[Dict] = []
+        for tr in tr_section:
+            transfer_date = _as_date(getattr(tr, 'date', None)) \
+                or _as_date(getattr(tr, 'reportDate', None))
+            if not transfer_date:
+                continue
+
+            symbol = getattr(tr, 'symbol', None)
+            ib_key = (
+                getattr(tr, 'transactionID', None)
+                or f"TR-{transfer_date}-{symbol}-{getattr(tr, 'quantity', '')}"
+            )
+
+            transfers.append({
+                'ib_key': str(ib_key),
+                'transfer_date': transfer_date,
+                'transfer_type': _enum_name(getattr(tr, 'type', None)) or 'UNKNOWN',  # INTERNAL / ACATS
+                'direction': _enum_name(getattr(tr, 'direction', None)) or 'UNKNOWN',  # IN / OUT
+                'cash_transfer': _dec(getattr(tr, 'cashTransfer', None)) or Decimal("0"),
+                'position_amount': _dec(getattr(tr, 'positionAmount', None)),
+                'quantity': _dec(getattr(tr, 'quantity', None)),
+                'symbol': symbol,
+                'conid': str(getattr(tr, 'conid', None) or '') or None,
+                'currency': getattr(tr, 'currency', None),
+                'company': getattr(tr, 'company', None),
+            })
+
+        logger.info(f"Extracted {len(transfers)} transfer(s) from Flex <Transfers>")
+        return transfers
+
     async def get_portfolio_summary(self) -> Dict:
         """
         Get a quick summary of the portfolio from IBKR.

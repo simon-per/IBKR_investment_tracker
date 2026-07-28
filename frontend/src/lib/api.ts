@@ -49,6 +49,12 @@ export interface ContributionWindow {
   net_eur: number;         // deployed minus released, for context only
   avg_per_month_eur: number;  // gross_eur / months
   partial: boolean;        // history shorter than the nominal window
+  // Real external money. null until the Flex Query delivers deposits; broker
+  // transfers are excluded, so this never counts capital saved elsewhere.
+  added_eur: number | null;
+  added_months: number | null;
+  avg_added_per_month_eur: number | null;
+  added_covered: boolean;  // false when the window predates the deposit ledger
 }
 
 export interface ContributionMonthlyItem {
@@ -61,6 +67,8 @@ export interface ContributionsResponse {
   windows: ContributionWindow[];
   monthly: ContributionMonthlyItem[];
   first_contribution_date: string | null;
+  deposits_from: string | null;    // where the deposit ledger starts
+  transfer_in_date: string | null; // the incoming broker transfer that explains it
   base_currency: string;
 }
 

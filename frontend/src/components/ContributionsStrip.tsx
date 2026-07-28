@@ -26,13 +26,18 @@ function deltaColor(pct: number): string {
 }
 
 /**
- * Average capital deployed per month, over all time / 12M / 6M / 3M, with each
- * trailing window shown as a delta against the all-time average — the comparison
- * that reveals a slowing rate of investment.
+ * Average capital deployed per month, over all time / 12M / 6M / 3M, each trailing
+ * window shown as a delta against the all-time average — the comparison that
+ * reveals a slowing rate of investment.
  *
- * Gross: the cost basis of the lots opened in each month. Buying with proceeds
- * from a sale is still deployment, so it counts; cash sitting uninvested is not,
- * so it doesn't. See PortfolioService.get_contributions.
+ * Deployed (primary) is the cost basis of the lots opened in each month. It spans
+ * the whole history including the pre-IBKR years, because the broker transfer
+ * carried every lot across with its original date and cost basis.
+ *
+ * Added (secondary) is real deposits, which are strictly more accurate but only
+ * exist from `deposits_from` onward — earlier deposits went to the previous
+ * brokers. It is rendered only for windows it actually covers; showing it for the
+ * rest would read as "you saved nothing", which is the opposite of the truth.
  */
 export function ContributionsStrip({ data, isLoading }: ContributionsStripProps) {
   const formatCurrency = useFormatCurrency()
@@ -50,12 +55,24 @@ export function ContributionsStrip({ data, isLoading }: ContributionsStripProps)
   if (!data || data.windows.length === 0) return null
 
   const baseline = data.windows.find(w => w.label === 'all')?.avg_per_month_eur ?? 0
+  const showAdded = data.windows.some(w => w.added_covered)
+
+  const labelTitle = data.deposits_from
+    ? `Deployed is the cost basis of the lots bought in each period — it covers the whole `
+      + `history, including the holdings transferred in`
+      + (data.transfer_in_date ? ` on ${data.transfer_in_date}` : '')
+      + `, which kept their original purchase dates. Added is real deposits, known only `
+      + `from ${data.deposits_from} onward because earlier deposits went to the previous `
+      + `broker; transfers are never counted as added.`
+    : `Cost basis of the lots bought in each period, at the exchange rate on each `
+      + `purchase date. Enable 'Deposits & Withdrawals' on the Flex Query to also see `
+      + `real deposits.`
 
   return (
     <Card>
       <CardContent className="py-4">
         <div className="flex flex-wrap items-start gap-x-10 gap-y-4">
-          <div className="flex items-center gap-2 pt-1">
+          <div className="flex items-center gap-2 pt-1" title={labelTitle}>
             <PiggyBank className="h-4 w-4 text-muted-foreground" />
             <span className="text-sm font-medium">Avg Monthly Invested</span>
           </div>
@@ -69,7 +86,9 @@ export function ContributionsStrip({ data, isLoading }: ContributionsStripProps)
               `${WINDOW_LABELS[w.label]}: ${formatCurrency(w.gross_eur)} deployed over ${w.months.toFixed(1)} months`,
               `${formatCurrency(w.net_eur)} of that is still invested after sales`,
               w.partial ? `* only ${w.months.toFixed(1)} months of history available` : null,
-              'Cost basis of the lots opened in the period, at the exchange rate on each purchase date.',
+              w.added_covered && w.added_eur !== null
+                ? `${formatCurrency(w.added_eur)} actually deposited over the same period`
+                : null,
             ].filter(Boolean).join(' · ')
 
             return (
@@ -84,6 +103,13 @@ export function ContributionsStrip({ data, isLoading }: ContributionsStripProps)
                 <div className={cn('text-xs tabular-nums', delta === null ? 'invisible' : deltaColor(delta))}>
                   {delta !== null && `${delta >= 0 ? '+' : ''}${delta.toFixed(0)}%`}
                 </div>
+                {showAdded && (
+                  <div className="text-xs tabular-nums text-muted-foreground">
+                    {w.added_covered && w.avg_added_per_month_eur !== null
+                      ? `${formatCurrency(w.avg_added_per_month_eur)} in`
+                      : <span className="opacity-60">—</span>}
+                  </div>
+                )}
               </div>
             )
           })}

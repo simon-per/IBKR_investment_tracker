@@ -273,13 +273,21 @@ class DividendSummaryResponse(BaseModel):
 
 
 class ContributionWindow(BaseModel):
-    """Average capital deployed per month over one trailing window."""
+    """Capital deployed, and real money added, per month over one trailing window."""
     label: str          # "all" | "12m" | "6m" | "3m"
     months: float       # divisor actually used (clamped to available history)
     gross_eur: float    # capital deployed (cost basis of lots opened) — the headline
     net_eur: float      # deployed minus released, for context only
     avg_per_month_eur: float   # gross_eur / months
     partial: bool       # True when history is shorter than the nominal window
+    # Deposits side. None until the Flex Query delivers Deposits & Withdrawals;
+    # transfers are excluded, so this is external money only.
+    added_eur: Optional[float] = None
+    added_months: Optional[float] = None
+    avg_added_per_month_eur: Optional[float] = None
+    # False when the window reaches back before the deposit ledger begins, in which
+    # case the added average covers only the part that has data.
+    added_covered: bool = False
 
 
 class ContributionMonthlyItem(BaseModel):
@@ -292,6 +300,11 @@ class ContributionsResponse(BaseModel):
     windows: List[ContributionWindow]
     monthly: List[ContributionMonthlyItem]
     first_contribution_date: Optional[str] = None
+    # Where the deposit ledger starts. Earlier deposits went to the previous brokers,
+    # so nothing before this is knowable from IBKR.
+    deposits_from: Optional[str] = None
+    # Why it starts there: the incoming broker transfer.
+    transfer_in_date: Optional[str] = None
     base_currency: str
 
 

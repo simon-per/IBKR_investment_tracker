@@ -59,6 +59,8 @@ async def ingest(path: Path, dry_run: bool = False) -> int:
             "trades": len(await service.extract_trades(flex_data)),
             "corporate_actions": len(await service.extract_corporate_actions(flex_data)),
             "cash_transactions": len(await service.extract_cash_transactions(flex_data)),
+            "cash_flows": len(await service.extract_cash_flows(flex_data)),
+            "transfers": len(await service.extract_transfers(flex_data)),
             "taxlots": len(await service.extract_taxlots(flex_data)),
         }
         print("DRY RUN - nothing written. Would ingest:")

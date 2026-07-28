@@ -34,6 +34,8 @@ from app.repositories.taxlot_repository import TaxLotRepository
 from app.repositories.trade_repository import TradeRepository
 from app.repositories.corporate_action_repository import CorporateActionRepository
 from app.repositories.market_price_repository import MarketPriceRepository
+from app.repositories.cash_flow_repository import CashFlowRepository
+from app.models.cash_flow import DEPOSIT_WITHDRAW, TRANSFER, TRANSFER_IN, TRANSFER_OUT
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +105,15 @@ async def ingest_flex_statement(db, flex_data: Dict) -> Dict:
         cash_txns, conid_to_security_id
     )
 
+    # Deposits/withdrawals from the same section — the only record of external money,
+    # since lot cost basis cannot tell new money from redeployed sale proceeds. Transfers
+    # come along so an incoming one can be excluded rather than read as a contribution.
+    cash_flows_data = await ibkr_service.extract_cash_flows(flex_data)
+    transfers_data = await ibkr_service.extract_transfers(flex_data)
+    flows = await persist_cash_flows(
+        CashFlowRepository(db), currency_service, cash_flows_data, transfers_data,
+    )
+
     last_sync_date = await app_settings.get_last_sync_to_date()
     taxlots_data = await ibkr_service.extract_taxlots(flex_data)
 
@@ -131,6 +142,16 @@ async def ingest_flex_statement(db, flex_data: Dict) -> Dict:
             f"Skipped {recon['taxlots_skipped']} taxlot(s) with unsupported currencies: "
             f"{', '.join(sorted(recon['skipped_currencies']))}"
         )
+    if flows["skipped_currencies"]:
+        warnings.append(
+            f"Skipped {flows['cash_flows_skipped']} deposit/withdrawal(s) with unsupported "
+            f"currencies: {', '.join(sorted(flows['skipped_currencies']))}"
+        )
+    if flows["deposits_reclassified_as_transfer"]:
+        warnings.append(
+            f"Reclassified {flows['deposits_reclassified_as_transfer']} deposit(s) as "
+            f"TRANSFER (matched a position transfer's cash leg) — excluded from money added"
+        )
     warnings.extend(invalidated["notes"])
     warnings.extend(flex_data.get('flex_warnings') or [])
 
@@ -145,11 +166,132 @@ async def ingest_flex_statement(db, flex_data: Dict) -> Dict:
         "corporate_actions_seen": len(corp_actions_data),
         "prices_invalidated": invalidated["prices_invalidated"],
         "cash_transactions_seen": len(cash_txns),
+        "cash_flows_seen": flows["cash_flows_seen"],
+        "cash_flows_skipped": flows["cash_flows_skipped"],
+        "transfers_seen": flows["transfers_seen"],
+        "deposits_reclassified_as_transfer": flows["deposits_reclassified_as_transfer"],
         "total_cost_basis_eur": float(recon["total_cost_basis_eur"]),
         "account_id": flex_data['account_id'],
         "data_from": str(flex_data['from_date']) if flex_data['from_date'] else None,
         "data_to": str(flex_data['to_date']) if flex_data['to_date'] else None,
         "warnings": warnings,
+    }
+
+
+def _transfer_to_flow(transfer: Dict) -> Dict:
+    """
+    Render a <Transfers> row as a cash_flows row of type TRANSFER.
+
+    The amount is the cash leg only — often zero, because an in-kind transfer moves
+    securities. The securities value goes in the description rather than the amount:
+    it is not cash, and treating it as such would recreate the double-count this
+    whole feature exists to remove (the transferred lots already carry their original
+    open_date and cost basis, so their purchase is recorded in the month it happened).
+    """
+    direction = (transfer.get("direction") or "").upper()
+    flow_type = {"IN": TRANSFER_IN, "OUT": TRANSFER_OUT}.get(direction, TRANSFER)
+
+    parts = [p for p in (
+        transfer.get("transfer_type"),
+        direction or None,
+        f"from {transfer['company']}" if transfer.get("company") else None,
+        transfer.get("symbol"),
+        f"position {transfer['position_amount']}" if transfer.get("position_amount") else None,
+    ) if p]
+    return {
+        "ib_key": transfer["ib_key"],
+        "flow_date": transfer["transfer_date"],
+        "flow_type": flow_type,
+        "amount": transfer.get("cash_transfer") or Decimal("0"),
+        "currency": transfer.get("currency"),
+        "description": " ".join(str(p) for p in parts)[:255] or None,
+    }
+
+
+async def persist_cash_flows(
+    cash_flow_repo: CashFlowRepository,
+    currency_service: CurrencyService,
+    cash_flows_data: List[Dict],
+    transfers_data: Optional[List[Dict]] = None,
+) -> Dict:
+    """
+    Idempotently upsert deposits/withdrawals and transfers, converting each to EUR at
+    its own flow_date (matching how tax lots and dividends are stored).
+
+    Purely additive — nothing is ever deleted — so unlike tax lot reconciliation this
+    needs no empty-statement wipe guard: a statement without the Deposits &
+    Withdrawals option simply contributes nothing.
+
+    **Transfers are reclassified out of the deposit series.** IBKR may book the cash
+    leg of an incoming transfer as an ordinary "Deposits & Withdrawals" row, and
+    counting it would report a large contribution in a month with no new savings —
+    the money was saved earlier, at another broker. Any deposit whose
+    (date, amount, currency) matches a transfer's cash leg is therefore stored as
+    TRANSFER instead. The match is exact, never on description text.
+
+    An unconvertible currency skips that one row and is reported, never raised. A
+    deposit failing to land must not fail the whole sync; the contributions report
+    already distinguishes "no data here" from "no money here" via its coverage floor.
+    """
+    transfers_data = transfers_data or []
+    transfer_flows = [_transfer_to_flow(t) for t in transfers_data]
+
+    # Cash legs to recognise transfer-funded deposits by, mapped to the transfer's own
+    # direction so a reclassified row keeps it. Zero-cash (in-kind) transfers are left
+    # out of the key set — every no-cash transfer would otherwise collide on (date, 0).
+    transfer_cash_keys = {
+        (f["flow_date"], f["amount"], f["currency"]): f["flow_type"]
+        for f in transfer_flows if f["amount"]
+    }
+
+    seen = 0
+    skipped = 0
+    reclassified = 0
+    skipped_currencies: Set[str] = set()
+
+    for flow in list(cash_flows_data) + transfer_flows:
+        flow = dict(flow)
+        matched = transfer_cash_keys.get(
+            (flow["flow_date"], flow["amount"], flow["currency"])
+        ) if flow["flow_type"] == DEPOSIT_WITHDRAW else None
+        if matched:
+            logger.info(
+                f"Reclassifying deposit {flow['ib_key']} ({flow['amount']} "
+                f"{flow['currency']} on {flow['flow_date']}) as {matched}: it matches "
+                f"the cash leg of a position transfer, so it is not money added"
+            )
+            flow["flow_type"] = matched
+            reclassified += 1
+
+        try:
+            amount_eur = await currency_service.convert_to_eur(
+                amount=flow["amount"],
+                from_currency=flow["currency"],
+                target_date=flow["flow_date"],
+            )
+        except ValueError as e:
+            logger.warning(
+                f"Skipping cash flow with unsupported currency {flow['currency']}: {e}"
+            )
+            skipped_currencies.add(flow["currency"] or "?")
+            skipped += 1
+            continue
+
+        await cash_flow_repo.upsert({**flow, "amount_eur": amount_eur})
+        seen += 1
+
+    if seen or skipped:
+        logger.info(
+            f"Persisted {seen} cash flow(s) ({len(transfer_flows)} transfer(s), "
+            f"{reclassified} reclassified), skipped {skipped}"
+        )
+
+    return {
+        "cash_flows_seen": seen,
+        "cash_flows_skipped": skipped,
+        "transfers_seen": len(transfer_flows),
+        "deposits_reclassified_as_transfer": reclassified,
+        "skipped_currencies": skipped_currencies,
     }
 
 

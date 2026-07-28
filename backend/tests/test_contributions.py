@@ -18,6 +18,9 @@ import app.models  # noqa: F401
 from app.models.security import Security
 from app.models.taxlot import TaxLot
 from app.models.app_settings import AppSetting
+from app.models.cash_flow import (
+    CashFlow, DEPOSIT_WITHDRAW, TRANSFER_IN,
+)
 from app.services.portfolio_service import PortfolioService, _shift_months
 
 
@@ -27,7 +30,8 @@ async def _make_session():
         poolclass=StaticPool,
         connect_args={"check_same_thread": False},
     )
-    tables = [Security.__table__, TaxLot.__table__, AppSetting.__table__]
+    tables = [Security.__table__, TaxLot.__table__, AppSetting.__table__,
+              CashFlow.__table__]
     async with engine.begin() as conn:
         await conn.run_sync(lambda c: Base.metadata.create_all(c, tables=tables))
     session = AsyncSession(engine, expire_on_commit=False)
@@ -51,6 +55,18 @@ def _lot(open_date: date, cost: str, close_date: Optional[date] = None) -> TaxLo
         is_open=close_date is None,
         close_date=close_date,
         close_source="trade" if close_date else None,
+    )
+
+
+def _flow(flow_date: date, amount: str, key: str,
+          flow_type: str = DEPOSIT_WITHDRAW) -> CashFlow:
+    return CashFlow(
+        ib_key=key,
+        flow_date=flow_date,
+        flow_type=flow_type,
+        amount=Decimal(amount),
+        currency="EUR",
+        amount_eur=Decimal(amount),
     )
 
 
@@ -220,6 +236,8 @@ async def test_empty_portfolio_reports_nothing_rather_than_dividing_by_zero():
             "windows": [],
             "monthly": [],
             "first_contribution_date": None,
+            "deposits_from": None,
+            "transfer_in_date": None,
             "base_currency": "EUR",
         }
     finally:
@@ -240,6 +258,115 @@ async def test_a_portfolio_opened_today_does_not_divide_by_zero():
         assert w_all["months"] > 0
         assert w_all["net_eur"] == 800.0
         assert w_all["avg_per_month_eur"] > 0
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_no_cash_flows_leaves_the_deployment_figures_untouched():
+    """
+    The state on first deploy, before the Flex Query delivers deposits: the added
+    side must be absent rather than a misleading zero, and deployment must be
+    exactly what it was before the deposits work existed.
+    """
+    engine, session = await _make_session()
+    try:
+        session.add(_lot(date(2026, 1, 15), "1000"))
+        await session.commit()
+
+        report = await PortfolioService(session).get_contributions(as_of=date(2026, 3, 31))
+
+        assert report["deposits_from"] is None
+        assert report["transfer_in_date"] is None
+        w_all = _window(report, "all")
+        assert w_all["gross_eur"] == 1000.0            # deployment unaffected
+        assert w_all["added_eur"] is None
+        assert w_all["avg_added_per_month_eur"] is None
+        assert w_all["added_covered"] is False
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_added_averages_over_the_covered_span_only():
+    """
+    Deposits start after the investing history does — the real shape of this account,
+    because the pre-2026 deposits went to the previous brokers. The 3M window sits
+    entirely inside coverage; the all-time window does not and must say so, dividing
+    by the covered months rather than diluting over months with no ledger.
+    """
+    engine, session = await _make_session()
+    try:
+        session.add(_lot(date(2025, 1, 10), "5000"))          # investing began 2025
+        for i, m in enumerate((2, 3, 4, 5, 6)):               # 1,000/mo from Feb 2026
+            session.add(_flow(date(2026, m, 5), "1000", f"D{i}"))
+        await session.commit()
+
+        report = await PortfolioService(session).get_contributions(as_of=date(2026, 6, 30))
+
+        assert report["deposits_from"] == "2026-02-05"
+
+        # 3M: Apr/May/Jun deposits = 3,000 over 3 months, fully covered.
+        w3 = _window(report, "3m")
+        assert w3["added_covered"] is True
+        assert w3["added_eur"] == 3000.0
+        assert w3["avg_added_per_month_eur"] == pytest.approx(1000.0, abs=0.01)
+
+        # All time reaches back to Jan 2025, well before the ledger.
+        w_all = _window(report, "all")
+        assert w_all["added_covered"] is False
+        assert w_all["added_eur"] == 5000.0
+        # 145 days from 2026-02-05 to 2026-06-30 = 4.76 months, NOT the 17.7 months
+        # of investing history — that is the whole point of the coverage clamp.
+        assert w_all["added_months"] == pytest.approx(4.76, abs=0.01)
+        assert w_all["months"] == pytest.approx(17.7, abs=0.1)
+        assert w_all["avg_added_per_month_eur"] == pytest.approx(1049.57, abs=0.5)
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_withdrawal_reduces_money_added():
+    engine, session = await _make_session()
+    try:
+        session.add(_lot(date(2026, 1, 10), "1000"))
+        session.add(_flow(date(2026, 2, 3), "2000", "D1"))
+        session.add(_flow(date(2026, 3, 3), "-500", "W1"))
+        await session.commit()
+
+        report = await PortfolioService(session).get_contributions(as_of=date(2026, 3, 31))
+
+        assert _window(report, "all")["added_eur"] == 1500.0
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_transfer_is_never_counted_as_money_added():
+    """
+    The case that made this feature necessary. An incoming broker transfer moves
+    capital saved years earlier at another broker, and the transferred lots already
+    carry their own open_date — so counting its cash leg would both invent a
+    contribution and double-count the original purchase.
+    """
+    engine, session = await _make_session()
+    try:
+        session.add(_lot(date(2024, 6, 10), "20000"))         # transferred-in history
+        session.add(_flow(date(2026, 1, 20), "18000", "TR1", flow_type=TRANSFER_IN))
+        session.add(_flow(date(2026, 2, 5), "1000", "D1"))    # a real deposit
+        await session.commit()
+
+        report = await PortfolioService(session).get_contributions(as_of=date(2026, 3, 31))
+
+        # The 18,000 transfer is excluded, so only the genuine 1,000 counts...
+        assert _window(report, "all")["added_eur"] == 1000.0
+        # ...and it does not backdate the coverage floor to the transfer date either.
+        assert report["deposits_from"] == "2026-02-05"
+        assert report["transfer_in_date"] == "2026-01-20"
     finally:
         await session.close()
         await engine.dispose()

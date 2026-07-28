@@ -99,8 +99,14 @@ Required sections and the fields the parsers actually read:
 |---|---|---|
 | **Open Positions** | **Lot** | `conid`, `symbol`, `isin`, `description`, `currency`, `listingExchange`, `position`, `costBasisPrice`, `costBasisMoney`, `openDateTime`, `reportDate` |
 | **Trades** | **Execution** | `conid`, `symbol`, `tradeDate`, `buySell`, `quantity`, `tradePrice`, `proceeds`, `ibCommission`, `currency`, **`fifoPnlRealized`** (= "Realized P/L"), `transactionID` |
-| **Cash Transactions** | Dividends, Payment in Lieu, **Withholding Tax** | `type`, `conid`, `symbol`, `settleDate`/`dateTime`, `amount`, `currency`, `transactionID` |
+| **Cash Transactions** | Dividends, Payment in Lieu, **Withholding Tax**, **Deposits & Withdrawals** | `type`, `conid`, `symbol`, `settleDate`/`dateTime`, `amount`, `currency`, `transactionID` |
 | **Corporate Actions** | Detail | `type`, `conid`, `symbol`, `dateTime`/`reportDate`, `quantity`, `value`, `proceeds`, `actionDescription`, `transactionID` |
+| **Transfers** | — | `type`, `direction`, `date`/`reportDate`, `cashTransfer`, `positionAmount`, `symbol`, `conid`, `company`, `transactionID` |
+
+**Deposits & Withdrawals** feeds the contributions report; without it there is no record of external
+money at all. **Transfers** exists only so an incoming broker transfer can be told apart from a deposit
+— see the contributions section. Both are inert until parsed: `extract_cash_transactions` filters to the
+three dividend types, so ticking them early cannot disturb anything.
 
 **General config that matters:** Format **XML**; Period **Year to Date** (Trades/CashTransactions only
 contain rows *inside* the period — "Last Business Day" would mean historical trades never arrive);
@@ -205,12 +211,17 @@ Tests: `tests/test_flex_xml_sanitizer.py`, `tests/test_flex_ingestion_e2e.py`.
   `proceeds`, `commission`, **`realized_pnl`** (IBKR's own FIFO). `security_id` is nullable — a fully
   sold security is no longer in OpenPositions.
 - **corporate_actions** — `action_type` (Reorg name), `quantity`, `value`, `proceeds`, `description`.
+- **cash_flows** — external cash, idempotent on `ib_key`: `flow_date`, **`flow_type`** ∈
+  `DEPOSITWITHDRAW` | `TRANSFER_IN` | `TRANSFER_OUT` | `TRANSFER`, `amount` (signed as IBKR reports:
+  deposit +, withdrawal −), `amount_eur` (pre-converted at `flow_date`). Only `DEPOSITWITHDRAW` counts as
+  money added — see the contributions section.
 - **dividend_payments** — `gross_amount_eur`, **`withholding_tax_eur`**, **`net_amount_eur`**,
   `pay_date`, **`source`** ∈ `ibkr` | `yfinance_estimate`.
 - **exchange_rates** / **market_prices** — caches. **ticker_mappings** — IBKR→Yahoo symbols.
 - **app_settings** — `base_currency`, `last_sync_to_date`. Plus fundamentals + earnings tables.
 - **sync_runs** — one row per sync attempt (`sync_type` ∈ `ibkr` | `ibkr_sync` | `full_sync` |
-  `market_data_only` | `ibkr_manual_xml` | `manual_prices` | `manual_mapping`, `status`, `message`,
+  `market_data_only` | `ibkr_manual_xml` | `manual_prices` | `manual_mapping` | `manual_cash_flow`,
+  `status`, `message`,
   `details`, `warnings`). Timestamps are
   serialized UTC-aware via `utc_iso()` — a bare naive `isoformat()` is parsed as *local* by the browser,
   which once made an 08:00 sync display as 06:02.
@@ -289,39 +300,71 @@ Frontend: `TaxTab.tsx`. It's a filing aid, not tax advice.
 
 ---
 
-## Contributions — average capital deployed per month
+## Contributions — deployed vs. added, per month
 
 `GET /api/portfolio/contributions` → `PortfolioService.get_contributions()`, rendered as a slim strip
 (`ContributionsStrip.tsx`) below the KPI cards: all time / 12M / 6M / 3M, each trailing window shown as
 a delta against the all-time average, so a slowing rate of investment is visible at a glance.
 
-**The metric is deployment, not deposits** — the cost basis of the lots *opened* in each month. Buying
-with proceeds from a sale is still money put to work, so it counts; cash deposited and left uninvested
-is not deployment, so it doesn't appear. That framing is the point of the feature, not a limitation of
-it: **don't "fix" this into a net-contributions figure.**
+Two metrics, because one number cannot answer both questions honestly. **Getting the relationship
+between them wrong is the trap here**, and it has been got wrong twice.
 
-Tax lots are a complete source for this because of two properties worth not breaking: reconciliation
-deletes **open** lots only, and a partial sale is split **pro-rata** keeping the original `open_date`
-— so `Σ cost_basis_eur` grouped by `open_date` is conserved across syncs and reaches back to the first
-lot. `cost_basis_eur` is already FX-converted at `open_date`, so there is no per-row currency work.
+### Deployed (`gross_eur`) — primary
 
-Each lot becomes a **positive leg** on `open_date` and, once sold, a **negative leg** on `close_date`
-for the same cost; a window sums the legs inside it. `avg_per_month_eur` divides **`gross_eur`** (the
-positive legs only). `net_eur` is carried for context — "how much of it is still invested" in the
-tooltip — and is what makes the correctness check below work; it is deliberately *not* what the average
-is computed from. Averaging net would let a sale retroactively erase a purchase that really happened.
+Cost basis of the lots *opened* in each month. `avg_per_month_eur` divides this.
 
-The divisor is **clamped to elapsed history** (`partial: true` when clamped), so a four-month-old
-portfolio can't report a 12-month average divided by 12; all-time divides by exact days, not whole
-months, so a part-month isn't rounded away. `as_of` is injectable purely so tests can pin the windows.
+It is primary because **it spans the entire investing history, including the pre-IBKR years.** The
+early-2026 portfolio transfer from Scalable Capital and Trading 212 carried every lot across with its
+**original `openDateTime` and original cost basis** — verified, not assumed: securities have as many
+distinct `costBasisPrice` values as they have lots (DBPG 75 lots / 72 prices, XNAS 110/107, XAIX 54/54),
+which a transfer-date re-basing could not produce. Lots then survive indefinitely because reconciliation
+deletes **open** lots only and splits a partial sale **pro-rata** under the original `open_date`.
+
+Its flaw is **rotation**: buying with proceeds from a sale counts here, so the same money can be
+deployed twice. Currently ~1.4% of the total (622.44 of 43,901 EUR — the two closed lots).
+
+**Do not "fix" this by averaging `net_eur` instead.** That was tried; it moves the error rather than
+removing it, because a window then gets debited for a sale of something bought *before* it began. The
+two are duals. `net_eur` is kept only for the tooltip and for the correctness check below.
+
+### Added (`added_eur`) — secondary
+
+Real deposits minus withdrawals from `cash_flows`. Strictly more accurate than Deployed where it exists,
+because a deposit has one leg — nothing to double-count, nothing to mis-attribute across a boundary.
+
+Secondary only because it **cannot reach back before IBKR**: earlier deposits went to the other brokers.
+So windows reaching past `deposits_from` report `added_covered: False`, and the added average divides by
+the **covered span only** rather than being diluted by months with no ledger. The UI omits Added for
+those windows entirely — showing it would read as "you saved nothing", the opposite of the truth.
+
+### Transfers are never money added
+
+An incoming transfer moves capital saved years earlier somewhere else, and the transferred lots already
+carry their own `open_date` — so counting it would both invent savings in a month that had none *and*
+double-count purchases already recorded. `CashFlowRepository.get_deposits()` therefore selects
+`flow_type == DEPOSITWITHDRAW` by **whitelist**, so no new transfer-ish type can leak in.
+
+IBKR may book a transfer's cash leg as an ordinary "Deposits & Withdrawals" row. `persist_cash_flows()`
+catches that by matching `(flow_date, amount, currency)` against the `<Transfers>` rows — exactly, never
+on description text — and reclassifies, reporting it in `warnings[]`. Zero-cash (in-kind) transfers are
+left out of the match keys, or every no-cash transfer would collide on `(date, 0)`.
+
+**This is the highest-risk number in the feature**: an unexcluded transfer shows a portfolio-sized fake
+contribution. `app/cli/manage_cash_flows.py` is the manual override — `list` marks which rows count as
+added, `reclassify <ib_key> --as TRANSFER_IN` fixes one, `--dry-run` on the mutating path, and every
+edit records a `sync_runs` row (`manual_cash_flow`).
+
+### Shared mechanics
+
+The deployment divisor is **clamped to elapsed history** (`partial: true` when clamped), so a
+four-month-old portfolio can't report a 12-month average divided by 12; all-time divides by exact days,
+not whole months, so a part-month isn't rounded away. `as_of` is injectable purely so tests can pin the
+windows. Cash-flow ingestion is a pure additive upsert with no delete, so it needs **no** empty-statement
+wipe guard, and an unconvertible currency skips one row rather than failing the sync.
 
 The cheap correctness check: `Σ monthly[].net_eur` must equal the current total cost basis, since every
-lot is either still open or was released. Tests: `tests/test_contributions.py`.
-
-Should a true external-cashflow figure ever be wanted, it is a *separate* metric, not a change to this
-one: it needs **Deposits & Withdrawals** enabled on the Flex Query and those rows persisted (a YTD
-period only delivers the current year, so prior years would need a one-off longer-period browser export
-through `ingest_flex_xml.py`).
+lot is either still open or was released. Tests: `tests/test_contributions.py`,
+`tests/test_cash_flow_ingest.py`.
 
 ---
 
@@ -504,6 +547,8 @@ Tests: `tests/test_currency_fallback.py`.
 | A position shows 0.00 / `market_price: null` | No cached price. The market-data sync's `warnings[]` now names it. Fix the `ticker_mappings` row, or fill it with `app/cli/import_prices.py` from IBKR bars |
 | The chart steps at a split date | Cached pre-split closes. A *new* split purges them automatically; for an older one delete that security's `market_prices` and let 08:00 refill |
 | A new currency appears | Nothing to do if it's in `WARM_CURRENCIES` or the ECB set. Otherwise add it there — one edit, no extra request |
+| "Money added" spikes in one month | A transfer booked as a deposit. `manage_cash_flows list`, then `reclassify <ib_key> --as TRANSFER_IN`. **Never** trust an Added figure without eyeballing that list first |
+| "Money added" is blank or `—` | Expected before `deposits_from`: no IBKR deposit ledger exists for the pre-transfer years. Not a bug — Deployed covers that era |
 | A position's value is far off IBKR's | Suspect the `ticker_mappings` row before the price feed: run `manage_mappings list` and look for a currency disagreement, then compare `market_prices.close_price` against IBKR's `market_price` in the *same* currency |
 | App total ≠ IBKR total | Compare against `gross_position_value`, **not** net liquidation (which adds cash); and intraday the app holds the last *close* while IBKR quotes live |
 | Site "down" in the browser | Often TIM home DNS, not the server — verify with `Test-NetConnection`, not `nslookup` |

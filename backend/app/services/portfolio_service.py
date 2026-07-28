@@ -18,6 +18,7 @@ from app.models.trade import Trade
 from app.services.market_data_service import MarketDataService
 from app.services.currency_service import CurrencyService
 from app.repositories.app_settings_repository import AppSettingsRepository
+from app.repositories.cash_flow_repository import CashFlowRepository
 
 logger = logging.getLogger(__name__)
 
@@ -241,22 +242,36 @@ class PortfolioService:
 
     async def get_contributions(self, as_of: Optional[date] = None) -> Dict:
         """
-        Average capital *deployed* per month, over several trailing windows.
+        Two metrics per trailing window, because one number cannot answer both
+        questions honestly.
 
-        The headline figure is gross: the cost basis of every lot opened in the
-        month. That is deliberately a measure of money put to work, not of money
-        transferred in from outside — buying with proceeds from a sale is still
-        deployment, so it counts. Cash deposited but left uninvested is not
-        deployment and correctly does not appear.
+        **Deployed** (``gross_eur``) — the primary figure: cost basis of the lots
+        opened in the window. It spans the *whole* investing history including the
+        pre-IBKR years, because the 2026 transfer from the previous brokers carried
+        every lot across with its original open_date and its original cost basis
+        (verified: securities have as many distinct costBasisPrice values as they
+        have lots, so nothing was re-based to the transfer date). Lots survive
+        indefinitely because the sync deletes only *open* lots and splits a partial
+        sale pro-rata under the original open_date.
 
-        Tax lots are a complete source for this because the sync deletes only
-        *open* lots and splits a partial sale pro-rata under the original
-        open_date, so the cost basis of every purchase survives for as long as
-        the history goes back, already FX-converted at open_date.
+        Its one flaw is rotation: buying with proceeds from a sale counts here, so
+        the same money can be deployed twice. Currently ~1.4% of the total.
 
-        ``net_eur`` is reported alongside (deployed minus the cost basis of lots
-        closed in the window) for context on how much came back out. It is not
-        what the average is computed from.
+        **Added** (``added_eur``) — real external money from the ``cash_flows``
+        ledger. A deposit has a single leg, so it neither double-counts nor
+        mis-attributes across a window boundary, making it strictly better than
+        Deployed *where it exists*. It is secondary rather than primary only because
+        it cannot reach back before IBKR: earlier deposits went to the other brokers,
+        and the transfer itself is excluded (that capital was saved years earlier, and
+        its purchases are already counted under the transferred lots' own dates).
+
+        So windows reaching back past ``deposits_from`` report
+        ``added_covered: False``, and the added average divides by the covered span
+        only rather than being diluted by months with no ledger.
+
+        ``net_eur`` (deployed minus the cost basis of lots closed in the window) is
+        kept for context and because it is what makes the cost-basis identity check
+        work; it is not averaged.
 
         ``as_of`` defaults to today and exists so tests can pin the windows.
         """
@@ -283,11 +298,24 @@ class PortfolioService:
             if close_date:
                 legs.append((close_date, -base_fx.convert(cost, close_date)))
 
+        # External cash, if the Flex Query has been set to deliver it. Deposits only:
+        # get_deposits() excludes TRANSFER rows, so capital that arrived by broker
+        # transfer is never read as a contribution.
+        flow_repo = CashFlowRepository(self.db)
+        deposits_from = await flow_repo.earliest_deposit_date()
+        transfer_in_date = await flow_repo.earliest_transfer_in_date()
+        added_legs: List[Tuple[date, Decimal]] = [
+            (f.flow_date, base_fx.convert(f.amount_eur or Decimal("0"), f.flow_date))
+            for f in await flow_repo.get_deposits()
+        ]
+
         if first_open is None:
             return {
                 "windows": [],
                 "monthly": [],
                 "first_contribution_date": None,
+                "deposits_from": deposits_from.isoformat() if deposits_from else None,
+                "transfer_in_date": transfer_in_date.isoformat() if transfer_in_date else None,
                 "base_currency": base_fx.base_currency,
             }
 
@@ -325,6 +353,20 @@ class PortfolioService:
             net = sum((a for d, a in legs if start <= d <= as_of), Decimal("0"))
             gross = sum((a for d, a in legs if start <= d <= as_of and a > 0), Decimal("0"))
 
+            # Added side: clamp to where deposit data actually begins, and divide by
+            # that shorter span. Averaging over months with no ledger would quietly
+            # report a low savings rate that is really just missing history.
+            if deposits_from is None:
+                added, added_months, added_covered = None, None, False
+            else:
+                added_start = max(start, deposits_from)
+                added_covered = added_start <= start
+                added_months = max((as_of - added_start).days, 1) / _DAYS_PER_MONTH
+                added_months = min(added_months, months)
+                added = sum(
+                    (a for d, a in added_legs if added_start <= d <= as_of), Decimal("0")
+                )
+
             windows.append({
                 "label": label,
                 "months": round(months, 2),
@@ -334,12 +376,21 @@ class PortfolioService:
                 # per month, not how much of it stayed there.
                 "avg_per_month_eur": round(float(gross) / months, 2) if months > 0 else 0.0,
                 "partial": partial,
+                "added_eur": round(float(added), 2) if added is not None else None,
+                "added_months": round(added_months, 2) if added_months else None,
+                "avg_added_per_month_eur": (
+                    round(float(added) / added_months, 2)
+                    if added is not None and added_months else None
+                ),
+                "added_covered": added_covered,
             })
 
         return {
             "windows": windows,
             "monthly": monthly,
             "first_contribution_date": first_open.isoformat(),
+            "deposits_from": deposits_from.isoformat() if deposits_from else None,
+            "transfer_in_date": transfer_in_date.isoformat() if transfer_in_date else None,
             "base_currency": base_fx.base_currency,
         }
 
