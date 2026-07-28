@@ -29,6 +29,8 @@ from app.models.cash_flow import (
     CashFlow, DEPOSIT_WITHDRAW, TRANSFER_IN, TRANSFER_OUT,
 )
 from app.models.exchange_rate import ExchangeRate
+from app.models.app_settings import AppSetting
+from app.repositories.app_settings_repository import AppSettingsRepository
 from app.repositories.cash_flow_repository import CashFlowRepository
 from app.services.ibkr_service import IBKRService
 from app.services.currency_service import CurrencyService
@@ -72,7 +74,7 @@ async def _make_session():
         poolclass=StaticPool,
         connect_args={"check_same_thread": False},
     )
-    tables = [CashFlow.__table__, ExchangeRate.__table__]
+    tables = [CashFlow.__table__, ExchangeRate.__table__, AppSetting.__table__]
     async with engine.begin() as conn:
         await conn.run_sync(lambda c: Base.metadata.create_all(c, tables=tables))
     return engine, AsyncSession(engine, expire_on_commit=False)
@@ -309,6 +311,36 @@ async def test_reingesting_the_same_statement_is_idempotent():
 
 
 @pytest.mark.asyncio
+async def test_a_zero_amount_needs_no_exchange_rate():
+    """
+    Zero is zero in every currency. Converting it would demand an FX rate we may not
+    have, and skipping the row would cost us the in-kind transfer record — which is
+    precisely the shape that carries no cash. 'ZZZ' has no rate anywhere.
+    """
+    engine, session = await _make_session()
+    try:
+        transfers = await _svc().extract_transfers(_flex(SimpleNamespace(Transfers=[
+            _transfer(currency="ZZZ", cashTransfer=Decimal("0")),
+        ])))
+
+        result = await persist_cash_flows(
+            CashFlowRepository(session), CurrencyService(session), [], transfers
+        )
+        await session.commit()
+
+        assert result["cash_flows_skipped"] == 0
+        row = (await session.execute(select(CashFlow))).scalars().one()
+        assert row.amount_eur == Decimal("0")
+        assert row.flow_type == TRANSFER_IN
+        # And the transfer date survives, so the coverage explanation still works.
+        assert await CashFlowRepository(session).earliest_transfer_in_date() \
+            == date(2026, 1, 20)
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_an_unconvertible_currency_is_skipped_not_raised():
     """
     A deposit that cannot be converted must not fail the whole sync — the coverage
@@ -332,6 +364,33 @@ async def test_an_unconvertible_currency_is_skipped_not_raised():
         assert result["cash_flows_seen"] == 1
         assert [f.ib_key for f in await CashFlowRepository(session).get_deposits()] \
             == ["D_OK"]
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_coverage_only_ever_widens_backwards():
+    """
+    coverage_from is the splice point, so it must never move forward — a later YTD
+    statement cannot shrink coverage a prior-year import established.
+    """
+    engine, session = await _make_session()
+    try:
+        settings = AppSettingsRepository(session)
+        assert await settings.get_cash_flows_covered_from() is None
+
+        assert await settings.widen_cash_flows_covered_from(date(2026, 1, 1)) \
+            == date(2026, 1, 1)
+        # A later statement leaves it alone...
+        assert await settings.widen_cash_flows_covered_from(date(2027, 1, 1)) \
+            == date(2026, 1, 1)
+        # ...but a prior-year import extends it.
+        assert await settings.widen_cash_flows_covered_from(date(2025, 1, 1)) \
+            == date(2025, 1, 1)
+        # A missing from_date is a no-op, not a crash.
+        assert await settings.widen_cash_flows_covered_from(None) == date(2025, 1, 1)
+        await session.commit()
     finally:
         await session.close()
         await engine.dispose()

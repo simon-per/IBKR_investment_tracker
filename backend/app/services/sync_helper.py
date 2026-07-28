@@ -114,6 +114,16 @@ async def ingest_flex_statement(db, flex_data: Dict) -> Dict:
         CashFlowRepository(db), currency_service, cash_flows_data, transfers_data,
     )
 
+    # Record how far back the deposit ledger is complete — the splice point between
+    # "measure contributions from lot cost basis" and "measure them from real deposits".
+    # Only widen when deposits were actually present: an export taken without the
+    # Deposits & Withdrawals option would otherwise claim coverage it has no data for.
+    coverage_from = None
+    if cash_flows_data and flex_data.get('from_date'):
+        coverage_from = await app_settings.widen_cash_flows_covered_from(
+            flex_data['from_date']
+        )
+
     last_sync_date = await app_settings.get_last_sync_to_date()
     taxlots_data = await ibkr_service.extract_taxlots(flex_data)
 
@@ -170,6 +180,7 @@ async def ingest_flex_statement(db, flex_data: Dict) -> Dict:
         "cash_flows_skipped": flows["cash_flows_skipped"],
         "transfers_seen": flows["transfers_seen"],
         "deposits_reclassified_as_transfer": flows["deposits_reclassified_as_transfer"],
+        "cash_flows_covered_from": str(coverage_from) if coverage_from else None,
         "total_cost_basis_eur": float(recon["total_cost_basis_eur"]),
         "account_id": flex_data['account_id'],
         "data_from": str(flex_data['from_date']) if flex_data['from_date'] else None,
@@ -272,19 +283,25 @@ async def persist_cash_flows(
             flow["flow_type"] = matched
             reclassified += 1
 
-        try:
-            amount_eur = await currency_service.convert_to_eur(
-                amount=flow["amount"],
-                from_currency=flow["currency"],
-                target_date=flow["flow_date"],
-            )
-        except ValueError as e:
-            logger.warning(
-                f"Skipping cash flow with unsupported currency {flow['currency']}: {e}"
-            )
-            skipped_currencies.add(flow["currency"] or "?")
-            skipped += 1
-            continue
+        if not flow["amount"]:
+            # Zero is zero in every currency. Converting would demand an FX rate we may
+            # not have, and losing the row would cost us the in-kind transfer record
+            # (which is exactly the shape that carries no cash).
+            amount_eur = Decimal("0")
+        else:
+            try:
+                amount_eur = await currency_service.convert_to_eur(
+                    amount=flow["amount"],
+                    from_currency=flow["currency"],
+                    target_date=flow["flow_date"],
+                )
+            except ValueError as e:
+                logger.warning(
+                    f"Skipping cash flow with unsupported currency {flow['currency']}: {e}"
+                )
+                skipped_currencies.add(flow["currency"] or "?")
+                skipped += 1
+                continue
 
         await cash_flow_repo.upsert({**flow, "amount_eur": amount_eur})
         seen += 1

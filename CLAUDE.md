@@ -300,44 +300,62 @@ Frontend: `TaxTab.tsx`. It's a filing aid, not tax advice.
 
 ---
 
-## Contributions — deployed vs. added, per month
+## Contributions — money in per month
 
 `GET /api/portfolio/contributions` → `PortfolioService.get_contributions()`, rendered as a slim strip
 (`ContributionsStrip.tsx`) below the KPI cards: all time / 12M / 6M / 3M, each trailing window shown as
-a delta against the all-time average, so a slowing rate of investment is visible at a glance.
+a delta against the all-time average, so a change in savings rate is visible at a glance.
 
-Two metrics, because one number cannot answer both questions honestly. **Getting the relationship
-between them wrong is the trap here**, and it has been got wrong twice.
+**`money_in_eur` is the answer**, and it is **spliced at `coverage_from`** because no single source is
+authoritative for the whole history. This design took three attempts; the reasoning below is why.
 
-### Deployed (`gross_eur`) — primary
+### The splice
 
-Cost basis of the lots *opened* in each month. `avg_per_month_eur` divides this.
+| Era | Source |
+|---|---|
+| before `coverage_from` | **lot cost basis** (`Σ cost_basis_eur` of lots opened) |
+| from `coverage_from` | **real deposits** (`cash_flows`, `DEPOSITWITHDRAW` only) |
 
-It is primary because **it spans the entire investing history, including the pre-IBKR years.** The
-early-2026 portfolio transfer from Scalable Capital and Trading 212 carried every lot across with its
-**original `openDateTime` and original cost basis** — verified, not assumed: securities have as many
-distinct `costBasisPrice` values as they have lots (DBPG 75 lots / 72 prices, XNAS 110/107, XAIX 54/54),
-which a transfer-date re-basing could not produce. Lots then survive indefinitely because reconciliation
-deletes **open** lots only and splits a partial sale **pro-rata** under the original `open_date`.
+`money_in_method` reports which applied: `deposits` \| `spliced` \| `deployed`.
 
-Its flaw is **rotation**: buying with proceeds from a sale counts here, so the same money can be
-deployed twice. Currently ~1.4% of the total (622.44 of 43,901 EUR — the two closed lots).
+Lot cost basis reaches back through the pre-IBKR years because the early-2026 portfolio transfer from
+Scalable Capital and Trading 212 carried every lot across with its **original `openDateTime` and original
+cost basis** — verified, not assumed: securities have as many distinct `costBasisPrice` values as they
+have lots (DBPG 75 lots / 72 prices, XNAS 110/107, XAIX 54/54), which a transfer-date re-basing could not
+produce. Lots then survive indefinitely because reconciliation deletes **open** lots only and splits a
+partial sale **pro-rata** under the original `open_date`.
 
-**Do not "fix" this by averaging `net_eur` instead.** That was tried; it moves the error rather than
-removing it, because a window then gets debited for a sale of something bought *before* it began. The
-two are duals. `net_eur` is kept only for the tooltip and for the correctness check below.
+Deposits take over the moment a ledger exists, because **lot cost basis cannot survive a rotation**:
+selling one ETF to buy another closes lots and opens new ones for the same money, so it is counted twice.
+That is not hypothetical — the Ireland-domiciled sleeve is being switched to US-domiciled ETFs for tax
+reasons. Simulated on real data (307 EUR lots, 22,691 EUR, rotated with no new cash), `money_in` held at
+1,959 / 2,574 / 1,854 / 2,604 per month across the four windows while deployment went 2,012 → 2,885,
+2,688 → 4,579, 2,129 → 5,911 and **2,713 → 10,277**. A deployment-led headline would have claimed four
+times the real 3-month contribution. Pinned by `test_a_rotation_does_not_inflate_money_in`.
 
-### Added (`added_eur`) — secondary
+**No double-count at the boundary**, because it is a single date: lots are summed strictly `< coverage_from`
+and deposits strictly `>= coverage_from`. A purchase funded by a deposit in the boundary month contributes
+the deposit only. The two ranges also leave no hole, which is why the divisor is the window's **full**
+elapsed months and every window carries a meaningful number.
 
-Real deposits minus withdrawals from `cash_flows`. Strictly more accurate than Deployed where it exists,
-because a deposit has one leg — nothing to double-count, nothing to mis-attribute across a boundary.
+`coverage_from` lives in `app_settings` (`cash_flows_covered_from`), set from the statement's `from_date`
+and **only when deposit rows were actually present** — an export taken without the Deposits option must
+not claim coverage it has no data for. It only ever widens backwards
+(`widen_cash_flows_covered_from`), so a later YTD statement can't shrink what a prior-year import
+established. It must be the period start, not the first deposit's date: a covered week with no deposits is
+still covered, and using the first row would hand that week's purchases to the lot side *and* count its
+deposits.
 
-Secondary only because it **cannot reach back before IBKR**: earlier deposits went to the other brokers.
-So windows reaching past `deposits_from` report `added_covered: False`, and the added average divides by
-the **covered span only** rather than being diluted by months with no ledger. The UI omits Added for
-those windows entirely — showing it would read as "you saved nothing", the opposite of the truth.
+### `deployed_eur` — secondary, and deliberately still shown
 
-### Transfers are never money added
+Cost basis of lots opened, the old headline. Once rotation starts it exceeds `money_in_eur`, and **that gap
+is the useful part**: it is capital churn, not saving.
+
+**Do not promote it back, and do not "fix" it by averaging `net_eur` instead.** Both were tried. Averaging
+net moves the error rather than removing it — a window then gets debited for a sale of something bought
+*before* it began. The two are duals; `net_eur` survives only for the tooltip and the identity check.
+
+### Transfers are never money in
 
 An incoming transfer moves capital saved years earlier somewhere else, and the transferred lots already
 carry their own `open_date` — so counting it would both invent savings in a month that had none *and*
@@ -367,9 +385,20 @@ Three things this account's real data settled, so nobody re-investigates them:
   transfer row cannot name Scalable Capital / Trading 212. `direction` *does* survive, which is what
   `TRANSFER_IN` and `earliest_transfer_in_date()` depend on.
 
+### Currency
+
+Every amount is stored EUR-converted at its own date (`cash_flows.amount_eur` via
+`convert_to_eur(amount, currency, flow_date)`, `taxlots.cost_basis_eur` at `open_date`) and projected into
+the base currency once at read time by `BaseFx` — deployment at each lot's `open_date`, deposits at each
+flow's `flow_date`. A **zero amount skips conversion entirely**: zero is zero in every currency, and
+demanding an FX rate would drop the in-kind transfer rows, which are exactly the ones with no cash. An
+unconvertible non-zero currency skips that row with a warning rather than failing the sync.
+`test_base_currency_projection_scales_both_metrics` pins the CHF path, since the tests otherwise run on EUR
+while production runs on CHF.
+
 ### Shared mechanics
 
-The deployment divisor is **clamped to elapsed history** (`partial: true` when clamped), so a
+The divisor is **clamped to elapsed history** (`partial: true` when clamped), so a
 four-month-old portfolio can't report a 12-month average divided by 12; all-time divides by exact days,
 not whole months, so a part-month isn't rounded away. `as_of` is injectable purely so tests can pin the
 windows. Cash-flow ingestion is a pure additive upsert with no delete, so it needs **no** empty-statement
@@ -593,10 +622,12 @@ exercises the FX path. Note IBKR sends the **legacy** `type="Deposits/Withdrawal
 `"Deposits & Withdrawals"` — ibflex maps both to `CashAction.DEPOSITWITHDRAW`, so nothing special is
 needed, but don't "fix" the enum comparison if that string looks wrong.
 
-Resulting windows: all-time and 12M are `added_covered: false` (they predate IBKR) and the UI omits
-Added for them; 6M and 3M are covered. **Deployed and Added agree closely where both exist** — 6M
-2,129 vs 1,871, 3M 2,713 vs 2,613 EUR/month — which is two independent sources (lot cost basis vs the
-cash ledger) cross-validating to within ~12%. Added 3M is **+40% on 6M**, i.e. the savings rate rose.
+`coverage_from = 2026-01-01` (the statement period start), so all-time and 12M are `spliced` while 6M and
+3M run on **deposits alone** and are already rotation-proof. Money in per month reads
+**1,959 / 2,574 / 1,854 / 2,604** (all / 12M / 6M / 3M) against deployment of 2,012 / 2,688 / 2,129 /
+2,713 — two independent sources agreeing to within ~12% wherever both exist, which is the best available
+evidence that the pre-ledger lot-based figures were sound. 3M is **+33% on all-time**: the savings rate
+rose. `Σ monthly[].net_eur` = 51,209.91, matching total cost basis to the cent.
 
 **That statement carried a large IBKR schema drift and needed no code change.** 20+ new attributes
 (`figi`, `issuerCountryCode`, `serialNumber`, `weight`, `subCategory`, `exDate`, `dividendType`,

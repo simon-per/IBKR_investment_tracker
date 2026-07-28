@@ -41,25 +41,28 @@ export interface TaxLotInfo {
   cost_basis_eur: number;
 }
 
+export type MoneyInMethod = 'deposits' | 'spliced' | 'deployed';
+
 export interface ContributionWindow {
   label: 'all' | '12m' | '6m' | '3m';
   months: number;          // divisor used, clamped to available history
-  // NOTE: *_eur fields carry values in the selected base_currency.
-  gross_eur: number;       // capital deployed (cost basis of lots opened) — the headline
-  net_eur: number;         // deployed minus released, for context only
-  avg_per_month_eur: number;  // gross_eur / months
   partial: boolean;        // history shorter than the nominal window
-  // Real external money. null until the Flex Query delivers deposits; broker
-  // transfers are excluded, so this never counts capital saved elsewhere.
-  added_eur: number | null;
-  added_months: number | null;
-  avg_added_per_month_eur: number | null;
-  added_covered: boolean;  // false when the window predates the deposit ledger
+  // NOTE: *_eur fields carry values in the selected base_currency.
+  // The answer. Spliced at the deposit-coverage boundary — lot cost basis before it,
+  // real deposits after — so a position rotation cannot inflate it.
+  money_in_eur: number;
+  avg_money_in_per_month_eur: number;
+  money_in_method: MoneyInMethod;
+  deposits_eur: number;    // the post-boundary part, for the tooltip
+  // Secondary: capital put to work. Exceeds money_in once positions are rotated.
+  deployed_eur: number;
+  avg_deployed_per_month_eur: number;
+  net_eur: number;         // deployed minus released, tooltip only
 }
 
 export interface ContributionMonthlyItem {
   month: string;           // "YYYY-MM"
-  gross_eur: number;       // deployed in the month
+  deployed_eur: number;    // cost basis of lots opened in the month
   net_eur: number;         // deployed minus released in the month
 }
 
@@ -67,7 +70,8 @@ export interface ContributionsResponse {
   windows: ContributionWindow[];
   monthly: ContributionMonthlyItem[];
   first_contribution_date: string | null;
-  deposits_from: string | null;    // where the deposit ledger starts
+  coverage_from: string | null;    // the splice point: deposits are complete from here
+  deposits_from: string | null;    // the first actual deposit row
   transfer_in_date: string | null; // the incoming broker transfer that explains it
   base_currency: string;
 }

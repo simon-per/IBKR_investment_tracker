@@ -1,15 +1,19 @@
 """
-Tests for PortfolioService.get_contributions — average capital deployed per
-month, from the cost basis of the lots opened in each month.
+Tests for PortfolioService.get_contributions — money in per month, spliced at the
+deposit-coverage boundary: lot cost basis before it, real deposits from it onward.
 
-EUR base so no FX data is needed, and ``as_of`` is pinned in every test so the
-trailing windows don't move with the calendar.
+The splice is what makes the metric survive a position rotation, so the rotation
+case is pinned explicitly (test_a_rotation_does_not_inflate_money_in).
+
+EUR base except where a test pins the CHF projection, and ``as_of`` is pinned in
+every test so the trailing windows don't move with the calendar.
 """
 from datetime import date
 from decimal import Decimal
 from typing import Optional
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.pool import StaticPool
 
@@ -18,9 +22,11 @@ import app.models  # noqa: F401
 from app.models.security import Security
 from app.models.taxlot import TaxLot
 from app.models.app_settings import AppSetting
+from app.models.exchange_rate import ExchangeRate
 from app.models.cash_flow import (
     CashFlow, DEPOSIT_WITHDRAW, TRANSFER_IN,
 )
+from app.repositories.app_settings_repository import AppSettingsRepository
 from app.services.portfolio_service import PortfolioService, _shift_months
 
 
@@ -31,7 +37,7 @@ async def _make_session():
         connect_args={"check_same_thread": False},
     )
     tables = [Security.__table__, TaxLot.__table__, AppSetting.__table__,
-              CashFlow.__table__]
+              CashFlow.__table__, ExchangeRate.__table__]
     async with engine.begin() as conn:
         await conn.run_sync(lambda c: Base.metadata.create_all(c, tables=tables))
     session = AsyncSession(engine, expire_on_commit=False)
@@ -111,17 +117,17 @@ async def test_a_sale_releases_capital_in_its_close_month():
         report = await PortfolioService(session).get_contributions(as_of=date(2026, 3, 31))
 
         # Deployed in January, released in March: net zero overall.
-        assert _month(report, "2026-01") == {"month": "2026-01", "gross_eur": 1000.0, "net_eur": 1000.0}
-        assert _month(report, "2026-03") == {"month": "2026-03", "gross_eur": 0.0, "net_eur": -1000.0}
+        assert _month(report, "2026-01") == {"month": "2026-01", "deployed_eur": 1000.0, "net_eur": 1000.0}
+        assert _month(report, "2026-03") == {"month": "2026-03", "deployed_eur": 0.0, "net_eur": -1000.0}
         assert _window(report, "all")["net_eur"] == 0.0
 
         # The average is deployment, so the sale does not erase the January buy:
         # 1,000 was put to work regardless of it later coming back out.
         # 2026-01-10..2026-03-31 is 80 days = 2.63 months, so 1,000 / 2.63.
         w_all = _window(report, "all")
-        assert w_all["gross_eur"] == 1000.0
+        assert w_all["deployed_eur"] == 1000.0
         assert w_all["months"] == pytest.approx(2.63, abs=0.01)
-        assert w_all["avg_per_month_eur"] == pytest.approx(380.5, abs=0.5)
+        assert w_all["avg_deployed_per_month_eur"] == pytest.approx(380.5, abs=0.5)
     finally:
         await session.close()
         await engine.dispose()
@@ -144,7 +150,7 @@ async def test_partially_sold_lot_conserves_the_original_cost_in_the_open_month(
 
         report = await PortfolioService(session).get_contributions(as_of=date(2026, 5, 31))
 
-        assert _month(report, "2026-02")["gross_eur"] == 1000.0
+        assert _month(report, "2026-02")["deployed_eur"] == 1000.0
         assert _month(report, "2026-05")["net_eur"] == -400.0
         assert _window(report, "all")["net_eur"] == 600.0
     finally:
@@ -165,7 +171,7 @@ async def test_window_divisor_is_clamped_to_available_history():
         w12 = _window(report, "12m")
         assert w12["partial"] is True
         assert w12["months"] == pytest.approx(3.94, abs=0.02)   # ~120 days, not 12 months
-        assert w12["avg_per_month_eur"] == pytest.approx(304.5, abs=1.0)
+        assert w12["avg_deployed_per_month_eur"] == pytest.approx(304.5, abs=1.0)
 
         # A window shorter than the history is not partial, and excludes the buy.
         w3 = _window(report, "3m")
@@ -193,28 +199,28 @@ async def test_averages_per_window_and_the_cost_basis_identity():
 
         # 12 x 1,000 deployed + the 500 lot = 12,500 deployed; 500 came back out.
         w_all = _window(report, "all")
-        assert w_all["gross_eur"] == 12500.0
+        assert w_all["deployed_eur"] == 12500.0
         assert w_all["net_eur"] == 12000.0
 
         # 3M covers the Apr/May/Jun buys. The June sale reduces net but must NOT
         # reduce the average — the money was still deployed when it was deployed.
         w3 = _window(report, "3m")
         assert w3["months"] == 3.0
-        assert w3["gross_eur"] == 3000.0
+        assert w3["deployed_eur"] == 3000.0
         assert w3["net_eur"] == 2500.0
-        assert w3["avg_per_month_eur"] == pytest.approx(1000.0, abs=0.01)
+        assert w3["avg_deployed_per_month_eur"] == pytest.approx(1000.0, abs=0.01)
 
         w6 = _window(report, "6m")
-        assert w6["gross_eur"] == 6000.0
-        assert w6["avg_per_month_eur"] == pytest.approx(1000.0, abs=0.01)
+        assert w6["deployed_eur"] == 6000.0
+        assert w6["avg_deployed_per_month_eur"] == pytest.approx(1000.0, abs=0.01)
 
         # The 12M window reaches back past the first lot, so its divisor is clamped
         # to the 11.5 months that actually exist — 12,500 / 11.5, not / 12.
         w12 = _window(report, "12m")
         assert w12["partial"] is True
         assert w12["months"] == pytest.approx(11.50, abs=0.02)
-        assert w12["gross_eur"] == 12500.0
-        assert w12["avg_per_month_eur"] == pytest.approx(1087.0, abs=1.0)
+        assert w12["deployed_eur"] == 12500.0
+        assert w12["avg_deployed_per_month_eur"] == pytest.approx(1087.0, abs=1.0)
 
         # Identity: every lot is either still open or was released, so the monthly
         # net must sum to the cost basis of the open lots — 12,000.
@@ -237,6 +243,7 @@ async def test_empty_portfolio_reports_nothing_rather_than_dividing_by_zero():
             "monthly": [],
             "first_contribution_date": None,
             "deposits_from": None,
+            "coverage_from": None,
             "transfer_in_date": None,
             "base_currency": "EUR",
         }
@@ -257,18 +264,17 @@ async def test_a_portfolio_opened_today_does_not_divide_by_zero():
         w_all = _window(report, "all")
         assert w_all["months"] > 0
         assert w_all["net_eur"] == 800.0
-        assert w_all["avg_per_month_eur"] > 0
+        assert w_all["avg_deployed_per_month_eur"] > 0
     finally:
         await session.close()
         await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_no_cash_flows_leaves_the_deployment_figures_untouched():
+async def test_without_a_deposit_ledger_money_in_falls_back_to_deployment():
     """
-    The state on first deploy, before the Flex Query delivers deposits: the added
-    side must be absent rather than a misleading zero, and deployment must be
-    exactly what it was before the deposits work existed.
+    The state on first deploy, before the Flex Query delivers deposits. money_in must
+    equal deployment rather than reporting zero, and the method must say so.
     """
     engine, session = await _make_session()
     try:
@@ -278,95 +284,205 @@ async def test_no_cash_flows_leaves_the_deployment_figures_untouched():
         report = await PortfolioService(session).get_contributions(as_of=date(2026, 3, 31))
 
         assert report["deposits_from"] is None
+        assert report["coverage_from"] is None
         assert report["transfer_in_date"] is None
         w_all = _window(report, "all")
-        assert w_all["gross_eur"] == 1000.0            # deployment unaffected
-        assert w_all["added_eur"] is None
-        assert w_all["avg_added_per_month_eur"] is None
-        assert w_all["added_covered"] is False
+        assert w_all["money_in_method"] == "deployed"
+        assert w_all["money_in_eur"] == 1000.0
+        assert w_all["deployed_eur"] == 1000.0
+        assert w_all["deposits_eur"] == 0.0
     finally:
         await session.close()
         await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_added_averages_over_the_covered_span_only():
+async def test_money_in_splices_lots_before_coverage_and_deposits_after():
     """
-    Deposits start after the investing history does — the real shape of this account,
-    because the pre-2026 deposits went to the previous brokers. The 3M window sits
-    entirely inside coverage; the all-time window does not and must say so, dividing
-    by the covered months rather than diluting over months with no ledger.
+    The real shape of this account: investing history predates IBKR, so the deposit
+    ledger only covers the tail. A window inside coverage uses deposits alone; one
+    that spans the boundary uses lots up to it and deposits from it, divided by the
+    window's FULL months — the two ranges together leave no hole.
     """
     engine, session = await _make_session()
     try:
-        session.add(_lot(date(2025, 1, 10), "5000"))          # investing began 2025
+        session.add(_lot(date(2025, 1, 10), "5000"))          # pre-coverage investing
         for i, m in enumerate((2, 3, 4, 5, 6)):               # 1,000/mo from Feb 2026
             session.add(_flow(date(2026, m, 5), "1000", f"D{i}"))
+        await AppSettingsRepository(session).widen_cash_flows_covered_from(date(2026, 1, 1))
         await session.commit()
 
         report = await PortfolioService(session).get_contributions(as_of=date(2026, 6, 30))
 
+        assert report["coverage_from"] == "2026-01-01"
         assert report["deposits_from"] == "2026-02-05"
 
-        # 3M: Apr/May/Jun deposits = 3,000 over 3 months, fully covered.
+        # 3M starts after the boundary: deposits only, no lot contribution.
         w3 = _window(report, "3m")
-        assert w3["added_covered"] is True
-        assert w3["added_eur"] == 3000.0
-        assert w3["avg_added_per_month_eur"] == pytest.approx(1000.0, abs=0.01)
+        assert w3["money_in_method"] == "deposits"
+        assert w3["money_in_eur"] == 3000.0             # Apr/May/Jun
+        assert w3["avg_money_in_per_month_eur"] == pytest.approx(1000.0, abs=0.01)
 
-        # All time reaches back to Jan 2025, well before the ledger.
+        # All time spans the boundary: the 5,000 lot plus all 5,000 of deposits,
+        # over the FULL 17.7 months of history rather than a clamped span.
         w_all = _window(report, "all")
-        assert w_all["added_covered"] is False
-        assert w_all["added_eur"] == 5000.0
-        # 145 days from 2026-02-05 to 2026-06-30 = 4.76 months, NOT the 17.7 months
-        # of investing history — that is the whole point of the coverage clamp.
-        assert w_all["added_months"] == pytest.approx(4.76, abs=0.01)
-        assert w_all["months"] == pytest.approx(17.7, abs=0.1)
-        assert w_all["avg_added_per_month_eur"] == pytest.approx(1049.57, abs=0.5)
+        assert w_all["money_in_method"] == "spliced"
+        assert w_all["money_in_eur"] == 10000.0
+        assert w_all["deposits_eur"] == 5000.0
+        # 536 days / 30.4375 = 17.61 months, so 10,000 / 17.61.
+        assert w_all["months"] == pytest.approx(17.61, abs=0.02)
+        assert w_all["avg_money_in_per_month_eur"] == pytest.approx(567.86, abs=0.5)
     finally:
         await session.close()
         await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_a_withdrawal_reduces_money_added():
+async def test_the_boundary_month_counts_deposits_not_purchases():
+    """
+    A purchase and a deposit in the same boundary month must not both count. Lots are
+    summed strictly BEFORE coverage_from and deposits strictly FROM it, so the money
+    is counted once — through the deposit, which is the authoritative side there.
+    """
+    engine, session = await _make_session()
+    try:
+        session.add(_lot(date(2025, 6, 10), "800"))            # pre-coverage
+        session.add(_lot(date(2026, 1, 20), "950"))            # post-coverage purchase
+        session.add(_flow(date(2026, 1, 15), "900", "D1"))     # what funded it
+        await AppSettingsRepository(session).widen_cash_flows_covered_from(date(2026, 1, 1))
+        await session.commit()
+
+        report = await PortfolioService(session).get_contributions(as_of=date(2026, 3, 31))
+
+        w_all = _window(report, "all")
+        # 800 (pre-coverage lot) + 900 (deposit) — NOT 800 + 900 + 950.
+        assert w_all["money_in_eur"] == 1700.0
+        # Deployment still sees both purchases; that is the difference between them.
+        assert w_all["deployed_eur"] == 1750.0
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_rotation_does_not_inflate_money_in():
+    """
+    The regression that protects the Ireland->US ETF switch.
+
+    Selling one ETF to buy another closes lots and opens new ones for the same money,
+    so deployment counts it twice. No deposit occurs, so money_in must not move at all.
+    """
+    engine, session = await _make_session()
+    try:
+        session.add(_lot(date(2026, 2, 10), "5000"))            # bought post-coverage
+        session.add(_flow(date(2026, 2, 5), "5000", "D1"))      # the money that funded it
+        await AppSettingsRepository(session).widen_cash_flows_covered_from(date(2026, 1, 1))
+        await session.commit()
+
+        before = await PortfolioService(session).get_contributions(as_of=date(2026, 6, 30))
+
+        # Now rotate: close the lot and open an equal-cost replacement, no new cash.
+        lot = (await session.execute(select(TaxLot))).scalars().one()
+        lot.is_open = False
+        lot.close_date = date(2026, 6, 1)
+        lot.close_source = "trade"
+        session.add(_lot(date(2026, 6, 1), "5000"))
+        await session.commit()
+
+        after = await PortfolioService(session).get_contributions(as_of=date(2026, 6, 30))
+
+        for label in ("all", "12m", "6m", "3m"):
+            b, a = _window(before, label), _window(after, label)
+            assert a["money_in_eur"] == b["money_in_eur"], f"{label} money_in moved"
+            assert a["avg_money_in_per_month_eur"] == b["avg_money_in_per_month_eur"]
+
+        # Deployment, by contrast, now double-counts the same 5,000 — which is why it
+        # cannot be the headline once rotation starts.
+        assert _window(after, "all")["deployed_eur"] == 10000.0
+        assert _window(before, "all")["deployed_eur"] == 5000.0
+        # And the rotation nets out, so the identity still holds.
+        assert _window(after, "all")["net_eur"] == 5000.0
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_withdrawal_reduces_money_in():
     engine, session = await _make_session()
     try:
         session.add(_lot(date(2026, 1, 10), "1000"))
         session.add(_flow(date(2026, 2, 3), "2000", "D1"))
         session.add(_flow(date(2026, 3, 3), "-500", "W1"))
+        await AppSettingsRepository(session).widen_cash_flows_covered_from(date(2026, 1, 1))
         await session.commit()
 
         report = await PortfolioService(session).get_contributions(as_of=date(2026, 3, 31))
 
-        assert _window(report, "all")["added_eur"] == 1500.0
+        assert _window(report, "all")["money_in_eur"] == 1500.0
     finally:
         await session.close()
         await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_a_transfer_is_never_counted_as_money_added():
+async def test_a_transfer_is_never_counted_as_money_in():
     """
-    The case that made this feature necessary. An incoming broker transfer moves
-    capital saved years earlier at another broker, and the transferred lots already
-    carry their own open_date — so counting its cash leg would both invent a
-    contribution and double-count the original purchase.
+    An incoming broker transfer moves capital saved years earlier elsewhere, and the
+    transferred lots already carry their own open_date — so counting its cash leg
+    would both invent a contribution and double-count the original purchase.
     """
     engine, session = await _make_session()
     try:
         session.add(_lot(date(2024, 6, 10), "20000"))         # transferred-in history
         session.add(_flow(date(2026, 1, 20), "18000", "TR1", flow_type=TRANSFER_IN))
         session.add(_flow(date(2026, 2, 5), "1000", "D1"))    # a real deposit
+        await AppSettingsRepository(session).widen_cash_flows_covered_from(date(2026, 1, 1))
         await session.commit()
 
         report = await PortfolioService(session).get_contributions(as_of=date(2026, 3, 31))
 
-        # The 18,000 transfer is excluded, so only the genuine 1,000 counts...
-        assert _window(report, "all")["added_eur"] == 1000.0
-        # ...and it does not backdate the coverage floor to the transfer date either.
+        # 20,000 pre-coverage lot + the genuine 1,000 deposit. The 18,000 transfer
+        # contributes nothing, and neither does its cash leg.
+        w_all = _window(report, "all")
+        assert w_all["money_in_eur"] == 21000.0
+        assert w_all["deposits_eur"] == 1000.0
         assert report["deposits_from"] == "2026-02-05"
         assert report["transfer_in_date"] == "2026-01-20"
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_base_currency_projection_scales_both_metrics():
+    """
+    Production runs on CHF while the tests default to EUR, so this pins the path that
+    projects both sides into the base currency: deployment at each lot's open_date,
+    deposits at each flow's own date.
+    """
+    engine, session = await _make_session()
+    try:
+        settings = AppSettingsRepository(session)
+        await settings.set_base_currency("CHF")
+        # A flat EUR->CHF rate makes the expected values checkable by hand.
+        for day in range(1, 32):
+            session.add(ExchangeRate(
+                date=date(2026, 1, day), from_currency="EUR", to_currency="CHF",
+                rate=Decimal("0.9500"), source="test",
+            ))
+        session.add(_lot(date(2026, 1, 10), "1000"))
+        session.add(_flow(date(2026, 1, 20), "400", "D1"))
+        await settings.widen_cash_flows_covered_from(date(2026, 1, 1))
+        await session.commit()
+
+        report = await PortfolioService(session).get_contributions(as_of=date(2026, 1, 31))
+
+        assert report["base_currency"] == "CHF"
+        w_all = _window(report, "all")
+        assert w_all["deployed_eur"] == 950.0    # 1000 EUR * 0.95
+        assert w_all["money_in_eur"] == 380.0    # 400 EUR * 0.95, deposits govern here
+        assert w_all["money_in_method"] == "deposits"
     finally:
         await session.close()
         await engine.dispose()

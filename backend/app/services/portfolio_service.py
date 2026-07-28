@@ -242,36 +242,38 @@ class PortfolioService:
 
     async def get_contributions(self, as_of: Optional[date] = None) -> Dict:
         """
-        Two metrics per trailing window, because one number cannot answer both
-        questions honestly.
+        How much money went in per month, over several trailing windows.
 
-        **Deployed** (``gross_eur``) — the primary figure: cost basis of the lots
-        opened in the window. It spans the *whole* investing history including the
-        pre-IBKR years, because the 2026 transfer from the previous brokers carried
-        every lot across with its original open_date and its original cost basis
-        (verified: securities have as many distinct costBasisPrice values as they
-        have lots, so nothing was re-based to the transfer date). Lots survive
-        indefinitely because the sync deletes only *open* lots and splits a partial
-        sale pro-rata under the original open_date.
+        **``money_in_eur`` is the answer**, and it is spliced across two eras because
+        no single source is authoritative for the whole history:
 
-        Its one flaw is rotation: buying with proceeds from a sale counts here, so
-        the same money can be deployed twice. Currently ~1.4% of the total.
+        - Before ``coverage_from``, from **lot cost basis**. That reaches back through
+          the pre-IBKR years because the 2026 transfer from the previous brokers
+          carried every lot across with its original open_date *and* original cost
+          basis (verified: securities have as many distinct costBasisPrice values as
+          they have lots, so nothing was re-based to the transfer date).
+        - From ``coverage_from`` onward, from **real deposits**.
 
-        **Added** (``added_eur``) — real external money from the ``cash_flows``
-        ledger. A deposit has a single leg, so it neither double-counts nor
-        mis-attributes across a window boundary, making it strictly better than
-        Deployed *where it exists*. It is secondary rather than primary only because
-        it cannot reach back before IBKR: earlier deposits went to the other brokers,
-        and the transfer itself is excluded (that capital was saved years earlier, and
-        its purchases are already counted under the transferred lots' own dates).
+        The split exists because lot cost basis cannot survive a rotation: selling one
+        ETF to buy another closes lots and opens new ones, so the same money is
+        deployed twice. A deposit has a single leg and cannot be inflated that way, so
+        the moment a real ledger exists it takes over. This matters concretely — the
+        Ireland-domiciled sleeve is being switched to US-domiciled ETFs for tax
+        reasons, which is one large rotation. Averaging deployment through that would
+        report savings that never happened.
 
-        So windows reaching back past ``deposits_from`` report
-        ``added_covered: False``, and the added average divides by the covered span
-        only rather than being diluted by months with no ledger.
+        Each euro is counted once: the boundary is a single date, lots are summed
+        strictly before it and deposits strictly from it, so a purchase funded by a
+        deposit in the same month contributes only the deposit.
+
+        ``deployed_eur`` is kept alongside as the secondary figure. Once the rotation
+        starts it will exceed ``money_in_eur``, and that divergence is exactly the
+        useful signal: it is capital churn, not saving.
 
         ``net_eur`` (deployed minus the cost basis of lots closed in the window) is
-        kept for context and because it is what makes the cost-basis identity check
-        work; it is not averaged.
+        kept only for the tooltip and because it is what makes the cost-basis identity
+        check work. Nothing averages it — doing so lets a sale retroactively erase a
+        purchase that really happened.
 
         ``as_of`` defaults to today and exists so tests can pin the windows.
         """
@@ -304,10 +306,18 @@ class PortfolioService:
         flow_repo = CashFlowRepository(self.db)
         deposits_from = await flow_repo.earliest_deposit_date()
         transfer_in_date = await flow_repo.earliest_transfer_in_date()
-        added_legs: List[Tuple[date, Decimal]] = [
+        deposit_legs: List[Tuple[date, Decimal]] = [
             (f.flow_date, base_fx.convert(f.amount_eur or Decimal("0"), f.flow_date))
             for f in await flow_repo.get_deposits()
         ]
+
+        # The splice point: where the deposit ledger becomes complete. Recorded from the
+        # statement period start, so a covered week with no deposits still counts as
+        # covered. Falls back to the first deposit for ledgers ingested before the
+        # setting existed, and is None when no deposits exist at all.
+        coverage_from = await AppSettingsRepository(self.db).get_cash_flows_covered_from()
+        if coverage_from is None:
+            coverage_from = deposits_from
 
         if first_open is None:
             return {
@@ -315,6 +325,7 @@ class PortfolioService:
                 "monthly": [],
                 "first_contribution_date": None,
                 "deposits_from": deposits_from.isoformat() if deposits_from else None,
+                "coverage_from": coverage_from.isoformat() if coverage_from else None,
                 "transfer_in_date": transfer_in_date.isoformat() if transfer_in_date else None,
                 "base_currency": base_fx.base_currency,
             }
@@ -331,7 +342,7 @@ class PortfolioService:
             {
                 "month": month,
                 "net_eur": round(float(monthly_net[month]), 2),
-                "gross_eur": round(float(monthly_gross[month]), 2),
+                "deployed_eur": round(float(monthly_gross[month]), 2),
             }
             for month in sorted(monthly_net)
         ]
@@ -351,38 +362,54 @@ class PortfolioService:
                 start = max(_shift_months(as_of, span), first_open)
 
             net = sum((a for d, a in legs if start <= d <= as_of), Decimal("0"))
-            gross = sum((a for d, a in legs if start <= d <= as_of and a > 0), Decimal("0"))
+            deployed = sum(
+                (a for d, a in legs if start <= d <= as_of and a > 0), Decimal("0")
+            )
 
-            # Added side: clamp to where deposit data actually begins, and divide by
-            # that shorter span. Averaging over months with no ledger would quietly
-            # report a low savings rate that is really just missing history.
-            if deposits_from is None:
-                added, added_months, added_covered = None, None, False
-            else:
-                added_start = max(start, deposits_from)
-                added_covered = added_start <= start
-                added_months = max((as_of - added_start).days, 1) / _DAYS_PER_MONTH
-                added_months = min(added_months, months)
-                added = sum(
-                    (a for d, a in added_legs if added_start <= d <= as_of), Decimal("0")
+            # Splice at the coverage boundary: lots strictly before it, deposits from it
+            # onward. The two ranges don't overlap, so nothing is counted twice, and
+            # together they cover the whole window — no clamped divisor needed.
+            if coverage_from is None:
+                method = "deployed"
+                deposits = Decimal("0")
+                money_in = deployed
+            elif start >= coverage_from:
+                method = "deposits"
+                deposits = sum(
+                    (a for d, a in deposit_legs if start <= d <= as_of), Decimal("0")
                 )
+                money_in = deposits
+            else:
+                method = "spliced"
+                deposits = sum(
+                    (a for d, a in deposit_legs if coverage_from <= d <= as_of),
+                    Decimal("0"),
+                )
+                pre = sum(
+                    (a for d, a in legs if start <= d < coverage_from and a > 0),
+                    Decimal("0"),
+                )
+                money_in = pre + deposits
 
             windows.append({
                 "label": label,
                 "months": round(months, 2),
-                "net_eur": round(float(net), 2),
-                "gross_eur": round(float(gross), 2),
-                # Averaged over gross: the question is how much was put to work
-                # per month, not how much of it stayed there.
-                "avg_per_month_eur": round(float(gross) / months, 2) if months > 0 else 0.0,
                 "partial": partial,
-                "added_eur": round(float(added), 2) if added is not None else None,
-                "added_months": round(added_months, 2) if added_months else None,
-                "avg_added_per_month_eur": (
-                    round(float(added) / added_months, 2)
-                    if added is not None and added_months else None
+                # The answer: era-correct money in, immune to rotation wherever a
+                # deposit ledger exists.
+                "money_in_eur": round(float(money_in), 2),
+                "avg_money_in_per_month_eur": (
+                    round(float(money_in) / months, 2) if months > 0 else 0.0
                 ),
-                "added_covered": added_covered,
+                "money_in_method": method,
+                "deposits_eur": round(float(deposits), 2),
+                # Secondary: capital put to work. Exceeds money_in once positions are
+                # rotated, and that gap is the point of showing it.
+                "deployed_eur": round(float(deployed), 2),
+                "avg_deployed_per_month_eur": (
+                    round(float(deployed) / months, 2) if months > 0 else 0.0
+                ),
+                "net_eur": round(float(net), 2),
             })
 
         return {
@@ -390,6 +417,7 @@ class PortfolioService:
             "monthly": monthly,
             "first_contribution_date": first_open.isoformat(),
             "deposits_from": deposits_from.isoformat() if deposits_from else None,
+            "coverage_from": coverage_from.isoformat() if coverage_from else None,
             "transfer_in_date": transfer_in_date.isoformat() if transfer_in_date else None,
             "base_currency": base_fx.base_currency,
         }
