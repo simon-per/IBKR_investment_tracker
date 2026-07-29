@@ -1,11 +1,12 @@
 """
 API endpoints for portfolio allocation data (sector, geography, asset type).
 """
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.services.allocation_service import AllocationService
+from app.single_flight import SyncBusy, single_flight
 
 
 router = APIRouter()
@@ -21,9 +22,15 @@ async def sync_allocation_data(
     Fetches sector and country information from yfinance with rate limiting.
     Uses cached data unless force_refresh=True or data is >7 days old.
     """
-    service = AllocationService(db)
-    result = await service.sync_allocation_data(force_refresh=force_refresh)
-    return result
+    try:
+        # Public route, one Yahoo request per security: one at a time, cooled down.
+        with single_flight("allocation-sync", cooldown_seconds=300):
+            service = AllocationService(db)
+            result = await service.sync_allocation_data(force_refresh=force_refresh)
+            return result
+    except SyncBusy as e:
+        raise HTTPException(status_code=429, detail=str(e),
+                            headers={"Retry-After": str(e.retry_after_seconds)})
 
 
 @router.get("/portfolio")

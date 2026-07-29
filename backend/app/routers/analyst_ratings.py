@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.services.analyst_rating_service import AnalystRatingService
+from app.single_flight import SyncBusy, single_flight
 
 
 router = APIRouter()
@@ -28,22 +29,27 @@ async def sync_analyst_ratings(db: AsyncSession = Depends(get_db)):
         Summary of synced data including counts and any errors
     """
     try:
-        rating_service = AnalystRatingService(db)
+        # Public route, one Yahoo request per security: one at a time, cooled down.
+        with single_flight("ratings-sync", cooldown_seconds=300):
+            rating_service = AnalystRatingService(db)
 
-        # Sync all securities
-        result = await rating_service.sync_ratings_for_securities()
+            # Sync all securities
+            result = await rating_service.sync_ratings_for_securities()
 
-        if result['errors'] > 0:
+            if result['errors'] > 0:
+                return {
+                    "status": "partial_success",
+                    **result
+                }
+
             return {
-                "status": "partial_success",
+                "status": "success",
                 **result
             }
 
-        return {
-            "status": "success",
-            **result
-        }
-
+    except SyncBusy as e:
+        raise HTTPException(status_code=429, detail=str(e),
+                            headers={"Retry-After": str(e.retry_after_seconds)})
     except Exception as e:
         await db.rollback()
         raise HTTPException(
@@ -65,14 +71,18 @@ async def sync_stale_analyst_ratings(db: AsyncSession = Depends(get_db)):
         Summary of synced data
     """
     try:
-        rating_service = AnalystRatingService(db)
-        result = await rating_service.sync_stale_ratings()
+        with single_flight("ratings-sync", cooldown_seconds=300):
+            rating_service = AnalystRatingService(db)
+            result = await rating_service.sync_stale_ratings()
 
-        return {
-            "status": "success",
-            **result
-        }
+            return {
+                "status": "success",
+                **result
+            }
 
+    except SyncBusy as e:
+        raise HTTPException(status_code=429, detail=str(e),
+                            headers={"Retry-After": str(e.retry_after_seconds)})
     except Exception as e:
         await db.rollback()
         raise HTTPException(

@@ -39,6 +39,12 @@ _running: Set[str] = set()
 _last_start: Dict[str, float] = {}
 
 
+def is_running(name: str) -> bool:
+    """For BackgroundTasks-based routes: the handler returns before the work
+    starts, so it checks here and the background function holds the gate."""
+    return name in _running
+
+
 @contextmanager
 def single_flight(name: str, cooldown_seconds: int = 0):
     """

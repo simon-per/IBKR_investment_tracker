@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.services.watchlist_service import WatchlistService
+from app.single_flight import SyncBusy, single_flight
 from app.repositories.watchlist_repository import WatchlistRepository
 from app.schemas.portfolio import (
     WatchlistItemResponse,
@@ -100,9 +101,14 @@ async def sync_watchlist(
     db: AsyncSession = Depends(get_db),
 ):
     """Force refresh all watchlist items."""
-    service = WatchlistService(db)
-    result = await service.sync_all(force=force)
-    return result
+    try:
+        with single_flight("watchlist-sync", cooldown_seconds=300):
+            service = WatchlistService(db)
+            result = await service.sync_all(force=force)
+            return result
+    except SyncBusy as e:
+        raise HTTPException(status_code=429, detail=str(e),
+                            headers={"Retry-After": str(e.retry_after_seconds)})
 
 
 def _compute_peg(item):

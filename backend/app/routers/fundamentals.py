@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal, get_db
 from app.services.fundamentals_service import FundamentalsService
+from app.single_flight import SyncBusy, is_running, single_flight
 
 logger = logging.getLogger(__name__)
 
@@ -13,12 +14,18 @@ router = APIRouter()
 
 async def _run_sync_background(force_refresh: bool) -> None:
     """Run fundamentals sync in background with its own DB session."""
-    async with AsyncSessionLocal() as db:
-        try:
-            service = FundamentalsService(db)
-            await service.sync_fundamentals_data(force_refresh=force_refresh)
-        except Exception as e:
-            logger.error(f"Background fundamentals sync failed: {e}")
+    try:
+        # The handler already answered, so the gate lives here, spanning the
+        # actual Yahoo work rather than the enqueue.
+        with single_flight("fundamentals-sync"):
+            async with AsyncSessionLocal() as db:
+                try:
+                    service = FundamentalsService(db)
+                    await service.sync_fundamentals_data(force_refresh=force_refresh)
+                except Exception as e:
+                    logger.error(f"Background fundamentals sync failed: {e}")
+    except SyncBusy:
+        logger.info("Fundamentals sync already running; duplicate trigger dropped")
 
 
 @router.post("/sync")
@@ -27,6 +34,8 @@ async def sync_fundamentals(
     force_refresh: bool = Query(False, description="Force refresh all, even fresh data"),
 ):
     """Kick off a fundamentals sync in the background and return immediately."""
+    if is_running("fundamentals-sync"):
+        return {"status": "already_running", "message": "Fundamentals sync is already in progress"}
     background_tasks.add_task(_run_sync_background, force_refresh)
     return {
         "status": "started",
@@ -42,10 +51,14 @@ async def sync_fundamentals(
 async def sync_stale_fundamentals(db: AsyncSession = Depends(get_db)):
     """Sync only fundamentals that are stale (older than 7 days)."""
     try:
-        service = FundamentalsService(db)
-        result = await service.sync_stale_fundamentals()
-        return {"status": "success", **result}
+        with single_flight("fundamentals-sync", cooldown_seconds=300):
+            service = FundamentalsService(db)
+            result = await service.sync_stale_fundamentals()
+            return {"status": "success", **result}
 
+    except SyncBusy as e:
+        raise HTTPException(status_code=429, detail=str(e),
+                            headers={"Retry-After": str(e.retry_after_seconds)})
     except Exception as e:
         await db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to sync stale fundamentals: {str(e)}")
