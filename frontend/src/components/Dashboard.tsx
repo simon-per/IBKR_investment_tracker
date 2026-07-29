@@ -311,7 +311,10 @@ export function Dashboard() {
                 </details>
               )}
             </div>
-            <div className="flex gap-2 items-center">
+            {/* Wraps: at 390px the currency select plus the sync button are
+                wider than the viewport, and without this the whole page scrolled
+                horizontally by ~25px on every tab. */}
+            <div className="flex flex-wrap items-center justify-end gap-2">
               <select
                 value={baseCurrency}
                 onChange={(e) => setBaseCurrency(e.target.value)}
@@ -380,7 +383,13 @@ export function Dashboard() {
       {/* Main Content */}
       <div className="w-full px-4 py-6">
         <Tabs defaultValue="performance" className="space-y-8">
-          <TabsList className="grid w-full max-w-3xl grid-cols-7">
+          {/* Seven equal columns only once there is room for them: at 390px each
+              cell was ~53px while the triggers are whitespace-nowrap, so the
+              labels overlapped into an unreadable smear on every tab. Below `sm`
+              the columns size to their content and the list scrolls instead.
+              Stays `grid` rather than `flex` because TabsList's own base class is
+              `inline-flex`, which wins over `flex` in Tailwind's output order. */}
+          <TabsList className="grid w-full max-w-3xl auto-cols-max grid-flow-col overflow-x-auto sm:auto-cols-fr">
             <TabsTrigger value="performance">Performance</TabsTrigger>
             <TabsTrigger value="allocation">Allocation</TabsTrigger>
             <TabsTrigger value="dividends">Dividends</TabsTrigger>
