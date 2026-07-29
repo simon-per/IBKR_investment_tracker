@@ -48,6 +48,8 @@ class TaxLot(Base):
     __table_args__ = (
         Index('ix_open_date_security', 'open_date', 'security_id'),
         Index('ix_is_open', 'is_open'),
+        # Reconciliation's hot lookup: this security's open lots.
+        Index('ix_taxlots_security_open', 'security_id', 'is_open'),
     )
 
     def __repr__(self) -> str:

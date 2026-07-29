@@ -27,6 +27,9 @@ class ExchangeRate(Base):
     __table_args__ = (
         UniqueConstraint('date', 'from_currency', 'to_currency', name='uix_date_currencies'),
         Index('ix_date_from_currency', 'date', 'from_currency'),
+        # Carry-forward shape: equality on the pair, range + ORDER BY on date —
+        # the unique constraint leads with the ranged column and can't serve it.
+        Index('ix_exchange_rates_pair_date', 'from_currency', 'to_currency', 'date'),
     )
 
     def __repr__(self) -> str:
