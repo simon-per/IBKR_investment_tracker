@@ -141,6 +141,14 @@ class CurrencyService:
 
         raise ValueError(f"No exchange rate available for {from_currency} on or before {target_date}")
 
+    # A carried rate is an approximation that ages. Friday's rate over a weekend
+    # (or a holiday cluster) is the designed case; a month-old rate silently
+    # stamped onto a new lot's *persisted* cost_basis_eur is not — the fallback
+    # provider bounds itself at FALLBACK_MAX_AGE_DAYS while this path had no bound
+    # at all. Past this, refuse and let get_exchange_rate() raise: the caller's
+    # skip-with-warning path takes over and self-heals when providers recover.
+    CARRY_FORWARD_MAX_AGE_DAYS = 30
+
     async def _carry_forward(
         self,
         from_currency: str,
@@ -148,7 +156,9 @@ class CurrencyService:
         to_currency: str
     ) -> Optional[Decimal]:
         """
-        Reuse the most recent rate on or before ``target_date`` (weekends, holidays).
+        Reuse the most recent rate on or before ``target_date`` (weekends, holidays),
+        refusing once the newest available rate is older than
+        CARRY_FORWARD_MAX_AGE_DAYS.
 
         Caches it under the requested date keeping the provider tag of the row it came
         from, so the audit trail survives the copy.
@@ -156,7 +166,14 @@ class CurrencyService:
         recent = await self._get_most_recent_rate(from_currency, target_date, to_currency)
         if not recent:
             return None
-        rate, source = recent
+        rate, source, rate_date = recent
+        age = (target_date - rate_date).days
+        if age > self.CARRY_FORWARD_MAX_AGE_DAYS:
+            logger.warning(
+                f"Refusing to carry a {age}-day-old {from_currency}/{to_currency} rate "
+                f"({rate_date}) onto {target_date} — beyond {self.CARRY_FORWARD_MAX_AGE_DAYS} days"
+            )
+            return None
         await self._cache_rate(from_currency, to_currency, target_date, rate, source=source)
         return rate
 
@@ -182,11 +199,11 @@ class CurrencyService:
         from_currency: str,
         target_date: date,
         to_currency: str
-    ) -> Optional[Tuple[Decimal, str]]:
+    ) -> Optional[Tuple[Decimal, str, date]]:
         """
         Get the most recent exchange rate on or before the target date, with the
-        provider that produced it. Used for weekends/holidays when the specific
-        date isn't available.
+        provider that produced it and the date it belongs to. Used for
+        weekends/holidays when the specific date isn't available.
 
         The `date <= target_date` bound is what stops a currency we only learned
         about recently from being projected backwards onto older lots: a rate first
@@ -204,7 +221,9 @@ class CurrencyService:
             .limit(1)
         )
         exchange_rate = result.scalar_one_or_none()
-        return (exchange_rate.rate, exchange_rate.source) if exchange_rate else None
+        if not exchange_rate:
+            return None
+        return exchange_rate.rate, exchange_rate.source, exchange_rate.date
 
     async def _batch_fetch_rates(
         self,
