@@ -93,9 +93,14 @@ export function DividendsTab() {
   const { chartData, stackSymbols } = useMemo(() => {
     if (!data) return { chartData: [] as Record<string, number | string>[], stackSymbols: [] as string[] }
 
+    // Rank the series the months actually contain, never securities[].symbol: the
+    // backend disambiguates a ticker that spans two instruments ("ASML (AEB)"), so
+    // ranking by bare symbol would match nothing and dump those series into Other.
     const totals = new Map<string, number>()
-    for (const row of data.securities) {
-      totals.set(row.symbol, (totals.get(row.symbol) ?? 0) + row.net_eur + row.forecast_net_eur)
+    for (const m of data.months) {
+      for (const [sym, v] of [...Object.entries(m.actual), ...Object.entries(m.forecast)]) {
+        totals.set(sym, (totals.get(sym) ?? 0) + v)
+      }
     }
     const top = [...totals.entries()]
       .sort((a, b) => b[1] - a[1])
