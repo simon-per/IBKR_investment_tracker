@@ -22,6 +22,7 @@ import { DividendsTab } from './DividendsTab'
 import { ThemeToggle } from './ThemeToggle'
 import { BenchmarkPicker, BENCHMARK_COLORS } from './BenchmarkPicker'
 import { useBaseCurrency, useCurrencySymbol } from '@/lib/CurrencyContext'
+import { concentrationPct, maxDrawdownPct, sharpeRatio } from '@/lib/portfolioKpis'
 import { RefreshCw, Download, Clock } from 'lucide-react'
 
 type TimeRange = '1W' | 'MTD' | '1M' | '3M' | '6M' | 'YTD' | '1Y' | '2Y' | 'ALL'
@@ -207,67 +208,11 @@ export function Dashboard() {
     // "simple_period" for <30-day windows: a raw period return, not annualized.
     const xirrMethod = annualizedReturn?.method ?? 'xirr'
 
-    // 2. Maximum Drawdown (deposit-adjusted using cumulative investment returns)
-    // Track deposit-adjusted portfolio value so deposits don't mask real drawdowns
-    let maxDrawdown = 0
-    let adjustedValue = valueOverTime[0].market_value_eur
-    let adjustedPeak = adjustedValue
-
-    for (let i = 1; i < valueOverTime.length; i++) {
-      const prevMV = valueOverTime[i - 1].market_value_eur
-      const currMV = valueOverTime[i].market_value_eur
-      const cf = valueOverTime[i].cost_basis_eur - valueOverTime[i - 1].cost_basis_eur
-      // Grow adjusted value by the investment return (excluding cash flows)
-      const denominator = prevMV + cf * 0.5
-      if (denominator > 0) {
-        const dailyReturn = (currMV - prevMV - cf) / denominator
-        adjustedValue *= (1 + dailyReturn)
-      }
-      if (adjustedValue > adjustedPeak) {
-        adjustedPeak = adjustedValue
-      }
-      if (adjustedPeak > 0) {
-        const drawdown = ((adjustedValue - adjustedPeak) / adjustedPeak) * 100
-        if (drawdown < maxDrawdown) {
-          maxDrawdown = drawdown
-        }
-      }
-    }
-
-    // 3. Sharpe Ratio (Modified Dietz daily returns to exclude cash flow effects)
-    const returns: number[] = []
-    for (let i = 1; i < valueOverTime.length; i++) {
-      const prevMV = valueOverTime[i - 1].market_value_eur
-      const currMV = valueOverTime[i].market_value_eur
-      const cf = valueOverTime[i].cost_basis_eur - valueOverTime[i - 1].cost_basis_eur
-      const denominator = prevMV + cf * 0.5
-      if (denominator > 0) {
-        const dailyReturn = (currMV - prevMV - cf) / denominator
-        returns.push(dailyReturn)
-      }
-    }
-
-    let sharpeRatio = 0
-    if (returns.length >= 5) {
-      // Calculate average return and standard deviation
-      const avgReturn = returns.reduce((sum, r) => sum + r, 0) / returns.length
-      const variance = returns.reduce((sum, r) => sum + Math.pow(r - avgReturn, 2), 0) / returns.length
-      const stdDev = Math.sqrt(variance)
-
-      // Annualize (assuming ~252 trading days per year)
-      const annualizedReturn = avgReturn * 252
-      const annualizedStdDev = stdDev * Math.sqrt(252)
-
-      // Risk-free rate (assume 3% for EUR)
-      const riskFreeRate = 0.03
-
-      sharpeRatio = annualizedStdDev > 0.001
-        ? (annualizedReturn - riskFreeRate) / annualizedStdDev
-        : 0
-
-      // Clamp to reasonable range
-      sharpeRatio = Math.max(-10, Math.min(10, sharpeRatio))
-    }
+    // 2/3. Drawdown and Sharpe, from flow-adjusted daily returns. Extracted and
+    // unit-tested: both net out the day's external flow, and inferring that flow
+    // from the cost-basis line booked every profitable sale as a loss.
+    const maxDrawdown = maxDrawdownPct(valueOverTime)
+    const sharpe = sharpeRatio(valueOverTime)
 
     // 4. Win Rate (percentage of profitable positions)
     const profitablePositions = positions.filter(p => p.gain_loss_eur > 0).length
@@ -280,18 +225,13 @@ export function Dashboard() {
       : null
 
     // 6. Top 5 Concentration
-    const totalMV = positions.reduce((sum, p) => sum + p.market_value_eur, 0)
-    const top5MV = [...positions]
-      .sort((a, b) => b.market_value_eur - a.market_value_eur)
-      .slice(0, 5)
-      .reduce((sum, p) => sum + p.market_value_eur, 0)
-    const top5Weight = totalMV > 0 ? (top5MV / totalMV) * 100 : 0
+    const top5Weight = concentrationPct(positions, 5)
 
     return {
       xirr,
       xirrMethod,
       maxDrawdown,
-      sharpeRatio,
+      sharpeRatio: sharpe,
       winRate,
       profitablePositions,
       totalPositions: positions.length,

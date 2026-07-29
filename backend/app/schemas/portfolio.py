@@ -61,6 +61,14 @@ class PortfolioValuePoint(BaseModel):
     market_value_eur: float = Field(..., description="Current market value on this date (in base_currency)")
     gain_loss_eur: float = Field(..., description="Unrealized gain/loss (in base_currency)")
     gain_loss_percent: float = Field(..., description="Percentage gain/loss")
+    external_flow_eur: float = Field(
+        0.0,
+        description=(
+            "Money entering (+) or leaving (−) the holdings on this date: purchases "
+            "at cost, sales at market proceeds. Net this out of any return measure — "
+            "deriving it from the cost-basis line books a sale's gain as a loss."
+        ),
+    )
     base_currency: str = Field("EUR", description="Currency the *_eur values are expressed in")
 
     class Config:

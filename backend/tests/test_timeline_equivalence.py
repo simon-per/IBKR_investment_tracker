@@ -97,6 +97,34 @@ def test_swept_timeline_equals_the_per_day_loop(use_chf_base):
             ))
         d += timedelta(days=1)
 
-    assert swept == per_day
+    # The sweep additionally reports the day's external flow, which the per-day
+    # helper has no notion of; the valuation numbers must still match exactly.
+    valuation_keys = set(per_day[0])
+    assert [{k: v for k, v in row.items() if k in valuation_keys} for row in swept] == per_day
     # Sanity that the fixture exercised what it claims to.
     assert any(row["cost_basis_eur"] != per_day[0]["cost_basis_eur"] for row in per_day)
+
+
+def test_external_flow_reports_purchases_at_cost_and_sales_at_proceeds():
+    """
+    A sale leaves the holdings at its market value, not at the cost it was
+    bought for. Inferring the flow from the cost-basis line instead books the
+    difference as a phantom return on the sale date.
+    """
+    lots, price_cache, fx_cache, currency_map, _ = _fixture()
+    svc = PortfolioService.__new__(PortfolioService)
+    base_fx = BaseFx("EUR", {})
+
+    # ROLD: 10 shares closed 2026-03-18, priced 11.5 -> 115 of proceeds.
+    swept = svc._calculate_timeline_swept(
+        START, END, lots, price_cache, fx_cache, currency_map, base_fx,
+        disposals_by_day={date(2026, 3, 18): Decimal("115")},
+    )
+    by_date = {row["date"]: row for row in swept}
+
+    # That day also opens RNEW at 115 of cost, so the rotation nets to zero...
+    assert by_date["2026-03-18"]["external_flow_eur"] == pytest.approx(0.0)
+    # ...while the cost-basis line moves by +115 − 110, which is what made the
+    # old inference wrong.
+    assert by_date["2026-03-10"]["external_flow_eur"] == pytest.approx(50.0)  # a purchase
+    assert by_date["2026-03-11"]["external_flow_eur"] == pytest.approx(0.0)   # a quiet day

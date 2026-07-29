@@ -16,6 +16,11 @@ export interface PortfolioValuePoint {
   market_value_eur: number;
   gain_loss_eur: number;
   gain_loss_percent: number;
+  /**
+   * Money entering (+) or leaving (−) the holdings that day: purchases at cost,
+   * sales at market proceeds. Optional so older payloads still parse.
+   */
+  external_flow_eur?: number;
   base_currency?: string;
 }
 

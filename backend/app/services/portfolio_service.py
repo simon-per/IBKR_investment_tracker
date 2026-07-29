@@ -171,10 +171,22 @@ class PortfolioService:
         exchange_rate_cache = await self._preload_exchange_rates(unique_securities, start_date, end_date, price_currency_cache=price_currency_cache)
         base_fx = await self._load_base_fx()
 
+        # Proceeds of lots closed in the range, so each day can report the real
+        # external flow rather than leaving the frontend to infer one from the
+        # cost-basis line — which reads a sale as (cost − proceeds) of phantom
+        # return and distorts drawdown and Sharpe.
+        disposals_by_day: Dict[date, Decimal] = {}
+        for row in await self.realized_rows_from_closed_lots(
+            base_fx, start=start_date, end=end_date
+        ):
+            d = row["close_date"]
+            disposals_by_day[d] = disposals_by_day.get(d, Decimal("0")) + row["proceeds"]
+
         # One sweep over the whole range instead of a per-day × per-lot loop.
         portfolio_timeline = self._calculate_timeline_swept(
             start_date, end_date, taxlots_with_securities, price_cache,
             exchange_rate_cache, price_currency_cache, base_fx,
+            disposals_by_day=disposals_by_day,
         )
         for row in portfolio_timeline:
             row["base_currency"] = base_fx.base_currency
@@ -189,6 +201,7 @@ class PortfolioService:
         exchange_rate_cache: Dict,
         price_currency_cache: Optional[Dict],
         base_fx: BaseFx,
+        disposals_by_day: Optional[Dict[date, Decimal]] = None,
     ) -> List[Dict]:
         """
         The full timeline in one sweep — numerically identical to calling
@@ -211,17 +224,26 @@ class PortfolioService:
                 events.append((lot.close_date, sec.id, -lot.quantity, -cost))
         events.sort(key=lambda e: e[0])
 
+        disposals_by_day = disposals_by_day or {}
         qty_by_sec: Dict[int, Decimal] = {}
         total_cost = Decimal("0")
         timeline: List[Dict] = []
         i = 0
         d = start_date
+        # Flows accumulate until the next emitted row: only weekdays are emitted,
+        # so a purchase or sale dated on a weekend belongs to the following one.
+        pending_flow = Decimal("0")
         while d <= end_date:
             while i < len(events) and events[i][0] <= d:
                 _, sid, dq, dc = events[i]
                 qty_by_sec[sid] = qty_by_sec.get(sid, Decimal("0")) + dq
                 total_cost += dc
+                # Purchases enter at cost; sales are netted below at their market
+                # proceeds, not at the cost they were originally bought for.
+                if dc > 0:
+                    pending_flow += dc
                 i += 1
+            pending_flow -= disposals_by_day.get(d, Decimal("0"))
 
             if d.weekday() < 5:
                 mv_eur = Decimal("0")
@@ -265,7 +287,13 @@ class PortfolioService:
                     "gain_loss_percent": float(
                         (gain / total_cost * 100) if total_cost > 0 else 0
                     ),
+                    # Money entering (+) or leaving (−) the tracked holdings today:
+                    # purchases at cost, sales at their market proceeds. Any return
+                    # measure has to net this out, and inferring it from the
+                    # cost-basis line books a sale's whole gain as a loss.
+                    "external_flow_eur": float(pending_flow),
                 })
+                pending_flow = Decimal("0")
             d += timedelta(days=1)
 
         return timeline
