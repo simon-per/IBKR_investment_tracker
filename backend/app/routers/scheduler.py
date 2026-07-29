@@ -12,6 +12,7 @@ from app.database import get_db
 from app.redact import redact_secrets
 from app.repositories.sync_run_repository import SyncRunRepository
 from app.services.scheduler_service import get_scheduler
+from app.single_flight import SyncBusy, single_flight
 
 logger = logging.getLogger(__name__)
 
@@ -53,10 +54,18 @@ async def trigger_sync_now():
         Summary of sync operations
     """
     try:
-        scheduler = get_scheduler()
-        result = await scheduler.trigger_sync_now()
+        # Own cooldown on top of the pipeline gate: this endpoint is public and
+        # runs the heaviest job there is (IBKR + 730d Yahoo + dividends).
+        with single_flight("manual-trigger", cooldown_seconds=300):
+            scheduler = get_scheduler()
+            result = await scheduler.trigger_sync_now()
         return redact_secrets(result)
 
+    except SyncBusy as e:
+        raise HTTPException(
+            status_code=429, detail=str(e),
+            headers={"Retry-After": str(e.retry_after_seconds)},
+        )
     except Exception as e:
         raise HTTPException(
             status_code=500,

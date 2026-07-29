@@ -78,12 +78,12 @@ class BenchmarkService:
         await asyncio.sleep(random.uniform(1.0, 2.0))  # rate-limit
 
         try:
-            yf_ticker = yf.Ticker(ticker)
-            hist = yf_ticker.history(
-                start=fetch_start.isoformat(),
-                end=fetch_end.isoformat(),
-                auto_adjust=True,
-            )
+            # In a thread like every other yfinance call site — this is reachable
+            # from a public GET on any cache miss and would block the event loop.
+            def _fetch(t=ticker, s=fetch_start.isoformat(), e=fetch_end.isoformat()):
+                return yf.Ticker(t).history(start=s, end=e, auto_adjust=True)
+
+            hist = await asyncio.to_thread(_fetch)
 
             if hist.empty:
                 logger.warning(f"No data returned from Yahoo for {ticker}")

@@ -5,12 +5,13 @@ API endpoints for syncing and managing market price data.
 import asyncio
 import logging
 import random
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.services.market_data_service import MarketDataService
 from app.repositories.security_repository import SecurityRepository
+from app.single_flight import SYNC_PIPELINE, SyncBusy, single_flight
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +19,12 @@ router = APIRouter()
 
 
 @router.post("/sync")
-async def sync_market_data(days_back: int = 730, db: AsyncSession = Depends(get_db)):
+async def sync_market_data(
+    # Bounded: this drives a no-await per-day Python loop per security, so an
+    # unbounded value from the public internet would block the event loop.
+    days_back: int = Query(730, ge=1, le=3650),
+    db: AsyncSession = Depends(get_db),
+):
     """
     Sync historical market prices for all securities.
 
@@ -36,72 +42,84 @@ async def sync_market_data(days_back: int = 730, db: AsyncSession = Depends(get_
         Summary of synced data including counts and any errors
     """
     try:
-        market_data_service = MarketDataService(db)
-        security_repo = SecurityRepository(db)
-
-        # Get all securities
-        securities = await security_repo.get_all(limit=1000)
-
-        if not securities:
-            return {
-                "status": "success",
-                "message": "No securities found to sync",
-                "securities_processed": 0,
-                "prices_fetched": 0
-            }
-
-        total_prices = 0
-        errors = []
-
-        logger.info(f"Syncing market data for {len(securities)} securities")
-
-        for idx, security in enumerate(securities):
-            try:
-                logger.info(f"Fetching prices for {security.symbol} ({security.exchange})...")
-
-                # Fetch historical data
-                prices_count = await market_data_service.sync_security_prices(
-                    security,
-                    days_back=days_back
-                )
-
-                total_prices += prices_count
-                logger.info(f"  Fetched {prices_count} price points for {security.symbol}")
-
-                # Add delay between securities to avoid overwhelming Yahoo Finance
-                # Skip delay after the last security
-                if idx < len(securities) - 1:
-                    delay = random.uniform(2.0, 4.0)
-                    logger.debug(f"  Waiting {delay:.1f}s before next security...")
-                    await asyncio.sleep(delay)
-
-            except Exception as e:
-                error_msg = f"Failed to fetch prices for {security.symbol}: {str(e)}"
-                logger.error(f"  {error_msg}")
-                errors.append(error_msg)
-
-        # Commit all price data
-        await db.commit()
-
-        result = {
-            "status": "success" if not errors else "partial_success",
-            "message": f"Synced market data for {len(securities)} securities",
-            "securities_processed": len(securities),
-            "prices_fetched": total_prices,
-        }
-
-        if errors:
-            result["errors"] = errors
-            result["errors_count"] = len(errors)
-
-        return result
-
+        # Shared pipeline gate: a full market sync is 50-150+ Yahoo requests, and
+        # racing the scheduled jobs doubles that against an IP-based rate limit.
+        with single_flight(SYNC_PIPELINE, cooldown_seconds=300):
+            return await _sync_market_data_locked(days_back, db)
+    except SyncBusy as e:
+        raise HTTPException(
+            status_code=429, detail=str(e),
+            headers={"Retry-After": str(e.retry_after_seconds)},
+        )
     except Exception as e:
         await db.rollback()
         raise HTTPException(
             status_code=500,
             detail=f"Failed to sync market data: {str(e)}"
         )
+
+
+async def _sync_market_data_locked(days_back: int, db: AsyncSession):
+    """The sync body, run while holding the pipeline gate."""
+    market_data_service = MarketDataService(db)
+    security_repo = SecurityRepository(db)
+
+    # Get all securities
+    securities = await security_repo.get_all(limit=1000)
+
+    if not securities:
+        return {
+            "status": "success",
+            "message": "No securities found to sync",
+            "securities_processed": 0,
+            "prices_fetched": 0
+        }
+
+    total_prices = 0
+    errors = []
+
+    logger.info(f"Syncing market data for {len(securities)} securities")
+
+    for idx, security in enumerate(securities):
+        try:
+            logger.info(f"Fetching prices for {security.symbol} ({security.exchange})...")
+
+            # Fetch historical data
+            prices_count = await market_data_service.sync_security_prices(
+                security,
+                days_back=days_back
+            )
+
+            total_prices += prices_count
+            logger.info(f"  Fetched {prices_count} price points for {security.symbol}")
+
+            # Add delay between securities to avoid overwhelming Yahoo Finance
+            # Skip delay after the last security
+            if idx < len(securities) - 1:
+                delay = random.uniform(2.0, 4.0)
+                logger.debug(f"  Waiting {delay:.1f}s before next security...")
+                await asyncio.sleep(delay)
+
+        except Exception as e:
+            error_msg = f"Failed to fetch prices for {security.symbol}: {str(e)}"
+            logger.error(f"  {error_msg}")
+            errors.append(error_msg)
+
+    # Commit all price data
+    await db.commit()
+
+    result = {
+        "status": "success" if not errors else "partial_success",
+        "message": f"Synced market data for {len(securities)} securities",
+        "securities_processed": len(securities),
+        "prices_fetched": total_prices,
+    }
+
+    if errors:
+        result["errors"] = errors
+        result["errors_count"] = len(errors)
+
+    return result
 
 
 @router.get("/status")

@@ -12,6 +12,7 @@ from datetime import datetime
 from app.database import get_db
 from app.redact import redact_secrets
 from app.services.ibkr_service import IBKRService
+from app.single_flight import SYNC_PIPELINE, SyncBusy, single_flight
 from app.services.sync_helper import ingest_flex_statement
 from app.repositories.security_repository import SecurityRepository
 from app.repositories.taxlot_repository import TaxLotRepository
@@ -39,38 +40,15 @@ async def sync_ibkr_data(db: AsyncSession = Depends(get_db)):
     """
     started_at = datetime.now()
     try:
-        # Step 1: Fetch data from IBKR
-        flex_data = await IBKRService().fetch_flex_data()
-
-        # Steps 2-6 are shared with the scheduled jobs and the offline XML ingest, so
-        # every path reconciles in exactly the same order.
-        ingested = await ingest_flex_statement(db, flex_data)
-
-        # Commit transaction
-        await db.commit()
-
-        warnings = ingested.pop("warnings", [])
-        result = {
-            "status": "success",
-            "message": "Successfully synced data from IBKR",
-            **ingested,
-        }
-
-        # Surface skipped currencies plus any Flex XML schema drift the sanitizer had
-        # to work around, so it's visible in the API/UI and not only in container logs.
-        if warnings:
-            result["warnings"] = warnings
-
-        # Persist the attempt so it survives container restarts (auto-deploy restarts on
-        # every push). Best-effort: never turn a good sync into a failure.
-        await SyncRunRepository(db).record(
-            sync_type="ibkr", status="success", message=result["message"],
-            details={k: v for k, v in result.items() if k not in ("message", "warnings")},
-            warnings=warnings or None, started_at=started_at,
+        # Shared pipeline gate + cooldown: this route is public and one Flex
+        # round is several requests against a 10/min token budget.
+        with single_flight(SYNC_PIPELINE, cooldown_seconds=120):
+            return await _sync_ibkr_locked(db, started_at)
+    except SyncBusy as e:
+        raise HTTPException(
+            status_code=429, detail=str(e),
+            headers={"Retry-After": str(e.retry_after_seconds)},
         )
-
-        return result
-
     except Exception as e:
         await db.rollback()
         await SyncRunRepository(db).record(
@@ -80,6 +58,41 @@ async def sync_ibkr_data(db: AsyncSession = Depends(get_db)):
             status_code=500,
             detail=redact_secrets(f"Failed to sync IBKR data: {str(e)}")
         )
+
+
+async def _sync_ibkr_locked(db: AsyncSession, started_at: datetime) -> Dict:
+    """The sync body, run while holding the pipeline gate. Errors are handled by the caller."""
+    # Step 1: Fetch data from IBKR
+    flex_data = await IBKRService().fetch_flex_data()
+
+    # Steps 2-6 are shared with the scheduled jobs and the offline XML ingest, so
+    # every path reconciles in exactly the same order.
+    ingested = await ingest_flex_statement(db, flex_data)
+
+    # Commit transaction
+    await db.commit()
+
+    warnings = ingested.pop("warnings", [])
+    result = {
+        "status": "success",
+        "message": "Successfully synced data from IBKR",
+        **ingested,
+    }
+
+    # Surface skipped currencies plus any Flex XML schema drift the sanitizer had
+    # to work around, so it's visible in the API/UI and not only in container logs.
+    if warnings:
+        result["warnings"] = warnings
+
+    # Persist the attempt so it survives container restarts (auto-deploy restarts on
+    # every push). Best-effort: never turn a good sync into a failure.
+    await SyncRunRepository(db).record(
+        sync_type="ibkr", status="success", message=result["message"],
+        details={k: v for k, v in result.items() if k not in ("message", "warnings")},
+        warnings=warnings or None, started_at=started_at,
+    )
+
+    return result
 
 
 @router.get("/status")

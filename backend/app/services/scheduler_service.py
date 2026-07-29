@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import date, timedelta
 
 from app.database import AsyncSessionLocal
+from app.single_flight import SYNC_PIPELINE, SyncBusy, single_flight
 from app.services.ibkr_service import IBKRService, FLEX_RETRY_DELAYS_PATIENT
 from app.services.market_data_service import MarketDataService
 from app.services.currency_service import CurrencyService
@@ -437,7 +438,30 @@ class SchedulerService:
                     "timestamp": utc_iso(datetime.now())
                 }
 
-    async def full_sync_job(self):
+    async def _gated_job(self, job_type: str, run) -> Optional[dict]:
+        """
+        Run one pipeline job under the shared sync-pipeline gate.
+
+        A collision (e.g. a manual trigger already in flight at a scheduled slot)
+        records itself as 'skipped' instead of running concurrently — two
+        pipelines would race the Flex budget toward a Code=1025 lockout and
+        double-hit Yahoo. The next scheduled slot recovers the freshness.
+        """
+        try:
+            with single_flight(SYNC_PIPELINE):
+                return await run()
+        except SyncBusy as e:
+            logger.warning(f"{job_type} skipped: {e}")
+            skipped = {
+                "type": job_type,
+                "status": "skipped",
+                "message": str(e),
+                "timestamp": utc_iso(datetime.now()),
+            }
+            await self._record_run(skipped, datetime.now())
+            return skipped
+
+    async def full_sync_job(self) -> Optional[dict]:
         """
         Full sync job that runs once daily at 08:00 Europe/Berlin.
 
@@ -446,6 +470,9 @@ class SchedulerService:
         2. Market data sync (prices for all securities)
         3. Dividend sync (Yahoo Finance ex-dates + EUR income)
         """
+        return await self._gated_job("full_sync", self._full_sync_job_locked)
+
+    async def _full_sync_job_locked(self) -> dict:
         logger.info("=" * 80)
         logger.info("STARTING FULL SYNC JOB (IBKR + MARKET DATA)")
         logger.info("=" * 80)
@@ -491,13 +518,17 @@ class SchedulerService:
         logger.info("=" * 80)
         logger.info("FULL SYNC JOB COMPLETED")
         logger.info("=" * 80)
+        return self.last_sync_result
 
-    async def market_data_only_sync_job(self):
+    async def market_data_only_sync_job(self) -> Optional[dict]:
         """
         Market-data-only sync job that runs at 15:00 and 22:00 Europe/Berlin.
         Only checks last 7 days — very lightweight, just picks up recent closing prices.
         Also syncs exchange rates to keep FX data current.
         """
+        return await self._gated_job("market_data_only", self._market_data_only_locked)
+
+    async def _market_data_only_locked(self) -> dict:
         logger.info("=" * 80)
         logger.info("STARTING MARKET DATA + EXCHANGE RATE SYNC (7 days)")
         logger.info("=" * 80)
@@ -540,6 +571,7 @@ class SchedulerService:
         logger.info("=" * 80)
         logger.info("MARKET DATA ONLY SYNC COMPLETED")
         logger.info("=" * 80)
+        return self.last_sync_result
 
     async def _record_run(self, result: dict, started_at: datetime) -> None:
         """
@@ -565,7 +597,10 @@ class SchedulerService:
         except Exception as e:
             logger.warning(f"Could not persist sync run: {e}")
 
-    async def ibkr_only_sync_job(self):
+    async def ibkr_only_sync_job(self) -> Optional[dict]:
+        return await self._gated_job("ibkr_sync", self._ibkr_only_sync_locked)
+
+    async def _ibkr_only_sync_locked(self) -> dict:
         """
         IBKR-only sync, at 13:00 and 20:00 Europe/Berlin.
 
@@ -604,6 +639,7 @@ class SchedulerService:
         logger.info("=" * 80)
         logger.info("IBKR-ONLY SYNC COMPLETED")
         logger.info("=" * 80)
+        return self.last_sync_result
 
     def start(self):
         """
@@ -690,11 +726,13 @@ class SchedulerService:
         """
         Manually trigger the sync job immediately (for testing).
 
-        Returns:
-            Combined results from both sync operations
+        Raises SyncBusy (a 429 at the router) when the pipeline is already
+        running, instead of pretending a skipped run completed.
         """
         logger.info("Manually triggering full sync job...")
-        await self.full_sync_job()
+        result = await self.full_sync_job()
+        if result and result.get("status") == "skipped":
+            raise SyncBusy(result.get("message") or "sync pipeline is busy")
         # last_sync_result is already set by full_sync_job
         return {"status": "completed", "message": "Manual sync triggered successfully"}
 
