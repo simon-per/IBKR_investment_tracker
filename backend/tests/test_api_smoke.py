@@ -264,6 +264,31 @@ def test_the_shapes_that_broke_production_serialize(client):
     assert len(nxt["months"]) == 12
     assert nxt["total_forecast_net_eur"] > 0
 
+    # The growth block survives response_model serialization — a Pydantic model
+    # silently drops keys it does not declare, so a field added to the service
+    # and not to the schema would vanish here rather than raise anywhere.
+    growth = bd["growth"]
+    for key in ("ttm", "ytd", "avg_month"):
+        assert set(growth[key]) == {"net_eur", "prev_net_eur", "pct"}
+    assert isinstance(growth["ttm_crosses_era"], bool)
+    assert isinstance(growth["annual"], list)
+    assert "next_12m_eur" in growth
+    # Percentages are nullable by design (a zero base is undefined, not large),
+    # so the schema must not coerce them to 0.0.
+    assert all(
+        row["yoy_pct"] is None or isinstance(row["yoy_pct"], float)
+        for row in growth["annual"]
+    )
+    # Growth is unwindowed: the same numbers whichever year is selected, which is
+    # the only reason a year-filtered response can show year-over-year at all.
+    assert client.get("/api/dividends/breakdown").json()["growth"] == growth
+
+    # The calendar is dated and ordered, and its rows name a real security.
+    upcoming = bd["upcoming"]
+    assert [u["date"] for u in upcoming] == sorted(u["date"] for u in upcoming)
+    known = {r["security_id"] for r in bd["securities"]}
+    assert all(u["security_id"] in known for u in upcoming)
+
     # A sale mid-window must not read as a total loss.
     attr = client.get(
         f"/api/portfolio/attribution?start_date={START}&end_date={TODAY}"

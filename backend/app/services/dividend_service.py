@@ -374,6 +374,147 @@ class DividendService:
         ]
         return kept, boundary
 
+    @staticmethod
+    def _pct(current: Decimal, base: Optional[Decimal]) -> Optional[float]:
+        """
+        Growth of ``current`` over ``base``, or None when there is nothing to grow
+        from.
+
+        A zero base is not a small base — the percentage is undefined, and a
+        quarterly payer produces zero months constantly (this account pays nothing
+        in April, August or November). Returning a number there would put a
+        fabricated figure on screen beside measured ones, so callers get None and
+        the UI renders a dash.
+        """
+        if base is None or base <= 0:
+            return None
+        return round(float((current - base) / base * 100), 1)
+
+    @staticmethod
+    def _shift_month(month_key: str, months_back: int) -> str:
+        """'2026-01' shifted back 1 -> '2025-12'. Month keys, not dates."""
+        year, month = int(month_key[:4]), int(month_key[5:7])
+        total = year * 12 + (month - 1) - months_back
+        return f"{total // 12:04d}-{total % 12 + 1:02d}"
+
+    @staticmethod
+    def _same_day_last_year(d: date) -> date:
+        """
+        The same calendar day a year earlier, for like-for-like YTD comparison.
+        29 February has no counterpart, so it falls back to the 28th.
+        """
+        try:
+            return d.replace(year=d.year - 1)
+        except ValueError:
+            return date(d.year - 1, 2, 28)
+
+    async def _forecast_inputs(
+        self, raw_payments: List, securities: Dict[int, Security], as_of: date
+    ) -> tuple:
+        """
+        Everything ``project_dividends`` needs, assembled once.
+
+        Split out because the same inference now has to be driven over two
+        horizons — the year the caller selected (the chart) and a rolling one
+        (the growth figures and the calendar, which must not change when the year
+        filter does). Assembling twice would be waste; assembling in two places
+        would be a second copy of these rules free to drift from this one, which
+        is the failure mode this codebase keeps hitting.
+
+        Returns ``(hist_by_sec, basis_by_sec, lots_by_sec, shares_at)``.
+        """
+        taxlots = list((await self.db.execute(select(TaxLot))).scalars().all())
+        lots_by_sec: Dict[int, List[TaxLot]] = defaultdict(list)
+        for tl in taxlots:
+            lots_by_sec[tl.security_id].append(tl)
+
+        def shares_at(sid: int, d: date) -> Decimal:
+            total = Decimal("0")
+            for lot in lots_by_sec.get(sid, []):
+                if lot.open_date > d:
+                    continue
+                if lot.close_date and lot.close_date <= d:
+                    continue
+                total += lot.quantity
+            return total
+
+        # Built from the RAW history, not the era-spliced income: a payout from
+        # before we owned the share still evidences the schedule, and its
+        # per-share amount still sizes the next one. Keying on realized income
+        # left every recently-bought payer — TSMC, Samsung, SK Hynix, HPE, the
+        # SOXQ ETF — forecasting nothing.
+        fx_to_eur = await self._latest_fx_to_eur(
+            {s.currency for s in securities.values() if s.currency}, as_of
+        )
+
+        # Cadence must come from ONE dated series. The same dividend is recorded
+        # twice — yfinance under its ex-date, IBKR under its pay date — and the
+        # two sit weeks apart, which halves the apparent gap: ASML's quarterly
+        # schedule read as 74 days (5 payouts a year instead of 4) and SBI's
+        # monthly as 28 (13 instead of 12). Deduplication cannot separate them,
+        # because Mastercard's ex-to-pay lag of 29 days is longer than a monthly
+        # payer's whole cycle. yfinance carries the complete, regular ex-date
+        # series, so where it exists it alone defines the schedule.
+        per_share_rows = defaultdict(list)
+        for p in raw_payments:
+            if p.amount_per_share is not None:
+                per_share_rows[p.security_id].append(p)
+        schedule_source = {
+            sid: rows for sid, rows in per_share_rows.items() if len(rows) >= 2
+        }
+
+        hist_by_sec: Dict[int, List[HistPayment]] = defaultdict(list)
+        basis_by_sec: Dict[int, str] = {}
+        for p in raw_payments:
+            scheduled = schedule_source.get(p.security_id)
+            if scheduled is not None and p.amount_per_share is None:
+                continue  # a second record of a dividend already counted
+            on_date = p.pay_date or p.ex_date
+            if on_date is None or on_date > as_of:
+                continue
+            sec = securities.get(p.security_id)
+            if sec is None:
+                continue
+            # Prefer a net-of-withholding per-share figure derived from what
+            # actually landed; fall back to the gross per-share yfinance
+            # publishes. Never mix the two inside one security — that would
+            # average a gross figure against a net one.
+            net_ps = None
+            if self._is_income(p):
+                # IBKR rows store a 0 sentinel in shares_held, so fall back to
+                # the holding the tax lots show for that date.
+                shares = (p.shares_held if (p.shares_held and p.shares_held > 0)
+                          else shares_at(p.security_id, on_date))
+                if shares > 0:
+                    net_ps = self._net_eur(p) / shares
+            gross_ps = None
+            if p.amount_per_share and p.amount_per_share > 0:
+                rate = fx_to_eur.get(sec.currency or "EUR")
+                if rate is not None:
+                    gross_ps = p.amount_per_share * rate
+            if net_ps is not None:
+                basis_by_sec[p.security_id] = "net"
+            hist_by_sec[p.security_id].append(HistPayment(
+                on_date=on_date, per_share_eur=(net_ps, gross_ps),
+            ))
+
+        # Collapse each security to one basis now that we know whether any
+        # realized figure exists for it.
+        for sid, entries in hist_by_sec.items():
+            prefer_net = basis_by_sec.get(sid) == "net"
+            hist_by_sec[sid] = [
+                HistPayment(
+                    on_date=e.on_date,
+                    per_share_eur=(e.per_share_eur[0] if prefer_net
+                                   else e.per_share_eur[1]),
+                )
+                for e in entries
+            ]
+            if not prefer_net:
+                basis_by_sec[sid] = "gross_estimate"
+
+        return hist_by_sec, basis_by_sec, lots_by_sec, shares_at
+
     async def get_dividend_summary(self) -> Dict:
         """
         Aggregate computed dividends into a monthly summary (in base currency).
@@ -535,121 +676,204 @@ class DividendService:
             monthly_actual[on_date.strftime("%Y-%m")][_symbol(p.security_id)] += net
             total_net += net
 
+        # Projections, in base currency, needed at three different reaches:
+        #   - inside the selected window  -> the chart and the per-security table
+        #   - the next 365 days           -> the "next 12M" figure and the calendar
+        #   - per calendar year           -> the year-over-year comparison
+        # One projection pass serves all three. project_dividends() steps
+        # deterministically from the last known payment, so a wide projection
+        # sliced to a narrower window is identical to projecting that window
+        # directly — which is what keeps the chart's numbers unchanged here.
+        upcoming: List[Dict] = []
+        annual_forecast: Dict[int, Decimal] = defaultdict(Decimal)
+        next_12m = Decimal("0")
+        next_pay: Dict[int, date] = {}
+        next_12m_end = as_of + timedelta(days=365)
+
         if include_forecast:
-            # Never project into the past; for a future year that means the whole
-            # year, for the current one the remainder of it.
-            horizon_start = max(as_of + timedelta(days=1), win_start or date.min)
-            horizon_end = win_end or date(as_of.year, 12, 31)
-            if horizon_start <= horizon_end:
-                taxlots = list((await self.db.execute(select(TaxLot))).scalars().all())
-                lots_by_sec: Dict[int, List[TaxLot]] = defaultdict(list)
-                for tl in taxlots:
-                    lots_by_sec[tl.security_id].append(tl)
+            hist_by_sec, basis_by_sec, lots_by_sec, shares_at = \
+                await self._forecast_inputs(raw_payments, securities, as_of)
 
-                def shares_at(sid: int, d: date) -> Decimal:
-                    total = Decimal("0")
-                    for lot in lots_by_sec.get(sid, []):
-                        if lot.open_date > d:
-                            continue
-                        if lot.close_date and lot.close_date <= d:
-                            continue
-                        total += lot.quantity
-                    return total
+            # Far enough to complete next calendar year, so the year comparison
+            # never shows a truncated bar; further still if the caller asked for
+            # a year beyond that.
+            horizon_start = as_of + timedelta(days=1)
+            horizon_end = max(win_end or date.min, date(as_of.year + 1, 12, 31))
 
-                # Built from the RAW history, not the era-spliced income: a payout
-                # from before we owned the share still evidences the schedule, and
-                # its per-share amount still sizes the next one. Keying on realized
-                # income left every recently-bought payer — TSMC, Samsung, SK Hynix,
-                # HPE, the SOXQ ETF — forecasting nothing.
-                fx_to_eur = await self._latest_fx_to_eur(
-                    {s.currency for s in securities.values() if s.currency}, as_of
+            # The CHART's reach is unchanged by that widening: without a selected
+            # year it still stops at the end of the current year. Projecting
+            # further for the growth figures must not quietly stretch the all-time
+            # chart into next year — that alone tripled its forecast total.
+            chart_end = win_end or date(as_of.year, 12, 31)
+
+            for sid in lots_by_sec:
+                qty = shares_at(sid, as_of)
+                if qty <= 0:
+                    continue
+                projected = project_dividends(hist_by_sec.get(sid, []), qty,
+                                              horizon_start, horizon_end,
+                                              as_of=as_of)
+                if not projected:
+                    continue
+
+                symbol = _symbol(sid)
+                basis = basis_by_sec.get(sid)
+                next_pay[sid] = min(fp.on_date for fp in projected)
+
+                for fp in projected:
+                    amt = base_fx.convert(fp.net_eur, fp.on_date)
+                    annual_forecast[fp.on_date.year] += amt
+                    if fp.on_date <= next_12m_end:
+                        next_12m += amt
+                        upcoming.append({
+                            "date": fp.on_date.isoformat(),
+                            "security_id": sid,
+                            "symbol": symbol,
+                            "net_eur": round(float(amt), 2),
+                            "basis": basis,
+                        })
+
+                # Windowed figures stay exactly as before: a security only earns a
+                # table row (and a forecast_basis) when it projects INSIDE the
+                # selected window, so asking for a past year still returns no
+                # forecast-only rows.
+                in_window = [fp for fp in projected
+                             if _in_window(fp.on_date) and fp.on_date <= chart_end]
+                if in_window:
+                    by_sec.setdefault(sid, _new_row())["forecast_basis"] = basis
+                for fp in in_window:
+                    amt = base_fx.convert(fp.net_eur, fp.on_date)
+                    row = by_sec[sid]
+                    row["forecast_payouts"] += 1
+                    row["forecast_net"] += amt
+                    monthly_forecast[fp.on_date.strftime("%Y-%m")][symbol] += amt
+                    total_forecast += amt
+
+        upcoming.sort(key=lambda u: (u["date"], u["symbol"]))
+
+        # ---- Growth -------------------------------------------------------------
+        # Deliberately computed from the UNWINDOWED history: with year=2026
+        # selected the response carries no 2025 months, so no client could derive
+        # any of this. Doing it here also keeps the era splice and the per-date FX
+        # projection in one place instead of growing a second implementation.
+        annual_actual: Dict[int, Decimal] = defaultdict(Decimal)
+        month_actual_all: Dict[str, Decimal] = defaultdict(Decimal)
+        for p in all_payments:
+            d = p.pay_date or p.ex_date
+            value = base_fx.convert(self._net_eur(p), d)
+            annual_actual[d.year] += value
+            month_actual_all[d.strftime("%Y-%m")] += value
+
+        def _net_between(after: date, through: date) -> Decimal:
+            """Realized net in (after, through], each payment at its own date's rate."""
+            total = Decimal("0")
+            for payment in all_payments:
+                d = payment.pay_date or payment.ex_date
+                if after < d <= through:
+                    total += base_fx.convert(self._net_eur(payment), d)
+            return total
+
+        year_ago, two_years_ago = as_of - timedelta(days=365), as_of - timedelta(days=730)
+        ttm_total = _net_between(year_ago, as_of)
+        prev_ttm_total = _net_between(two_years_ago, year_ago)
+
+        # Jan 1 -> today against Jan 1 -> the same day last year. Comparing a
+        # part-year against a whole prior year is the difference between +99% and
+        # +297% on this account, and only one of those is growth.
+        ytd_total = _net_between(date(as_of.year, 1, 1) - timedelta(days=1), as_of)
+        prev_ytd_total = _net_between(
+            date(as_of.year - 1, 1, 1) - timedelta(days=1),
+            self._same_day_last_year(as_of),
+        )
+
+        # The two 12-month windows sit either side of the splice, so one is IBKR
+        # actuals and the other yfinance estimates — sized comparably, sourced
+        # differently. Flagged rather than silently presented as like-for-like.
+        ttm_crosses_era = (
+            ibkr_from is not None and two_years_ago < ibkr_from <= as_of
+        )
+
+        first_income = min(
+            ((p.pay_date or p.ex_date) for p in all_payments), default=None
+        )
+
+        annual_rows: List[Dict] = []
+        prev_row: Optional[Dict] = None
+        for y in sorted(set(annual_actual) | set(annual_forecast)):
+            actual_y = annual_actual.get(y, Decimal("0"))
+            forecast_y = annual_forecast.get(y, Decimal("0"))
+            total_y = actual_y + forecast_y
+            partial = (
+                y > as_of.year
+                or (y == as_of.year and as_of < date(y, 12, 31))
+                # The earliest year of income starts whenever the first dividend
+                # landed, not in January: 2024 holds seven months here, which is
+                # why 2025/2024 reads +1300% and means almost nothing.
+                or (first_income is not None and y == first_income.year
+                    and first_income.month > 1)
+            )
+            row = {
+                "year": y,
+                "net_eur": round(float(actual_y), 2),
+                "forecast_net_eur": round(float(forecast_y), 2),
+                "total_eur": round(float(total_y), 2),
+                "yoy_pct": None,
+                "yoy_includes_forecast": False,
+                "yoy_vs_partial": False,
+                "partial": partial,
+            }
+            # Only against the immediately preceding year. A gap year is not a
+            # comparison — it would silently measure across two years of growth.
+            if prev_row is not None and prev_row["year"] == y - 1:
+                row["yoy_pct"] = self._pct(total_y, prev_row["total"])
+                row["yoy_includes_forecast"] = (
+                    forecast_y > 0 or prev_row["has_forecast"]
                 )
-                # Cadence must come from ONE dated series. The same dividend is
-                # recorded twice — yfinance under its ex-date, IBKR under its pay
-                # date — and the two sit weeks apart, which halves the apparent
-                # gap: ASML's quarterly schedule read as 74 days (5 payouts a year
-                # instead of 4) and SBI's monthly as 28 (13 instead of 12).
-                # Deduplication cannot separate them, because Mastercard's
-                # ex-to-pay lag of 29 days is longer than a monthly payer's cycle.
-                # yfinance carries the complete, regular ex-date series, so where
-                # it exists it alone defines the schedule.
-                per_share_rows = defaultdict(list)
-                for p in raw_payments:
-                    if p.amount_per_share is not None:
-                        per_share_rows[p.security_id].append(p)
-                schedule_source = {
-                    sid: rows for sid, rows in per_share_rows.items() if len(rows) >= 2
-                }
+                row["yoy_vs_partial"] = prev_row["partial"]
+            annual_rows.append(row)
+            prev_row = {"year": y, "total": total_y, "partial": partial,
+                        "has_forecast": forecast_y > 0}
 
-                hist_by_sec: Dict[int, List[HistPayment]] = defaultdict(list)
-                basis_by_sec: Dict[int, str] = {}
-                for p in raw_payments:
-                    scheduled = schedule_source.get(p.security_id)
-                    if scheduled is not None and p.amount_per_share is None:
-                        continue  # a second record of a dividend already counted
-                    on_date = p.pay_date or p.ex_date
-                    if on_date is None or on_date > as_of:
-                        continue
-                    sec = securities.get(p.security_id)
-                    if sec is None:
-                        continue
-                    # Prefer a net-of-withholding per-share figure derived from what
-                    # actually landed; fall back to the gross per-share yfinance
-                    # publishes. Never mix the two inside one security — that would
-                    # average a gross figure against a net one.
-                    net_ps = None
-                    if self._is_income(p):
-                        # IBKR rows store a 0 sentinel in shares_held, so fall back
-                        # to the holding the tax lots show for that date.
-                        shares = (p.shares_held if (p.shares_held and p.shares_held > 0)
-                                  else shares_at(p.security_id, on_date))
-                        if shares > 0:
-                            net_ps = self._net_eur(p) / shares
-                    gross_ps = None
-                    if p.amount_per_share and p.amount_per_share > 0:
-                        rate = fx_to_eur.get(sec.currency or "EUR")
-                        if rate is not None:
-                            gross_ps = p.amount_per_share * rate
-                    if net_ps is not None:
-                        basis_by_sec[p.security_id] = "net"
-                    hist_by_sec[p.security_id].append(HistPayment(
-                        on_date=on_date, per_share_eur=(net_ps, gross_ps),
-                    ))
+        latest_key = max(
+            (k for k, v in month_actual_all.items() if v > 0), default=None
+        )
+        latest_month = None
+        if latest_key is not None:
+            latest_value = month_actual_all[latest_key]
+            latest_month = {
+                "month": latest_key,
+                "net_eur": round(float(latest_value), 2),
+                "mom_pct": self._pct(
+                    latest_value, month_actual_all.get(self._shift_month(latest_key, 1))
+                ),
+                "yoy_pct": self._pct(
+                    latest_value, month_actual_all.get(self._shift_month(latest_key, 12))
+                ),
+            }
 
-                # Collapse each security to one basis now that we know whether any
-                # realized figure exists for it.
-                for sid, entries in hist_by_sec.items():
-                    prefer_net = basis_by_sec.get(sid) == "net"
-                    hist_by_sec[sid] = [
-                        HistPayment(
-                            on_date=e.on_date,
-                            per_share_eur=(e.per_share_eur[0] if prefer_net
-                                           else e.per_share_eur[1]),
-                        )
-                        for e in entries
-                    ]
-                    if not prefer_net:
-                        basis_by_sec[sid] = "gross_estimate"
-
-                for sid, lots in lots_by_sec.items():
-                    qty = shares_at(sid, as_of)
-                    if qty <= 0:
-                        continue
-                    projected = project_dividends(hist_by_sec.get(sid, []), qty,
-                                                  horizon_start, horizon_end,
-                                                  as_of=as_of)
-                    if projected:
-                        by_sec.setdefault(sid, _new_row())["forecast_basis"] = \
-                            basis_by_sec.get(sid)
-                    for fp in projected:
-                        if not _in_window(fp.on_date):
-                            continue
-                        amt = base_fx.convert(fp.net_eur, fp.on_date)
-                        row = by_sec.setdefault(sid, _new_row())
-                        row["forecast_payouts"] += 1
-                        row["forecast_net"] += amt
-                        monthly_forecast[fp.on_date.strftime("%Y-%m")][_symbol(sid)] += amt
-                        total_forecast += amt
+        growth = {
+            "ttm": {
+                "net_eur": round(float(ttm_total), 2),
+                "prev_net_eur": round(float(prev_ttm_total), 2),
+                "pct": self._pct(ttm_total, prev_ttm_total),
+            },
+            "ttm_crosses_era": ttm_crosses_era,
+            "ytd": {
+                "net_eur": round(float(ytd_total), 2),
+                "prev_net_eur": round(float(prev_ytd_total), 2),
+                "pct": self._pct(ytd_total, prev_ytd_total),
+            },
+            "avg_month": {
+                "net_eur": round(float(ttm_total / 12), 2),
+                "prev_net_eur": round(float(prev_ttm_total / 12), 2),
+                # Both sides divided by the same 12, so the growth is the TTM one.
+                "pct": self._pct(ttm_total, prev_ttm_total),
+            },
+            "next_12m_eur": round(float(next_12m), 2),
+            "next_12m_vs_ttm_pct": self._pct(next_12m, ttm_total),
+            "annual": annual_rows,
+            "latest_month": latest_month,
+        }
 
         # Trailing-12-month yield: spliced net over the current market value.
         # Positions are a decoration here — their failure must not 500 the view.
@@ -660,9 +884,11 @@ class DividendService:
             if ttm_start <= d <= as_of:
                 ttm_net[p.security_id] += base_fx.convert(self._net_eur(p), d)
         mv_by_sec: Dict[int, Decimal] = {}
+        cost_by_sec: Dict[int, Decimal] = {}
         try:
             for pos in await portfolio.get_positions_breakdown():
                 mv_by_sec[pos["security_id"]] = Decimal(str(pos["market_value_eur"]))
+                cost_by_sec[pos["security_id"]] = Decimal(str(pos["cost_basis_eur"]))
         except Exception as e:
             logger.warning(f"Dividend breakdown: positions unavailable, yields omitted: {e}")
 
@@ -682,18 +908,32 @@ class DividendService:
         for mk in months_axis:
             actual = monthly_actual.get(mk, {})
             forecast = monthly_forecast.get(mk, {})
+            # Growth is measured on realized income only. A forecast month's
+            # "change" would be an artifact of the projection's own flat median —
+            # it would read as the payout schedule shifting when nothing has.
+            realized = month_actual_all.get(mk, Decimal("0"))
             months.append({
                 "month": mk,
                 "actual": {s: round(float(v), 2) for s, v in sorted(actual.items())},
                 "forecast": {s: round(float(v), 2) for s, v in sorted(forecast.items())},
                 "actual_total_eur": round(float(sum(actual.values(), Decimal("0"))), 2),
                 "forecast_total_eur": round(float(sum(forecast.values(), Decimal("0"))), 2),
+                "mom_pct": (
+                    self._pct(realized, month_actual_all.get(self._shift_month(mk, 1)))
+                    if realized > 0 else None
+                ),
+                "yoy_pct": (
+                    self._pct(realized, month_actual_all.get(self._shift_month(mk, 12)))
+                    if realized > 0 else None
+                ),
             })
 
+        window_total = total_net + total_forecast
         sec_rows = []
         for sid, row in by_sec.items():
             sec = securities.get(sid)
             mv = mv_by_sec.get(sid)
+            cost = cost_by_sec.get(sid)
             ttm = ttm_net.get(sid, Decimal("0"))
             sec_rows.append({
                 "security_id": sid,
@@ -713,6 +953,20 @@ class DividendService:
                 "trailing_yield_pct": (
                     round(float(ttm / mv * 100), 2)
                     if mv and mv > 0 and ttm > 0 else None
+                ),
+                # Same income over what the position cost rather than what it is
+                # worth: on an appreciated holding the two diverge, and the gap is
+                # the part a current-yield figure hides.
+                "yield_on_cost_pct": (
+                    round(float(ttm / cost * 100), 2)
+                    if cost and cost > 0 and ttm > 0 else None
+                ),
+                "share_pct": (
+                    round(float((row["net"] + row["forecast_net"]) / window_total * 100), 1)
+                    if window_total > 0 else None
+                ),
+                "next_pay_date": (
+                    next_pay[sid].isoformat() if sid in next_pay else None
                 ),
                 # Provenance of the ACTUAL rows; None for a forecast-only entry.
                 "source": (
@@ -735,4 +989,6 @@ class DividendService:
             "total_forecast_net_eur": round(float(total_forecast), 2),
             "ibkr_from": ibkr_from.isoformat() if ibkr_from else None,
             "base_currency": base_fx.base_currency,
+            "growth": growth,
+            "upcoming": upcoming,
         }

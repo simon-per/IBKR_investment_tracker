@@ -289,6 +289,14 @@ class DividendMonthBar(BaseModel):
     forecast: Dict[str, float]      # symbol -> projected net (cadence-based)
     actual_total_eur: float
     forecast_total_eur: float
+    # Growth of the REALIZED figure only, against the previous month and the same
+    # month a year earlier. None when there is no comparable base (a zero prior
+    # month, which a quarterly payer produces constantly) or when this month holds
+    # only forecast — a projection's flat median would otherwise read as a real
+    # change in the payout schedule. Computed over the whole history, so they stay
+    # correct when the response is windowed to one year.
+    mom_pct: Optional[float] = None
+    yoy_pct: Optional[float] = None
 
 
 class DividendSecurityRow(BaseModel):
@@ -305,10 +313,87 @@ class DividendSecurityRow(BaseModel):
     forecast_payouts: int
     forecast_net_eur: float
     trailing_yield_pct: Optional[float] = None  # TTM net / current market value
+    # TTM net over what the position cost. Higher than the trailing yield on a
+    # holding that has appreciated, which is the point of showing both.
+    yield_on_cost_pct: Optional[float] = None
+    share_pct: Optional[float] = None       # of the window's total (actual + forecast)
+    next_pay_date: Optional[str] = None     # earliest projected payment, if any
     source: Optional[str] = None    # 'ibkr' | 'estimate' | 'mixed'; None = forecast-only
     # 'net' = sized from dividends actually received; 'gross_estimate' = from
     # yfinance's gross per-share only, so withholding isn't deducted.
     forecast_basis: Optional[str] = None
+
+
+class DividendDelta(BaseModel):
+    """A figure beside the comparable it is measured against."""
+    net_eur: float
+    prev_net_eur: Optional[float] = None
+    # None whenever the base is zero. A percentage against zero is undefined, not
+    # large, and rendering one would put a fabricated number next to a real one.
+    pct: Optional[float] = None
+
+
+class DividendAnnualRow(BaseModel):
+    """One calendar year of the year-over-year comparison."""
+    year: int
+    net_eur: float                  # actually received
+    forecast_net_eur: float         # projected inside this year
+    total_eur: float                # net + forecast — what the bar length shows
+
+    # yoy_pct compares total_eur against the previous row's total_eur: one rule for
+    # every row, degrading to plain actual-vs-actual for two complete past years.
+    yoy_pct: Optional[float] = None
+    # True when this row or the one it is compared against contains projection, so
+    # the chip can be marked as forward-looking rather than measured.
+    yoy_includes_forecast: bool = False
+    # True when the prior year's realized figure did not cover a full year, which
+    # makes the percentage overstate growth. On this account 2024 holds only 7
+    # months of income, so 2025/2024 reads +1300% and means very little.
+    yoy_vs_partial: bool = False
+    # This year's realized figure covers less than the whole calendar year — it is
+    # still running, or the income history begins inside it.
+    partial: bool = False
+
+
+class DividendLatestMonth(BaseModel):
+    """The most recent month with realized income, and how it moved."""
+    month: str
+    net_eur: float
+    mom_pct: Optional[float] = None
+    yoy_pct: Optional[float] = None
+
+
+class DividendGrowth(BaseModel):
+    """
+    Growth of dividend income, computed over the FULL history regardless of the
+    year filter — with year=2026 selected the client holds no 2025 months and
+    could not derive any of this itself.
+    """
+    # Trailing 12 months against the 12 before it. The headline: dividends here
+    # are quarterly, so a raw month-over-month swings +/-90% on cadence alone and
+    # cannot carry the summary.
+    ttm: DividendDelta
+    # The two 12-month windows straddle the era-splice boundary, so one side is
+    # IBKR actuals and the other yfinance estimates — comparable in size, not in
+    # provenance. Badge it rather than presenting it as like-for-like.
+    ttm_crosses_era: bool = False
+    # Jan 1 -> today against Jan 1 -> the same calendar day last year. Strictly
+    # like-for-like: comparing a part-year against a whole prior year is not growth.
+    ytd: DividendDelta
+    avg_month: DividendDelta        # ttm / 12 against prior ttm / 12
+    next_12m_eur: float             # projected over the next 365 days
+    next_12m_vs_ttm_pct: Optional[float] = None   # forecast vs measured — mark it
+    annual: List[DividendAnnualRow]
+    latest_month: Optional[DividendLatestMonth] = None
+
+
+class DividendUpcomingPayment(BaseModel):
+    """One projected payment, dated — the dividend calendar."""
+    date: str
+    security_id: int
+    symbol: str
+    net_eur: float
+    basis: Optional[str] = None     # 'net' | 'gross_estimate'
 
 
 class DividendBreakdownResponse(BaseModel):
@@ -321,6 +406,8 @@ class DividendBreakdownResponse(BaseModel):
     # Era-splice boundary: yfinance estimates strictly before, IBKR rows from here.
     ibkr_from: Optional[str] = None
     base_currency: str
+    growth: Optional[DividendGrowth] = None
+    upcoming: List[DividendUpcomingPayment] = []
 
 
 class ContributionWindow(BaseModel):
