@@ -1179,12 +1179,31 @@ class PortfolioService:
         # Build nested dict: {security_id: {date: price}}
         price_cache = {}
         price_currency_cache = {}
+        newest_priced = {}
+        mixed_currencies = set()
         for price in all_prices:
             if price.security_id not in price_cache:
                 price_cache[price.security_id] = {}
             price_cache[price.security_id][price.date] = price.close_price
-            # Track actual price currency per security
-            price_currency_cache[price.security_id] = price.currency
+            # The currency of the NEWEST row wins, deterministically. The query is
+            # unordered, so "whatever row iterated last" used to apply an arbitrary
+            # member of a mixed-currency history to the security's entire series.
+            chosen = price_currency_cache.get(price.security_id)
+            if chosen is not None and chosen != price.currency:
+                mixed_currencies.add(price.security_id)
+            if (price.security_id not in newest_priced
+                    or price.date > newest_priced[price.security_id]):
+                newest_priced[price.security_id] = price.date
+                price_currency_cache[price.security_id] = price.currency
+
+        # A mixed history is a repair state (a wrong mapping stamped rows in the
+        # wrong currency — the SBI failure): say so instead of silently mis-scaling.
+        for sid in sorted(mixed_currencies):
+            logger.warning(
+                f"Security {sid} has mixed price currencies cached; valuing the whole "
+                f"series as {price_currency_cache[sid]} (newest row). Purge and refill "
+                f"its prices to repair (manage_mappings disable --purge-prices)."
+            )
 
         return price_cache, price_currency_cache
 
