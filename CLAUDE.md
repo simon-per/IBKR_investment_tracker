@@ -310,6 +310,12 @@ and the split invalidation above still heal normally. `BenchmarkService._ensure_
 applies the same rule. Tests: `tests/test_missing_dates_holidays.py`,
 `tests/test_benchmark_fx_window.py`.
 
+The fetch is also **span-narrowed**: the Yahoo request starts a few days before `min(missing)`
+(`PRICE_FETCH_BUFFER_DAYS`), not at the window start — the 08:00 730-day job used to re-download two
+years per security every morning purely because today's close hadn't published (~19.5k rows rewritten
+to gain a few hundred). A split purge or a newly added security still pulls the whole span, because
+that is where `min(missing)` then sits.
+
 Two details carry the weight. `PRICE_RESTATING_ACTIONS` is a deliberate **subset** of
 `SPLIT_LIKE_ACTIONS`: we fetch with `auto_adjust=False` and Yahoo rebases raw `Close` for splits only,
 so `SPINOFF`/`STOCKDIV`/`ISSUECHANGE` are excluded as pure churn. And it fires **only for actions
@@ -328,10 +334,15 @@ dividend income and allows reclaiming foreign withholding via **DA-1** — so th
 dividend income + withholding, then realized gains, then a year-end holdings snapshot (Steuerwert).
 
 Two honesty flags, both badged in the UI and CSV:
-- `dividend_source`: `ibkr` (real withholding) vs `yfinance_estimate` (gross guess, no withholding).
-  Decided **per requested year** (`has_ibkr_dividends(start, end)`), never globally: a YTD Flex Query
-  can't carry a prior year's cash transactions, so a global check made 2025 filter to `ibkr`, match
-  nothing and report **0.00 labelled authoritative**. The two sources are never summed.
+- `dividend_source`: `ibkr` (real withholding) vs `yfinance_estimate` (gross guess, no withholding)
+  vs `mixed` (the boundary year). Dividends are **era-spliced with the same `_splice_by_era` the
+  card uses** — estimates strictly before the globally first IBKR payment (`dividend_ibkr_from`),
+  IBKR rows from there on — then windowed to the year. Both simpler schemes were bugs: a global
+  "prefer ibkr" made 2025 report **0.00 labelled authoritative**, and a per-year boolean dropped
+  the boundary year's real January income (the ledger starts mid-February). A per-year *boundary*
+  would be wrong too — yfinance stores a dividend under its ex-date, IBKR under its pay date, so
+  it would resurrect the double-count. The two sources are never summed for the same period; each
+  income row carries its `source`.
 - `realized_source`: `trades` (IBKR FIFO) vs `closed_lot_estimate` (market price at close date — was
   ~8% off on a spot check, hence the badge)
 
@@ -368,7 +379,8 @@ the card once reported 439 months, and the reason relaxing one read-side filter 
 (gross **or** net positive) and `_net_eur()` falls back to gross for rows predating the
 withholding-fields migration, which carry a NULL net — **use those two helpers rather than touching
 the columns directly.** Existing junk is removable with `app/cli/prune_empty_dividends.py --dry-run`
-(deletes only rows the readers already ignore; never a row still awaiting computation).
+(deletes only rows the readers already ignore; never a row still awaiting computation). Run on prod
+2026-07-29 (`manual_dividend_prune`): 1350 zero rows removed, real payments remain.
 
 ### The forecast — four rules that were each a bug first
 
@@ -579,7 +591,12 @@ recovers freshness). The public routes add cooldowns (ibkr 120s; market-data / t
 ratings / allocation / watchlist 300s) and answer **429 with `Retry-After`**. In-process by design —
 single uvicorn worker, and the check-and-set has no `await` between test and set. A backgrounded route
 (fundamentals `/sync`) checks `is_running()` in the handler and holds the lock inside the task, so the
-gate spans the actual work rather than the enqueue. Tests: `tests/test_single_flight.py`.
+gate spans the actual work rather than the enqueue. **`POST /api/watchlist` (add) is gated too** (60s
+cooldown — a single-ticker fetch, lighter than the 300s bulk sync): it fires a per-add `force=True`
+yfinance fetch and was the one Yahoo-triggering route the rollout missed, so rapid-fire adds of
+distinct tickers were an unthrottled fetch storm. The add itself stays *outside* the gate — busy or
+cooling, the row is created with `last_synced` null and the next sync fills it in, rather than a
+running 08:00 job turning a bookkeeping action into a 429. Tests: `tests/test_single_flight.py`.
 
 **Errors are redacted before they are stored or served (`app/redact.py`).** Flex sends the token as a
 `t=` URL parameter and `requests` transport errors stringify with the full URL, so a plain `str(e)` from
