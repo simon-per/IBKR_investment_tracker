@@ -22,7 +22,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.security import Security
 from app.models.trade import Trade
 from app.models.dividend_payment import DividendPayment
-from app.repositories.dividend_repository import DividendRepository
 from app.services.currency_service import CurrencyService
 from app.services.dividend_service import DividendService
 from app.services.portfolio_service import PortfolioService
@@ -52,28 +51,27 @@ class TaxService:
         portfolio = PortfolioService(self.db)
         base_fx = await portfolio._load_base_fx()
 
-        # --- Dividend income (prefer authoritative IBKR rows with withholding) ---
-        # The preference is decided *per year*, not globally: a year-to-date Flex Query
-        # only carries this year's cash transactions, so earlier years still hold nothing
-        # but yfinance estimates. Deciding globally made 2025 filter to `ibkr`, match zero
-        # rows, and report 0.00 flagged as authoritative — worse than the estimate it
-        # replaced.
-        div_repo = DividendRepository(self.db)
-        use_ibkr = await div_repo.has_ibkr_dividends(start=start, end=end)
+        # --- Dividend income (era-spliced, like the dividend card) ---
+        # The boundary is the globally first IBKR payment: estimates strictly before
+        # it, authoritative rows from it on, then windowed to the year below. A
+        # per-year boolean dropped every estimate inside the boundary year — real
+        # January income vanished from a filing aid that then badged itself
+        # authoritative — while a per-year boundary would resurrect the
+        # ex-date/pay-date double-count in later years (yfinance stores a dividend
+        # under its ex-date, IBKR under its pay date, weeks apart). The two sources
+        # are still never summed for the same period.
         stmt = (
             select(DividendPayment, Security)
             .join(Security, DividendPayment.security_id == Security.id)
             .where(DividendPayment.gross_amount_eur.isnot(None))
         )
-        if use_ibkr:
-            stmt = stmt.where(DividendPayment.source == "ibkr")
-        else:
-            # No IBKR rows this year, so estimates are all there is. Excluding `ibkr`
-            # explicitly keeps the two from ever being summed together.
-            stmt = stmt.where(DividendPayment.source != "ibkr")
-        rows = (await self.db.execute(stmt)).all()
+        all_rows = (await self.db.execute(stmt)).all()
+        kept, ibkr_from = DividendService._splice_by_era([dp for dp, _ in all_rows])
+        kept_ids = {p.id for p in kept}
+        rows = [(dp, sec) for dp, sec in all_rows if dp.id in kept_ids]
 
         dividend_income: List[Dict] = []
+        sources_seen: set = set()
         div_gross = div_wht = div_net = Decimal("0")
         # DA-1 is filed per source country, so accumulate a per-country breakdown as we go.
         by_country: Dict[str, Dict] = {}
@@ -96,6 +94,8 @@ class TaxService:
             div_gross += gross
             div_wht += wht
             div_net += net
+            row_source = "ibkr" if dp.source == "ibkr" else "yfinance_estimate"
+            sources_seen.add(row_source)
             dividend_income.append({
                 "symbol": sec.symbol,
                 "description": sec.description,
@@ -104,6 +104,7 @@ class TaxService:
                 "gross": round(float(gross), 2),
                 "withholding": round(float(wht), 2),
                 "net": round(float(net), 2),
+                "source": row_source,
             })
 
             # First two ISIN characters are the issuer's domicile — a good proxy for the
@@ -212,10 +213,21 @@ class TaxService:
         except Exception:
             pass
 
+        # The label reflects what actually contributed inside the year window:
+        # "mixed" is the boundary year, where estimates cover the weeks before the
+        # cash-transaction ledger began mid-year.
+        if sources_seen == {"ibkr"}:
+            dividend_source = "ibkr"
+        elif "ibkr" in sources_seen:
+            dividend_source = "mixed"
+        else:
+            dividend_source = "yfinance_estimate"
+
         return {
             "year": year,
             "base_currency": base_fx.base_currency,
-            "dividend_source": "ibkr" if use_ibkr else "yfinance_estimate",
+            "dividend_source": dividend_source,
+            "dividend_ibkr_from": ibkr_from.isoformat() if ibkr_from else None,
             "dividend_income": dividend_income,
             "dividend_by_country": dividend_by_country,
             "dividend_country_note": (
@@ -253,6 +265,11 @@ class TaxService:
         w.writerow([])
 
         w.writerow([f"Dividend income (source: {report['dividend_source']})"])
+        if report.get("dividend_source") == "mixed" and report.get("dividend_ibkr_from"):
+            w.writerow([
+                f"Estimates before {report['dividend_ibkr_from']}; "
+                f"IBKR actuals with real withholding from there on"
+            ])
         w.writerow(["Symbol", "Description", "ISIN", "Pay date",
                     f"Gross ({cur})", f"Withholding ({cur})", f"Net ({cur})"])
         for d in report["dividend_income"]:

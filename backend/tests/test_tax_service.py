@@ -382,3 +382,59 @@ async def test_pre_ownership_zero_rows_do_not_pad_the_report():
     finally:
         await session.close()
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_boundary_year_keeps_pre_ibkr_estimates_and_labels_mixed():
+    """
+    The cash-transaction ledger starts mid-year, so the boundary year holds real
+    January income that exists only as estimates. Filtering the whole year to
+    `ibkr` silently understated a filing aid while badging it authoritative. The
+    era splice keeps estimates strictly before the first IBKR payment, IBKR rows
+    from there on — and a post-boundary estimate is still the double-count it
+    always was.
+    """
+    engine, session = await _make_session()
+    try:
+        repo = DividendRepository(session)
+        # Pre-boundary estimate: real income from the weeks before the ledger.
+        await repo.upsert_payment({
+            "security_id": 1, "ex_date": date(2026, 1, 15), "pay_date": date(2026, 1, 15),
+            "currency": "EUR", "shares_held": Decimal("10"),
+            "gross_amount_eur": Decimal("40"), "withholding_tax_eur": Decimal("0"),
+            "net_amount_eur": Decimal("40"), "source": "yfinance_estimate",
+            "last_computed": datetime.now(),
+        })
+        # First IBKR payment — the boundary.
+        await repo.upsert_payment({
+            "security_id": 1, "ex_date": date(2026, 3, 1), "pay_date": date(2026, 3, 1),
+            "currency": "EUR", "shares_held": Decimal("0"),
+            "gross_amount_eur": Decimal("100"), "withholding_tax_eur": Decimal("15"),
+            "net_amount_eur": Decimal("85"), "source": "ibkr", "last_computed": datetime.now(),
+        })
+        # Post-boundary estimate: the same dividend seen through yfinance — drop it.
+        await repo.upsert_payment({
+            "security_id": 1, "ex_date": date(2026, 4, 1), "pay_date": date(2026, 4, 1),
+            "currency": "EUR", "shares_held": Decimal("10"),
+            "gross_amount_eur": Decimal("99"), "withholding_tax_eur": Decimal("0"),
+            "net_amount_eur": Decimal("99"), "source": "yfinance_estimate",
+            "last_computed": datetime.now(),
+        })
+        await session.commit()
+
+        report = await TaxService(session).get_tax_report(2026)
+
+        assert report["dividend_source"] == "mixed"
+        assert report["dividend_ibkr_from"] == "2026-03-01"
+        assert [r["pay_date"] for r in report["dividend_income"]] == \
+            ["2026-01-15", "2026-03-01"]
+        assert [r["source"] for r in report["dividend_income"]] == \
+            ["yfinance_estimate", "ibkr"]
+        assert report["dividend_totals"] == {"gross": 140.0, "withholding": 15.0, "net": 125.0}
+
+        csv_text = TaxService(session).to_csv(report)
+        assert "source: mixed" in csv_text
+        assert "Estimates before 2026-03-01" in csv_text
+    finally:
+        await session.close()
+        await engine.dispose()

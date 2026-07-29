@@ -414,7 +414,9 @@ export interface TaxHoldingRow {
 export interface TaxReport {
   year: number;
   base_currency: string;
-  dividend_source: 'ibkr' | 'yfinance_estimate';
+  dividend_source: 'ibkr' | 'yfinance_estimate' | 'mixed';
+  /** First IBKR payment date — the era-splice boundary; null before the ledger. */
+  dividend_ibkr_from: string | null;
   dividend_income: TaxDividendRow[];
   /** Withholding grouped by source country — DA-1 is filed per country. */
   dividend_by_country: TaxCountryRow[];

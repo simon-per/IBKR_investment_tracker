@@ -114,15 +114,23 @@ export function TaxTab() {
                     'rounded-full px-2.5 py-1 text-xs font-medium',
                     data.dividend_source === 'ibkr'
                       ? 'bg-teal-100 text-teal-800 dark:bg-teal-950/60 dark:text-teal-200'
-                      : 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-200'
+                      : data.dividend_source === 'mixed'
+                        ? 'bg-sky-100 text-sky-800 dark:bg-sky-950/60 dark:text-sky-200'
+                        : 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-200'
                   )}
                   title={
                     data.dividend_source === 'ibkr'
                       ? 'Actual figures from IBKR cash transactions'
-                      : 'Estimated gross from Yahoo Finance — withholding not reflected'
+                      : data.dividend_source === 'mixed'
+                        ? `Estimates before ${data.dividend_ibkr_from ?? 'the IBKR era'}; IBKR actuals with real withholding from there on`
+                        : 'Estimated gross from Yahoo Finance — withholding not reflected'
                   }
                 >
-                  {data.dividend_source === 'ibkr' ? 'IBKR actual' : 'Estimated (yfinance)'}
+                  {data.dividend_source === 'ibkr'
+                    ? 'IBKR actual'
+                    : data.dividend_source === 'mixed'
+                      ? 'Mixed (est. + IBKR)'
+                      : 'Estimated (yfinance)'}
                 </span>
               </div>
             </CardHeader>
