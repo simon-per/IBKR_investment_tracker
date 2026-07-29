@@ -257,7 +257,39 @@ This guard has already saved the data through several failed syncs.
 
 `get_realized_totals()` prefers `trades` (exact) and falls back to a market-price approximation over
 closed lots. `realized_rows_from_closed_lots()` is **shared** by the portfolio totals and the tax report
-so the two can never disagree — they did once, and that was a bug.
+so the two can never disagree — they did once, and that was a bug. The picker keys on **SELL trades
+specifically**, not on the table being non-empty: a BUY-only statement returned hard zeros and
+permanently suppressed the fallback, while the tax report (which decides per year) still showed real
+gains. Pinned by `tests/test_realized_totals.py`.
+
+**A lot sold on D is not held at D's close.** One convention, everywhere: `_calculate_daily_value`,
+`holdings_snapshot_as_of()` and the attribution gates all exclude **on** the close date, matching what
+the benchmark always did. Under the old include-on-close rule a same-day rotation double-counted that
+day (the sold lot still "active" beside its replacement) and a position sold on 31 December landed in
+both the year's Steuerwert *and* its realized gains. Consequence to expect: a sale's value leaves the
+chart on the sale date itself, one day earlier than before. The disposal windows in `calculate_xirr()`
+and the attribution endpoint are therefore `(start, end]` — a lot sold *on* the window end yields
+proceeds precisely because the end valuation no longer carries it. Change these together.
+Tests: `tests/test_close_date_boundary.py`.
+
+**Realized proceeds are inflows, not absences.** `calculate_xirr()` books each lot closed in the window
+as a `+proceeds` flow (plus net dividends, era-spliced) alongside the `−cost` of lots opened. Without
+that, selling A to buy B added a fresh outflow with no matching inflow, so every rotation crushed the
+reported return — the planned IE→US ETF switch would have roughly halved it. Its guard is a
+**sign change**, not `start_mv > 0 and end_mv > 0`: a window may legitimately start at zero (before the
+first purchase) or end at zero (fully liquidated, where the proceeds carry the whole return). Windows
+under 30 days return `method="simple_period"` and the UI labels that tile *Period Return* rather than
+annualizing a few days of noise. Attribution takes the same disposal term
+(`pnl = value_change + disposals − new_investment`), without which a position sold at a profit read as
+`−start_value`. Tests: `tests/test_xirr.py`, `tests/test_attribution.py`.
+
+**The timeline is swept once, not rebuilt per day.** `_calculate_timeline_swept()` folds each lot's
+date-independent parts (base-converted cost at `open_date`, quantity) into running sums via open/close
+events, so a day prices each *security* once instead of once per lot — O(days × securities) rather than
+O(days × lots) with a 15-probe price walk inside. `_calculate_daily_value()` remains for point queries.
+The two are numerically identical by construction and pinned that way
+(`tests/test_timeline_equivalence.py` asserts exact equality across closed lots, a same-day rotation,
+price gaps, a USD security and a CHF base) — **keep them in lockstep**.
 
 **A split also invalidates the cached prices.** Yahoo restates historical `Close` after a split, but
 `get_missing_dates()` only fetches dates we *don't* have, so pre-split rows are never refreshed while
@@ -265,6 +297,17 @@ IBKR restates the lot quantity immediately — leaving a step change in the char
 So `invalidate_prices_for_splits()` deletes `market_prices` up to and including the action date
 (`MarketPriceRepository.delete_up_to`), and the next market-data sync refetches them — one extra
 request per security, since fetching is range-based.
+
+**Holidays are not "missing" forever.** `get_missing_dates()` skipped weekends but not market holidays,
+so a date the exchange never traded (4 July, Good Friday) stayed missing permanently — and one such date
+makes `fetch_and_cache_prices` re-request that security's **entire range** on every one of the five
+daily jobs, indefinitely, against an IP-based rate limit. An **interior** weekday hole (cached data on
+both sides) older than `HOLIDAY_GRACE_DAYS` (30) now counts as a holiday: every sync since has already
+failed to fill it. Younger holes stay missing so late data can arrive, and **leading/trailing gaps stay
+missing at any age** — which is exactly what a purge-and-refill repair looks like, so `--purge-prices`
+and the split invalidation above still heal normally. `BenchmarkService._ensure_prices_available()`
+applies the same rule. Tests: `tests/test_missing_dates_holidays.py`,
+`tests/test_benchmark_fx_window.py`.
 
 Two details carry the weight. `PRICE_RESTATING_ACTIONS` is a deliberate **subset** of
 `SPLIT_LIKE_ACTIONS`: we fetch with `auto_adjust=False` and Yahoo rebases raw `Close` for splits only,
@@ -297,6 +340,33 @@ for `holdings_as_of` (= 31 Dec for a past year, today for the current one) using
 timeline. Positions with no resolvable price near that date are **omitted**, not counted as zero.
 
 Frontend: `TaxTab.tsx`. It's a filing aid, not tax advice.
+
+---
+
+## Dividends — history and forecast
+
+`GET /api/dividends/breakdown?year=&forecast=` → `DividendService.get_dividend_breakdown()`, rendered by
+`DividendsTab.tsx`: net dividends by month **stacked by symbol**, a year filter (All time + the years
+with data), a Forecast toggle, and a per-stock table (payouts, net, projected, trailing-12M yield).
+Unlike `/summary` it **never enqueues a sync**, so it cannot reach Yahoo (rule 1) — everything comes
+from `dividend_payments`, `taxlots`, `market_prices` and `exchange_rates`.
+
+**The two sources are era-spliced, never mixed or dropped.** `_splice_by_era()` keeps
+`yfinance_estimate` rows strictly *before* the first IBKR payment date and IBKR rows from there on.
+`get_dividend_summary()` used to call `has_ibkr_dividends()` **unwindowed** and then filter to
+`source='ibkr'`, so the moment July 2026's real rows landed, every pre-IBKR month vanished from the
+card — the repository's own docstring warns against exactly that. The boundary is reported as
+`ibkr_from`.
+
+**Forecasts are inferred, because nothing forward-looking is cached** — no announced dividends
+anywhere, and the fundamentals/earnings tables carry no dividend fields. `dividend_forecast.py` is a
+pure module (no DB, no network, fast unit tests): cadence is the **median gap** between recent
+payments, the amount the **median** of recent payments scaled to the current holding — median so one
+special dividend doesn't inflate every projection. It refuses rather than guesses: nothing held, fewer
+than two payments, a gap outside 20–400 days, or a payer that has already skipped ~2.5 cycles all
+project nothing. IBKR rows carry no `amount_per_share` and a `0` `shares_held` sentinel, so the
+scaling falls back to shares held at the pay date, then to the unscaled amount.
+Tests: `tests/test_dividend_forecast.py`, `tests/test_dividend_breakdown.py`.
 
 ---
 
@@ -453,6 +523,28 @@ The 13:00/20:00 IBKR-only jobs exist because a transient `Code=1001` at 08:00 us
 freshness. They deliberately **skip** market data and yfinance dividends — see rule 1. Pinned by
 `tests/test_scheduler_jobs.py`. Status: `GET /api/scheduler/status`.
 
+**One pipeline at a time (`app/single_flight.py`).** `/api/` is public and unauthenticated, and nothing
+stopped concurrent or rapid-fire triggers: APScheduler's `max_instances=1` only fences jobs *it*
+dispatches, and `POST /api/scheduler/trigger` ran `full_sync_job()` as a bare coroutine outside the job
+store entirely — so a stranger could overlap the 08:00 run or spam Flex requests toward a `1025`
+lockout. Everything that can reach IBKR or Yahoo shares the `sync-pipeline` gate; two pipelines racing
+is the failure mode regardless of which endpoint started them. Scheduled jobs enter with **no cooldown**
+and, on collision, record a `status="skipped"` run rather than running concurrently (the next slot
+recovers freshness). The public routes add cooldowns (ibkr 120s; market-data / trigger / fundamentals /
+ratings / allocation / watchlist 300s) and answer **429 with `Retry-After`**. In-process by design —
+single uvicorn worker, and the check-and-set has no `await` between test and set. A backgrounded route
+(fundamentals `/sync`) checks `is_running()` in the handler and holds the lock inside the task, so the
+gate spans the actual work rather than the enqueue. Tests: `tests/test_single_flight.py`.
+
+**Errors are redacted before they are stored or served (`app/redact.py`).** Flex sends the token as a
+`t=` URL parameter and `requests` transport errors stringify with the full URL, so a plain `str(e)` from
+a failed SendRequest carries it — and those went verbatim into `sync_runs.message`, which the public
+`/api/scheduler/status` and `/history` re-serve forever. Production really did leak it (found and
+scrubbed 2026-07-28; **rotate the token if this ever recurs**). `SyncRunRepository.record()` redacts on
+write and `to_dict()` again on read, so rows written before the fix or restored from a backup can't leak
+either; the routers redact their `HTTPException` details. The `q=` query id stays readable — public in
+these docs and useless alone. Tests: `tests/test_secret_redaction.py`.
+
 **A price that never arrives is otherwise silent.** `portfolio_service` values a position with no price
 at **0.00** and moves on, so deleting SBI's poisoned prices took 446.93 CHF off the total with nothing
 reporting it. `find_stale_priced_securities()` now runs after every market-data sync and warns when a
@@ -497,7 +589,7 @@ cd backend && venv\Scripts\activate && uvicorn app.main:app --reload --port 8000
 cd frontend && npm run dev          # http://localhost:5173
 ```
 
-Tests (159, all offline — no IBKR, Yahoo or FX-provider calls):
+Tests (241, all offline — no IBKR, Yahoo or FX-provider calls):
 ```bash
 cd backend && ./venv/Scripts/python.exe -m pytest tests/ -q
 ```
@@ -626,6 +718,22 @@ Tests: `tests/test_currency_fallback.py`.
 | Deploy says health FAILED | Usually the premature check; re-curl `/health` after ~15s |
 
 ---
+
+## Correctness sweep (2026-07-29)
+
+A three-part audit (valuation core / API surface / frontend) produced 16 fixes, all shipped and
+deployed overnight; the test suite went 190 → 241. The ones that changed **stated behaviour** are
+documented in place above — token redaction and the single-flight gate under *Sync schedule*, the
+close-date convention, disposal inflows and the swept timeline under *Reconciliation*, the era splice
+and forecasts under *Dividends*, the holiday rule under *split invalidation*. Also fixed and worth
+knowing: the FX carry-forward is now bounded at **30 days** (it had no bound, so a months-stale rate
+could be stamped onto a new lot's persisted `cost_basis_eur` — past the bound it raises and the lot is
+skipped *with* a warning, which self-heals); the price-currency map picks the **newest** row
+deterministically and warns on a mixed history instead of applying an arbitrary row to the whole series;
+two composite indices were added (`taxlots(security_id, is_open)`,
+`exchange_rates(from_currency, to_currency, date)`); and the UI now renders sync **warnings** (they ride
+on *successful* runs and were structurally unreachable before — the SBI silent-failure class) and shows
+an explicit error state instead of "No portfolio data — sync to get started" when the backend 500s.
 
 ## Current state (2026-07-28)
 
