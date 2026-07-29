@@ -54,8 +54,8 @@ def test_projection_lands_inside_the_horizon_only():
         _hist(QUARTERLY), Decimal("10"),
         horizon_start=date(2026, 5, 2), horizon_end=date(2026, 12, 31),
     )
-    # last ex-date 2026-04-15 stepped by 91 days: 07-15 and 10-14; 2027-01-13 is out
-    assert [fp.on_date for fp in out] == [date(2026, 7, 15), date(2026, 10, 14)]
+    # ~91 days snaps to quarterly, so it keeps the 15th rather than drifting
+    assert [fp.on_date for fp in out] == [date(2026, 7, 15), date(2026, 10, 15)]
     assert all(fp.net_eur == Decimal("10") for fp in out)   # 1/share x 10 shares
 
 
@@ -134,3 +134,53 @@ def test_staleness_is_judged_from_now_not_from_the_horizon():
         as_of=date(2027, 1, 1),   # ~9 months since the last ex-date
     )
     assert out == []
+
+
+def test_a_monthly_payer_gets_twelve_payments_a_year():
+    """
+    Real schedules pay on a day of the month. Stepping by a fixed 31 days drifts
+    against the calendar and gave SBI 11 payouts in 2027 instead of 12.
+    """
+    monthly = [date(2026, 2, 20), date(2026, 3, 20), date(2026, 4, 20)]
+    out = project_dividends(
+        _hist(monthly), Decimal("10"),
+        horizon_start=date(2027, 1, 1), horizon_end=date(2027, 12, 31),
+        as_of=date(2026, 5, 1),
+    )
+    assert len(out) == 12
+    assert [fp.on_date.month for fp in out] == list(range(1, 13))
+    assert all(fp.on_date.day == 20 for fp in out)   # the schedule's own day
+
+
+def test_a_quarterly_payer_keeps_its_day_of_month():
+    out = project_dividends(
+        _hist(QUARTERLY), Decimal("10"),
+        horizon_start=date(2027, 1, 1), horizon_end=date(2027, 12, 31),
+        as_of=date(2026, 5, 1),
+    )
+    assert len(out) == 4
+    assert [fp.on_date.month for fp in out] == [1, 4, 7, 10]
+    assert all(fp.on_date.day == 15 for fp in out)
+
+
+def test_month_end_dates_are_clamped_not_overflowed():
+    """A 31st-of-the-month payer must land on the 28th/30th, not spill over."""
+    monthly = [date(2026, 1, 31), date(2026, 2, 28), date(2026, 3, 31)]
+    out = project_dividends(
+        _hist(monthly), Decimal("1"),
+        horizon_start=date(2026, 4, 1), horizon_end=date(2026, 7, 1),
+        as_of=date(2026, 4, 1),
+    )
+    assert [str(fp.on_date) for fp in out] == ["2026-04-30", "2026-05-31", "2026-06-30"]
+
+
+def test_an_irregular_cadence_still_steps_in_days():
+    """Nothing near a calendar period keeps the old day-stepping behaviour."""
+    irregular = [date(2026, 1, 1), date(2026, 2, 20), date(2026, 4, 10)]  # 50d, 49d
+    out = project_dividends(
+        _hist(irregular), Decimal("1"),
+        horizon_start=date(2026, 4, 11), horizon_end=date(2026, 8, 1),
+        as_of=date(2026, 4, 11),
+    )
+    # median 49 days, and 49 matches no calendar period, so it steps in days
+    assert [str(fp.on_date) for fp in out] == ["2026-05-29", "2026-07-17"]

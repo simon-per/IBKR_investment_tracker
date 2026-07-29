@@ -35,6 +35,30 @@ CADENCE_SAMPLE = 8
 # has stopped, not paused — projecting a resumption would be invention.
 STOPPED_AFTER_GAPS = 2.5
 
+# Real schedules pay on a day of the month, not every N days. Stepping in days
+# drifts against the calendar — 31-day steps give a monthly payer 11 payouts a
+# year instead of 12 — so an inferred gap close to a calendar period is snapped
+# to it. Anything that doesn't match one of these keeps day-stepping.
+CALENDAR_PERIODS = {1: (26, 35), 3: (82, 100), 6: (170, 195), 12: (350, 380)}
+
+
+def _months_step(gap_days: int) -> Optional[int]:
+    for months, (lo, hi) in CALENDAR_PERIODS.items():
+        if lo <= gap_days <= hi:
+            return months
+    return None
+
+
+def _add_months(d: date, months: int) -> date:
+    """Same day-of-month N months on, clamped to the month's length."""
+    total = d.month - 1 + months
+    year, month = d.year + total // 12, total % 12 + 1
+    if month == 12:
+        last = 31
+    else:
+        last = (date(year + (month == 12), month % 12 + 1, 1) - timedelta(days=1)).day
+    return date(year, month, min(d.day, last))
+
 
 @dataclass(frozen=True)
 class HistPayment:
@@ -119,10 +143,15 @@ def project_dividends(
         return []
 
     amount = per_share * current_shares
+    months = _months_step(gap)
+
     out: List[ForecastPayment] = []
-    nxt = last_seen + timedelta(days=gap)
+    step = 1
+    nxt = _add_months(last_seen, months) if months else last_seen + timedelta(days=gap)
     while nxt <= horizon_end:
         if nxt >= horizon_start:
             out.append(ForecastPayment(on_date=nxt, net_eur=amount))
-        nxt += timedelta(days=gap)
+        step += 1
+        nxt = (_add_months(last_seen, months * step) if months
+               else nxt + timedelta(days=gap))
     return out
