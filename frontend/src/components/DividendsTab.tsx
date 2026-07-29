@@ -13,6 +13,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { api } from '@/lib/api'
 import type { DividendSecurityRow } from '@/lib/api'
 import { useCurrencySymbol, useFormatCurrency } from '@/lib/CurrencyContext'
+import { buildChartSeries, duplicatedSymbols, FC, OTHER } from '@/lib/dividendChart'
 import { useTheme } from './ThemeProvider'
 import { cn } from '@/lib/utils'
 
@@ -26,9 +27,6 @@ import { cn } from '@/lib/utils'
 const SERIES_LIGHT = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7', '#e34948']
 const SERIES_DARK = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#008300', '#9085e9', '#e66767']
 const OTHER_COLOR = '#898781'
-const OTHER = 'Other'
-const MAX_SERIES = 8
-const FC = 'f:' // dataKey prefix for forecast series
 
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
@@ -90,46 +88,10 @@ export function DividendsTab() {
 
   const palette = theme === 'dark' ? SERIES_DARK : SERIES_LIGHT
 
-  const { chartData, stackSymbols } = useMemo(() => {
-    if (!data) return { chartData: [] as Record<string, number | string>[], stackSymbols: [] as string[] }
-
-    // Rank the series the months actually contain, never securities[].symbol: the
-    // backend disambiguates a ticker that spans two instruments ("ASML (AEB)"), so
-    // ranking by bare symbol would match nothing and dump those series into Other.
-    const totals = new Map<string, number>()
-    for (const m of data.months) {
-      for (const [sym, v] of [...Object.entries(m.actual), ...Object.entries(m.forecast)]) {
-        totals.set(sym, (totals.get(sym) ?? 0) + v)
-      }
-    }
-    const top = [...totals.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, MAX_SERIES)
-      .map(([s]) => s)
-    // Alphabetical keeps a symbol's color stable when switching years; palette
-    // order == stack order, so adjacent segments are the validated pairs.
-    top.sort()
-    const hasOther = totals.size > top.length
-
-    const rows = data.months.map((m) => {
-      const row: Record<string, number | string> = { month: m.month }
-      let otherActual = 0
-      let otherForecast = 0
-      for (const [sym, v] of Object.entries(m.actual)) {
-        if (top.includes(sym)) row[sym] = v
-        else otherActual += v
-      }
-      for (const [sym, v] of Object.entries(m.forecast)) {
-        if (top.includes(sym)) row[FC + sym] = v
-        else otherForecast += v
-      }
-      if (otherActual > 0) row[OTHER] = Math.round(otherActual * 100) / 100
-      if (otherForecast > 0) row[FC + OTHER] = Math.round(otherForecast * 100) / 100
-      return row
-    })
-
-    return { chartData: rows, stackSymbols: hasOther ? [...top, OTHER] : top }
-  }, [data])
+  // Extracted so it can be unit-tested: this transformation already carried one
+  // silent bug (ranking by a key space the data didn't use), and with no browser
+  // in the loop a test is the only way to catch the next one.
+  const { chartData, stackSymbols } = useMemo(() => buildChartSeries(data), [data])
 
   const colorOf = (sym: string) =>
     sym === OTHER ? OTHER_COLOR : palette[stackSymbols.indexOf(sym)] ?? OTHER_COLOR
@@ -199,14 +161,9 @@ export function DividendsTab() {
     return showForecast ? rows : rows.filter((r) => r.payouts > 0)
   }, [data, showForecast])
 
-  // A ticker listed on two venues (ASML on NASDAQ and AEB) is two securities and
-  // two rows; the chart merges them into one company, so only the table needs the
-  // venue — and only where it actually disambiguates.
-  const duplicatedSymbols = useMemo(() => {
-    const seen = new Map<string, number>()
-    for (const r of securities) seen.set(r.symbol, (seen.get(r.symbol) ?? 0) + 1)
-    return new Set([...seen.entries()].filter(([, n]) => n > 1).map(([s]) => s))
-  }, [securities])
+  // A ticker listed on two venues is two securities and two rows; only the table
+  // needs the venue, and only where it actually disambiguates.
+  const duplicated = useMemo(() => duplicatedSymbols(securities), [securities])
 
   const hasAnything = (data?.total_net_eur ?? 0) > 0 || (data?.total_forecast_net_eur ?? 0) > 0
 
@@ -370,7 +327,7 @@ export function DividendsTab() {
                     <tr key={row.security_id} className="border-b border-border/50">
                       <td className="px-2 py-1.5 font-medium">
                         {row.symbol}
-                        {duplicatedSymbols.has(row.symbol) && row.exchange && (
+                        {duplicated.has(row.symbol) && row.exchange && (
                           <span className="ml-1 font-normal text-xs text-muted-foreground">
                             {row.exchange}
                           </span>
