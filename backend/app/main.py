@@ -50,18 +50,32 @@ async def lifespan(app: FastAPI):
             logger.info(f"Warning: Could not seed base currency: {str(e)}")
             await db.rollback()
 
-    # Start the scheduler for daily automatic syncs
+    # Start the scheduler for daily automatic syncs.
+    #
+    # Gated because starting it is not a neutral act: the jobs reach the live
+    # IBKR Flex token and Yahoo, so a developer running uvicorn locally would
+    # arm real syncs against a rate-limited, lockout-prone API. Defaults to on,
+    # so production keeps its schedule; local .env sets SCHEDULER_ENABLED=false.
     from app.services.scheduler_service import get_scheduler
     scheduler = get_scheduler()
-    scheduler.start()
-    logger.info("Scheduler started - Syncs at 08:00, 15:00, 22:00 Europe/Berlin")
+    if settings.scheduler_enabled:
+        scheduler.start()
+        logger.info("Scheduler started - Syncs at 08:00, 13:00, 15:00, 20:00, 22:00 Europe/Berlin")
+    else:
+        # Logged loudly: a silently disabled scheduler looks exactly like a
+        # healthy site whose data has quietly stopped moving.
+        logger.warning(
+            "Scheduler DISABLED (SCHEDULER_ENABLED=false) - no automatic IBKR, "
+            "FX, market-data or dividend syncs will run in this process"
+        )
 
     yield
 
     # Shutdown: Clean up resources
     logger.info("Application shutting down")
+    # Safe when the scheduler was never started — shutdown() no-ops on a None
+    # scheduler, which is exactly the disabled case.
     scheduler.shutdown()
-    logger.info("Scheduler shut down successfully")
 
 
 # Create FastAPI application

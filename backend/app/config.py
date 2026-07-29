@@ -25,6 +25,14 @@ class Settings(BaseSettings):
     # Logging
     log_level: str = "INFO"
 
+    # Whether to arm the APScheduler jobs on startup. Defaults to True so
+    # production is unaffected; set SCHEDULER_ENABLED=false for local runs.
+    # Without it, merely starting uvicorn on a dev machine arms the 08:00/13:00/
+    # 15:00/20:00/22:00 Europe/Berlin jobs against the real IBKR token in .env
+    # and against Yahoo — the two things this project must never do casually
+    # (see the two rules at the top of CLAUDE.md).
+    scheduler_enabled: bool = True
+
     model_config = SettingsConfigDict(
         env_file=str(ENV_FILE),
         env_file_encoding="utf-8",

@@ -264,3 +264,15 @@ async def test_scheduler_registers_five_jobs_with_expected_hours():
         assert "hour='8'" in hours['full_sync_job']
     finally:
         svc.shutdown()
+
+
+def test_scheduler_is_enabled_by_default():
+    """
+    The gate that keeps a local uvicorn from arming real IBKR/Yahoo syncs must
+    default to ON, or production silently stops syncing and looks perfectly
+    healthy while doing it. Read from the field default rather than the loaded
+    settings object, which picks up whatever the local .env says.
+    """
+    from app.config import Settings
+
+    assert Settings.model_fields["scheduler_enabled"].default is True
