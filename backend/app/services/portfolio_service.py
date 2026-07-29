@@ -448,7 +448,11 @@ class PortfolioService:
         EUR at the trade date, then project into the base currency.
         """
         trades = (await self.db.execute(select(Trade))).scalars().all()
-        if not trades:
+        # "Some trades exist" is not "realized figures exist": a statement can
+        # carry BUYs long before any sale. Guarding on any-trade made a BUY-only
+        # table return hard zeros and permanently mask the closed-lot fallback,
+        # while the tax report (which picks per-year) showed real gains.
+        if not any((t.buy_sell or "").upper() == "SELL" for t in trades):
             return None
 
         total_proceeds_eur = Decimal("0")
@@ -495,8 +499,9 @@ class PortfolioService:
         """
         Aggregate realized gain/loss from closed tax lots.
 
-        Proceeds are approximated as quantity × market_price × fx_rate on close_date
-        (we don't persist actual sale proceeds from IBKR <Trades> yet). Lots that can't
+        Used as the fallback when no SELL trades have been ingested (e.g. lots
+        closed before the <Trades> section was enabled): proceeds are approximated
+        as quantity × market_price × fx_rate on close_date. Lots that can't
         be priced within the 14-day fallback window are skipped and not counted.
 
         Values are returned in the base currency (proceeds converted at close_date,
