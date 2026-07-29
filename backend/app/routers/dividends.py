@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import AsyncSessionLocal, get_db
 from app.schemas.portfolio import DividendBreakdownResponse
 from app.services.dividend_service import DividendService
+from app.single_flight import SYNC_PIPELINE, SyncBusy, single_flight
 
 logger = logging.getLogger(__name__)
 
@@ -25,18 +26,29 @@ _last_auto_sync: Optional[datetime] = None
 
 
 async def _run_dividend_sync_background() -> None:
-    """Run dividend sync + compute in background with its own DB session."""
+    """
+    Run dividend sync + compute in background with its own DB session.
+
+    Holds the shared pipeline gate, not just the module flag: the 08:00
+    full_sync_job runs sync_dividends() too, and a dashboard load that finds the
+    card stale would otherwise start a second yfinance pass straight through it.
+    """
     global _sync_in_progress
-    _sync_in_progress = True
     try:
-        async with AsyncSessionLocal() as db:
-            service = DividendService(db)
-            await service.sync_dividend_data()
-            await service.compute_dividend_income()
-    except Exception as e:
-        logger.error(f"Background dividend sync failed: {e}")
-    finally:
-        _sync_in_progress = False
+        with single_flight(SYNC_PIPELINE):
+            _sync_in_progress = True
+            try:
+                async with AsyncSessionLocal() as db:
+                    service = DividendService(db)
+                    await service.sync_dividend_data()
+                    await service.compute_dividend_income()
+            except Exception as e:
+                logger.error(f"Background dividend sync failed: {e}")
+            finally:
+                _sync_in_progress = False
+    except SyncBusy as e:
+        # A scheduled sync owns the pipeline; the card refreshes after it lands.
+        logger.info(f"Dividend sync skipped: {e}")
 
 
 def _is_summary_stale(summary: dict) -> bool:

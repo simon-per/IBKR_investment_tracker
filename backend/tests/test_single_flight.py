@@ -79,3 +79,30 @@ async def test_a_manual_trigger_surfaces_busy_instead_of_pretending_success(monk
     with single_flight(SYNC_PIPELINE):
         with pytest.raises(SyncBusy):
             await svc.trigger_sync_now()
+
+
+@pytest.mark.asyncio
+async def test_the_dividend_card_does_not_start_a_second_yahoo_pass(monkeypatch):
+    """
+    The 08:00 full_sync runs sync_dividends() too. A dashboard load that finds
+    the card stale must not push a second yfinance pass through it.
+    """
+    import app.routers.dividends as div
+
+    called = []
+
+    class _Boom:
+        async def __aenter__(self):
+            called.append(1)
+            raise AssertionError("dividend sync ran while the pipeline was held")
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(div, "AsyncSessionLocal", lambda: _Boom())
+
+    with single_flight(SYNC_PIPELINE):          # a scheduled job owns the pipeline
+        await div._run_dividend_sync_background()
+
+    assert not called
+    assert div._sync_in_progress is False
