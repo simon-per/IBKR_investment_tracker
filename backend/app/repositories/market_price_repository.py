@@ -58,13 +58,30 @@ class MarketPriceRepository:
         )
         return list(result.scalars().all())
 
+    # An interior weekday hole that stayed empty this long is a market holiday
+    # (the exchange never produced a close) — every daily sync since then has
+    # already failed to fill it. Younger holes stay "missing" so late data can
+    # still arrive.
+    HOLIDAY_GRACE_DAYS = 30
+
     async def get_missing_dates(
-        self, security_id: int, start_date: date, end_date: date
+        self, security_id: int, start_date: date, end_date: date,
+        as_of: Optional[date] = None,
     ) -> List[date]:
         """
         Find dates in range that don't have cached prices.
         Returns a list of dates that need to be fetched from API.
+
+        Weekends are never missing, and neither is an old INTERIOR weekday hole —
+        cached data on both sides plus HOLIDAY_GRACE_DAYS of failed refills means
+        a market holiday (July 4th, Good Friday …), and treating those as missing
+        made every sync re-request the security's whole range from Yahoo forever.
+        Leading and trailing gaps stay missing on purpose: that is what a new
+        security, a split purge, or a growing range look like. ``as_of`` is
+        injectable purely for tests.
         """
+        as_of = as_of or date.today()
+
         # Get all existing dates in the range
         result = await self.session.execute(
             select(MarketPrice.date)
@@ -77,6 +94,9 @@ class MarketPriceRepository:
             )
         )
         existing_dates = set(row[0] for row in result.all())
+        first_cached = min(existing_dates) if existing_dates else None
+        last_cached = max(existing_dates) if existing_dates else None
+        holiday_cutoff = as_of - timedelta(days=self.HOLIDAY_GRACE_DAYS)
 
         # Generate all dates in range (excluding weekends for market data)
         missing_dates = []
@@ -84,7 +104,12 @@ class MarketPriceRepository:
         while current_date <= end_date:
             # Skip weekends (Saturday=5, Sunday=6)
             if current_date.weekday() < 5 and current_date not in existing_dates:
-                missing_dates.append(current_date)
+                interior = (
+                    first_cached is not None
+                    and first_cached < current_date < last_cached
+                )
+                if not (interior and current_date < holiday_cutoff):
+                    missing_dates.append(current_date)
             current_date += timedelta(days=1)
 
         return missing_dates
