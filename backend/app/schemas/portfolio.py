@@ -111,6 +111,8 @@ class SecurityAttribution(BaseModel):
     start_market_value_eur: float
     end_market_value_eur: float
     new_investment_eur: float
+    # Capital returned by lots closed in the period (market price at close date).
+    disposal_proceeds_eur: float = 0.0
     value_change_eur: float
     pnl_contribution_eur: float
     contribution_percent: float

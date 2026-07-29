@@ -967,8 +967,14 @@ class PortfolioService:
         For each security, computes:
         - Market value at start and end dates
         - New investment during the period (tax lots opened)
-        - Pure P&L contribution = value_change - new_investment
+        - Disposal proceeds during the period (tax lots closed, priced at close date)
+        - Pure P&L contribution = value_change + disposals - new_investment
         - Contribution % of total portfolio P&L
+
+        Without the disposal term a position sold mid-period contributed 0 to the
+        end value while its full start value stayed on the books, so it read as
+        pnl = -start_value — a CHF 40k position sold at a profit showed as a
+        CHF -40k contributor and corrupted every contribution_percent.
         """
         # Get ALL taxlots (open + closed) for correct historical attribution
         result = await self.db.execute(
@@ -1053,6 +1059,19 @@ class PortfolioService:
             if effective_start < taxlot.open_date <= effective_end:
                 entry["new_investment"] += base_fx.convert(taxlot.cost_basis_eur, taxlot.open_date)
 
+        # Capital returned by sales inside the window, priced like the valuations.
+        # Lots closed ON effective_end are excluded — the end valuation still
+        # carries them (a lot is active through its close date), so proceeds there
+        # would double-count. Mirrors calculate_xirr; change both together if the
+        # close-date convention ever flips.
+        disposals_by_sec: Dict[int, Decimal] = {}
+        for r in await self.realized_rows_from_closed_lots(
+            base_fx, start=effective_start, end=effective_end - timedelta(days=1),
+        ):
+            disposals_by_sec[r["security_id"]] = (
+                disposals_by_sec.get(r["security_id"], Decimal("0")) + r["proceeds"]
+            )
+
         # Calculate totals — market values converted to base at their effective date
         total_end_mv = sum(
             float(base_fx.convert(v["end_market_value"], effective_end))
@@ -1065,8 +1084,9 @@ class PortfolioService:
             start_mv = float(base_fx.convert(entry["start_market_value"], effective_start))
             end_mv = float(base_fx.convert(entry["end_market_value"], effective_end))
             new_inv = float(entry["new_investment"])
+            disposal = float(disposals_by_sec.get(sid, Decimal("0")))
             value_change = end_mv - start_mv
-            pnl = value_change - new_inv
+            pnl = value_change + disposal - new_inv
             weight = (end_mv / total_end_mv * 100) if total_end_mv > 0 else 0.0
 
             attributions.append({
@@ -1076,6 +1096,7 @@ class PortfolioService:
                 "start_market_value_eur": round(start_mv, 2),
                 "end_market_value_eur": round(end_mv, 2),
                 "new_investment_eur": round(new_inv, 2),
+                "disposal_proceeds_eur": round(disposal, 2),
                 "value_change_eur": round(value_change, 2),
                 "pnl_contribution_eur": round(pnl, 2),
                 "contribution_percent": 0.0,  # set below
