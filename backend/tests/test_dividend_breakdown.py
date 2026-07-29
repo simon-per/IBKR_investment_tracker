@@ -161,6 +161,36 @@ async def test_a_sold_position_gets_no_forecast():
 
 
 @pytest.mark.asyncio
+async def test_a_legacy_row_with_no_net_falls_back_to_gross():
+    """
+    Rows predating the withholding-fields migration carry gross but a NULL net.
+    Both endpoints must fall back to gross — the breakdown crashed on them in
+    production (Decimal += None) the moment the income filter stopped keying on
+    net alone.
+    """
+    engine, session = await _make_session()
+    try:
+        await DividendRepository(session).upsert_payment({
+            "security_id": 1, "ex_date": date(2026, 2, 10), "pay_date": date(2026, 2, 10),
+            "currency": "EUR", "shares_held": Decimal("10"),
+            "gross_amount_eur": Decimal("7.00"),
+            "withholding_tax_eur": None, "net_amount_eur": None,
+            "source": "yfinance_estimate",
+        })
+        svc = DividendService(session)
+
+        out = await svc.get_dividend_breakdown(year=2026, include_forecast=False, as_of=AS_OF)
+        assert out["total_net_eur"] == 7.00
+        assert out["securities"][0]["net_eur"] == 7.00
+
+        summary = await svc.get_dividend_summary()
+        assert summary["total_net_eur"] == 7.00
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_the_summary_ignores_decades_of_empty_pre_ownership_rows():
     """
     yfinance returns a security's whole dividend history, and

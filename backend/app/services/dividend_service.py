@@ -263,6 +263,20 @@ class DividendService:
         return {"ibkr_dividends": saved, "message": f"Recorded {saved} IBKR dividend payments"}
 
     @staticmethod
+    def _net_eur(p) -> Decimal:
+        """
+        Net for a payment, falling back to gross when net is NULL.
+
+        Rows predating the withholding-fields migration carry only
+        `gross_amount_eur`; treating their net as 0 (or None) would drop real
+        income — or crash the arithmetic. get_dividend_summary has always done
+        this; every consumer must.
+        """
+        if p.net_amount_eur is not None:
+            return p.net_amount_eur
+        return p.gross_amount_eur or Decimal("0")
+
+    @staticmethod
     def _is_income(p) -> bool:
         """
         True when a row represents money actually received.
@@ -424,7 +438,7 @@ class DividendService:
             on_date = p.pay_date or p.ex_date
             if not _in_window(on_date):
                 continue
-            net = base_fx.convert(p.net_amount_eur, on_date)
+            net = base_fx.convert(self._net_eur(p), on_date)
             row = by_sec.setdefault(p.security_id, _new_row())
             row["payouts"] += 1
             row["net"] += net
@@ -463,7 +477,7 @@ class DividendService:
                     shares = p.shares_held if (p.shares_held and p.shares_held > 0) \
                         else shares_at(p.security_id, on_date)
                     hist_by_sec[p.security_id].append(HistPayment(
-                        on_date=on_date, net_eur=p.net_amount_eur,
+                        on_date=on_date, net_eur=self._net_eur(p),
                         shares_held=shares if shares > 0 else None,
                     ))
 
@@ -489,7 +503,7 @@ class DividendService:
         for p in all_payments:
             d = p.pay_date or p.ex_date
             if ttm_start <= d <= as_of:
-                ttm_net[p.security_id] += base_fx.convert(p.net_amount_eur, d)
+                ttm_net[p.security_id] += base_fx.convert(self._net_eur(p), d)
         mv_by_sec: Dict[int, Decimal] = {}
         try:
             for pos in await portfolio.get_positions_breakdown():
