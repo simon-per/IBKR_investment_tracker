@@ -177,10 +177,14 @@ export function Dashboard() {
     const absoluteChange = currentValue - startValue
     const percentageChange = startValue > 0 ? (absoluteChange / startValue) * 100 : 0
 
-    // Calculate period gain (profit change over the time period)
+    // Period gain. The attribution endpoint already computes the period's
+    // economic P&L over the same range — value change plus disposal proceeds
+    // minus new investment — so it counts a realized gain. The local fallback
+    // is the change in UNREALIZED profit, which drops when a winner is sold:
+    // the gain leaves the unrealized pool and shows up nowhere.
     const startProfit = firstPoint.market_value_eur - firstPoint.cost_basis_eur
     const currentProfit = lastPoint.market_value_eur - lastPoint.cost_basis_eur
-    const periodGain = currentProfit - startProfit
+    const periodGain = attribution?.total_pnl_eur ?? (currentProfit - startProfit)
     // Use cost basis as denominator for gain % (more meaningful than profit-on-profit)
     const startCostBasis = firstPoint.cost_basis_eur
     const periodGainPercent = startCostBasis > 0 ? (periodGain / startCostBasis) * 100 : 0
@@ -195,7 +199,7 @@ export function Dashboard() {
       periodGain,
       periodGainPercent,
     }
-  }, [valueOverTime])
+  }, [valueOverTime, attribution])
 
   // Calculate KPIs
   const kpiMetrics = useMemo(() => {
@@ -433,7 +437,12 @@ export function Dashboard() {
                   <div className="space-y-2">
                     <div className="flex items-center gap-6 text-sm">
                       <div className="flex items-center gap-2">
-                        <span className="text-muted-foreground">Period Performance:</span>
+                        <span
+                          className="text-muted-foreground"
+                          title="Change in total holdings value over the period. This includes money you added — it is not a return; see Period Gain for that."
+                        >
+                          Value change:
+                        </span>
                         <span className={`font-semibold ${performanceMetrics.absoluteChange >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
                           {performanceMetrics.absoluteChange >= 0 ? '+' : ''}{curSym}{performanceMetrics.absoluteChange.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                         </span>
@@ -444,7 +453,12 @@ export function Dashboard() {
                     </div>
                     <div className="flex items-center gap-6 text-sm">
                       <div className="flex items-center gap-2">
-                        <span className="text-muted-foreground">Period Gain:</span>
+                        <span
+                          className="text-muted-foreground"
+                          title="What the holdings actually earned over the period: value change plus proceeds of anything sold, less money put in. Realized gains count."
+                        >
+                          Period Gain:
+                        </span>
                         <span className={`font-semibold ${performanceMetrics.periodGain >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
                           {performanceMetrics.periodGain >= 0 ? '+' : ''}{curSym}{performanceMetrics.periodGain.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                         </span>
