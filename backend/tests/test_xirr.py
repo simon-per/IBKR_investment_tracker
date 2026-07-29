@@ -126,6 +126,40 @@ async def test_dividends_lift_the_return():
 
 
 @pytest.mark.asyncio
+async def test_a_legacy_dividend_row_still_counts_as_an_inflow():
+    """
+    Rows predating the withholding-fields migration carry gross with a NULL net.
+    Keying the inflow on net alone dropped that income from the return entirely
+    (and would have crashed had it not been filtered out first).
+    """
+    async def _run(with_dividend: bool):
+        engine, session = await _make_session()
+        try:
+            session.add_all([
+                _lot(1, Y_START, "10", "100"),
+                _price(1, Y_START, "10"), _price(1, Y_END, "12"),
+            ])
+            if with_dividend:
+                session.add(DividendPayment(
+                    security_id=1, ex_date=date(2025, 6, 30), pay_date=date(2025, 6, 30),
+                    shares_held=Decimal("10"), gross_amount_eur=Decimal("5"),
+                    withholding_tax_eur=None, net_amount_eur=None,  # the legacy shape
+                    source="yfinance_estimate",
+                ))
+            await session.flush()
+            pct, *_ = await PortfolioService(session).calculate_xirr(Y_START, Y_END)
+            return pct
+        finally:
+            await session.close()
+            await engine.dispose()
+
+    without = await _run(False)
+    with_div = await _run(True)
+    assert without is not None and with_div is not None
+    assert with_div > without
+
+
+@pytest.mark.asyncio
 async def test_short_windows_are_labelled_simple_period():
     engine, session = await _make_session()
     try:

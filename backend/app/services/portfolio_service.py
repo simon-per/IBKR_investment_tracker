@@ -996,12 +996,15 @@ class PortfolioService:
         payments, _ = DividendService._splice_by_era(
             await DividendRepository(self.db).get_computed_dividends()
         )
+        # Via the shared helpers, not the columns: rows predating the
+        # withholding-fields migration carry gross with a NULL net, and keying on
+        # net alone silently dropped that income here.
         for p in payments:
             on_date = p.pay_date or p.ex_date
             if effective_start_date < on_date <= effective_end_date \
-                    and (p.net_amount_eur or Decimal("0")) > 0:
+                    and DividendService._is_income(p):
                 dates.append(on_date)
-                amounts.append(float(base_fx.convert(p.net_amount_eur, on_date)))
+                amounts.append(float(base_fx.convert(DividendService._net_eur(p), on_date)))
 
         # Terminal inflow: portfolio value at effective end date
         if end_mv > 0:
