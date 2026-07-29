@@ -67,6 +67,19 @@ class BenchmarkService:
             d += timedelta(days=1)
 
         missing = expected_dates - existing_dates
+        # Old interior holes are market holidays — same rule as
+        # MarketPriceRepository.get_missing_dates. Without it a cold request
+        # re-hits Yahoo forever because July 4th can never be filled.
+        if missing and existing_dates:
+            from app.repositories.market_price_repository import MarketPriceRepository
+            first_cached, last_cached = min(existing_dates), max(existing_dates)
+            holiday_cutoff = date.today() - timedelta(
+                days=MarketPriceRepository.HOLIDAY_GRACE_DAYS
+            )
+            missing = {
+                d for d in missing
+                if not (first_cached < d < last_cached and d < holiday_cutoff)
+            }
         if not missing:
             return 0
 
@@ -264,23 +277,29 @@ class BenchmarkService:
         from app.services.currency_service import CurrencyService
 
         currency_service = CurrencyService(self.db)
-        # Batch fetch rates in 30-day chunks covering the full range
-        current = start_date
-        while current <= end_date:
+        # Tile the range in 30-day chunks. Each fetch covers [target-30, target]:
+        # the first target IS start_date (covering the carry-forward lookback
+        # buffer), the last is pinned to end_date — the old `while current <=
+        # end` stepping left up to 29 days uncovered at the tail, so the most
+        # recent chart points dropped and were recomputed on every call.
+        target = start_date
+        while True:
             try:
                 await currency_service._batch_fetch_rates(
                     from_currency=currency,
-                    target_date=current,
+                    target_date=target,
                     to_currency="EUR",
                     days_back=30,
                 )
             except Exception as e:
-                logger.error(f"Failed to fetch FX rates {currency}→EUR for {current}: {e}")
+                logger.error(f"Failed to fetch FX rates {currency}→EUR for {target}: {e}")
                 try:
                     await self.db.rollback()
                 except Exception:
                     pass
-            current += timedelta(days=30)
+            if target >= end_date:
+                break
+            target = min(target + timedelta(days=30), end_date)
 
     async def calculate_benchmark_value_over_time(
         self,
