@@ -220,7 +220,8 @@ Tests: `tests/test_flex_xml_sanitizer.py`, `tests/test_flex_ingestion_e2e.py`.
 - **exchange_rates** / **market_prices** — caches. **ticker_mappings** — IBKR→Yahoo symbols.
 - **app_settings** — `base_currency`, `last_sync_to_date`. Plus fundamentals + earnings tables.
 - **sync_runs** — one row per sync attempt (`sync_type` ∈ `ibkr` | `ibkr_sync` | `full_sync` |
-  `market_data_only` | `ibkr_manual_xml` | `manual_prices` | `manual_mapping` | `manual_cash_flow`,
+  `market_data_only` | `ibkr_manual_xml` | `manual_prices` | `manual_mapping` | `manual_cash_flow` |
+  `manual_dividend_prune`,
   `status`, `message`,
   `details`, `warnings`). Timestamps are
   serialized UTC-aware via `utc_iso()` — a bare naive `isoformat()` is parsed as *local* by the browser,
@@ -357,6 +358,17 @@ from `dividend_payments`, `taxlots`, `market_prices` and `exchange_rates`.
 `source='ibkr'`, so the moment July 2026's real rows landed, every pre-IBKR month vanished from the
 card — the repository's own docstring warns against exactly that. The boundary is reported as
 `ibkr_from`.
+
+**Only dividends that could have been earned are ingested.** `sync_dividend_data()` skips ex-dates
+before the security's earliest lot `open_date` (reported as `pre_ownership_skipped`); a security with no
+lots yet keeps its whole history, since there is no cutoff to infer. Before that, yfinance's full
+history meant **1355 of 1446 rows** on this account were zero rows reaching back to 1985 — the reason
+the card once reported 439 months, and the reason relaxing one read-side filter broke
+`/api/dividends/breakdown` outright. Both readers still filter via `DividendService._is_income()`
+(gross **or** net positive) and `_net_eur()` falls back to gross for rows predating the
+withholding-fields migration, which carry a NULL net — **use those two helpers rather than touching
+the columns directly.** Existing junk is removable with `app/cli/prune_empty_dividends.py --dry-run`
+(deletes only rows the readers already ignore; never a row still awaiting computation).
 
 **Forecasts are inferred, because nothing forward-looking is cached** — no announced dividends
 anywhere, and the fundamentals/earnings tables carry no dividend fields. `dividend_forecast.py` is a
