@@ -3,50 +3,12 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { ChevronRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useCurrencySymbol } from '@/lib/CurrencyContext'
+import { computeModifiedDietzReturn, type MonthReturn } from '@/lib/monthlyReturns'
 import type { PortfolioValuePoint } from '@/lib/api'
 
 interface MonthlyReturnsHeatmapProps {
   data: PortfolioValuePoint[] | undefined
   isLoading: boolean
-}
-
-interface MonthReturn {
-  returnPercent: number
-  startValue: number
-  endValue: number
-  newInvestment: number
-}
-
-/** Modified Dietz return with daily-weighted cash flows */
-function computeModifiedDietzReturn(points: PortfolioValuePoint[]): MonthReturn | null {
-  if (points.length < 2) return null
-  const startMV = points[0].market_value_eur
-  const endMV = points[points.length - 1].market_value_eur
-  if (startMV === 0) return null
-
-  const totalDays = points.length - 1
-
-  // Detect cash flows from day-over-day cost_basis changes
-  let netCashFlow = 0
-  let weightedCashFlow = 0
-  for (let i = 1; i < points.length; i++) {
-    const cf = points[i].cost_basis_eur - points[i - 1].cost_basis_eur
-    if (cf !== 0) {
-      netCashFlow += cf
-      // Weight: fraction of period remaining after the cash flow
-      weightedCashFlow += cf * ((totalDays - i) / totalDays)
-    }
-  }
-
-  const gain = endMV - startMV - netCashFlow
-  const denominator = startMV + weightedCashFlow
-
-  return {
-    returnPercent: denominator > 0 ? (gain / denominator) * 100 : 0,
-    startValue: startMV,
-    endValue: endMV,
-    newInvestment: netCashFlow,
-  }
 }
 
 interface YearRow {
