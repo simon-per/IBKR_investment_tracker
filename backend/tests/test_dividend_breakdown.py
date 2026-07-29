@@ -363,3 +363,45 @@ async def test_an_accumulating_etf_is_never_invented_into_the_forecast():
     finally:
         await session.close()
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_two_sources_do_not_halve_the_inferred_cadence():
+    """
+    The same dividend is stored twice - yfinance under its ex-date, IBKR under
+    its pay date, weeks apart. Counting both made ASML's quarterly schedule read
+    as ~74 days (5 payouts a year instead of 4) and SBI's monthly as 28 (13
+    instead of 12). Dedup can't fix it: Mastercard's ex-to-pay lag of 29 days is
+    longer than a monthly payer's whole cycle.
+    """
+    engine, session = await _make_session()
+    try:
+        session.add(_lot(1, date(2024, 1, 2), "100"))
+        await session.flush()
+        repo = DividendRepository(session)
+        # Clean quarterly ex-dates from yfinance...
+        for d in (date(2025, 7, 9), date(2025, 10, 9),
+                  date(2026, 1, 9), date(2026, 4, 9)):
+            await repo.upsert_payment({
+                "security_id": 1, "ex_date": d, "currency": "EUR",
+                "amount_per_share": Decimal("0.20"), "shares_held": Decimal("100"),
+                "gross_amount_eur": Decimal("20"), "withholding_tax_eur": Decimal("0"),
+                "net_amount_eur": Decimal("20"), "source": "yfinance_estimate",
+            })
+        # ...and IBKR's record of the same two dividends, at their pay dates.
+        for d in (date(2026, 2, 8), date(2026, 5, 8)):
+            await repo.upsert_payment({
+                "security_id": 1, "ex_date": d, "pay_date": d, "currency": "EUR",
+                "shares_held": Decimal("0"), "gross_amount_eur": Decimal("20"),
+                "withholding_tax_eur": Decimal("0"), "net_amount_eur": Decimal("20"),
+                "source": "ibkr",
+            })
+
+        out = await DividendService(session).get_dividend_breakdown(
+            year=2027, include_forecast=True, as_of=AS_OF,
+        )
+        row = next(r for r in out["securities"] if r["forecast_payouts"] > 0)
+        assert row["forecast_payouts"] == 4      # quarterly, not 5
+    finally:
+        await session.close()
+        await engine.dispose()

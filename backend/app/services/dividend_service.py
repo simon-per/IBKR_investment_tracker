@@ -561,9 +561,29 @@ class DividendService:
                 fx_to_eur = await self._latest_fx_to_eur(
                     {s.currency for s in securities.values() if s.currency}, as_of
                 )
+                # Cadence must come from ONE dated series. The same dividend is
+                # recorded twice — yfinance under its ex-date, IBKR under its pay
+                # date — and the two sit weeks apart, which halves the apparent
+                # gap: ASML's quarterly schedule read as 74 days (5 payouts a year
+                # instead of 4) and SBI's monthly as 28 (13 instead of 12).
+                # Deduplication cannot separate them, because Mastercard's
+                # ex-to-pay lag of 29 days is longer than a monthly payer's cycle.
+                # yfinance carries the complete, regular ex-date series, so where
+                # it exists it alone defines the schedule.
+                per_share_rows = defaultdict(list)
+                for p in raw_payments:
+                    if p.amount_per_share is not None:
+                        per_share_rows[p.security_id].append(p)
+                schedule_source = {
+                    sid: rows for sid, rows in per_share_rows.items() if len(rows) >= 2
+                }
+
                 hist_by_sec: Dict[int, List[HistPayment]] = defaultdict(list)
                 basis_by_sec: Dict[int, str] = {}
                 for p in raw_payments:
+                    scheduled = schedule_source.get(p.security_id)
+                    if scheduled is not None and p.amount_per_share is None:
+                        continue  # a second record of a dividend already counted
                     on_date = p.pay_date or p.ex_date
                     if on_date is None or on_date > as_of:
                         continue
