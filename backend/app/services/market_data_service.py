@@ -19,6 +19,11 @@ from app.models.security import Security
 
 logger = logging.getLogger(__name__)
 
+# Days of slack added before the oldest missing price when fetching. Yahoo's range
+# is start-inclusive but a split or a holiday near the edge can shift what it
+# returns, so a few days of overlap costs nothing and closes that gap.
+PRICE_FETCH_BUFFER_DAYS = 5
+
 
 class MarketDataService:
     """
@@ -487,11 +492,21 @@ class MarketDataService:
             await asyncio.sleep(random.uniform(2.0, 4.0))
             return 0
 
-        logger.info(f"Fetching {len(missing_dates)} missing prices for {security.symbol} on {security.exchange}")
+        # Ask only for the span that is actually missing. The 08:00 job passes a
+        # 730-day window, so before this it re-downloaded two years per security
+        # every morning purely because today's close had not published yet —
+        # ~19.5k rows rewritten across 40 securities for a few hundred new ones.
+        # A gap early in the range (a split purge, a new security) still pulls the
+        # whole span, because that is where min(missing) then sits.
+        fetch_start = max(start_date, min(missing_dates) - timedelta(days=PRICE_FETCH_BUFFER_DAYS))
+        logger.info(
+            f"Fetching {len(missing_dates)} missing prices for {security.symbol} "
+            f"on {security.exchange} ({fetch_start}..{end_date})"
+        )
 
         # Try Yahoo Finance first (primary source)
         prices_data = await self.fetch_prices_from_yahoo(
-            security, start_date, end_date
+            security, fetch_start, end_date
         )
 
         # If Yahoo Finance fails or returns nothing, try Alpha Vantage (US stocks only)
