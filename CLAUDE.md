@@ -2,7 +2,9 @@
 
 Full-stack portfolio tracker for an Interactive Brokers account. Tracks securities, tax lots, trades,
 corporate actions and dividends; renders cost-basis vs. market-value charts; and produces a Swiss tax
-report. All values are stored in EUR and projected into a switchable base currency (currently **CHF**).
+report. All values are stored in EUR and projected into a base currency the user switches at will
+(`app_settings.base_currency`, EUR/CHF/USD) — so **read it from `/api/settings`, never from this file**;
+it has been both CHF and EUR, and every money figure moves with it.
 
 **Live:** https://portfolio.srv1211053.hstgr.cloud · **Repo is PUBLIC** (never commit account data)
 
@@ -425,6 +427,53 @@ project nothing. IBKR rows carry no `amount_per_share` and a `0` `shares_held` s
 scaling falls back to shares held at the pay date, then to the unscaled amount.
 Tests: `tests/test_dividend_forecast.py`, `tests/test_dividend_breakdown.py`.
 
+**One projection pass, sliced per consumer.** `_forecast_inputs()` assembles the cadence/per-share
+inputs once, and `project_dividends()` then runs a single wide horizon (to the end of *next* calendar
+year) which each reader filters: the chart, the rolling next-12-months figure, and the per-year
+comparison. This is safe only because the projection steps deterministically from the last known
+payment, so a wide projection sliced to a window equals projecting that window directly.
+**The chart's reach is deliberately narrower than the projection's** — without a selected year it
+still stops at 31 December. Coupling the two tripled the all-time chart's forecast total (46 → 162)
+by pulling next year's payments into it.
+
+### Growth — MoM / YoY, and the five ways it lies
+
+`growth` and `upcoming` on `/api/dividends/breakdown`, rendered as the KPI strip, the per-year panel
+and the calendar (`DividendKpiCards`, `DividendYearComparison`, `DividendCalendar`, `DeltaChip`).
+
+Computed from the **unwindowed** history, deliberately: with `?year=2026` the response carries no
+2025 months, so no client could derive year-over-year at all. It is byte-identical whichever year is
+selected, and pinned that way. Keeping it server-side also keeps the era splice and the per-date FX
+projection in one place instead of growing a second implementation to drift.
+
+**Rolling 12 months leads; raw MoM cannot.** This account's payers are quarterly, so March pays and
+April does not: month-over-month swings ±90% on cadence alone and says nothing about the portfolio.
+MoM survives as a labelled figure on the latest realized month and in the chart tooltip.
+
+Each of these was a wrong number before it was a rule:
+
+1. **YTD is compared day-for-day.** Jan 1 → today against Jan 1 → *the same calendar day* last year.
+   Measuring a part year against a whole prior year turned +527% into +99%. 29 February has no
+   counterpart, so `_same_day_last_year()` falls back to the 28th.
+2. **The first year of income is coverage-limited.** It starts whenever the first dividend landed, not
+   in January — seven months here — so its successor's percentage overstates growth and carries
+   `yoy_vs_partial` (badged `†`). The first year itself gets no percentage.
+3. **The TTM comparison straddles the era splice.** The current 12 months are IBKR actuals while the
+   prior 12 are yfinance estimates: comparable in size, not in provenance. `ttm_crosses_era` says so
+   rather than presenting a change of source as growth.
+4. **Forecast is never silently compared against measured.** `next_12m_vs_ttm_pct` and any annual row
+   containing projection are marked `est.`.
+5. **A zero base yields `null`, never a percentage.** Growth against zero is undefined, not large, and
+   a quarterly payer produces zero months constantly. `_pct()` returns None and the UI renders a dash.
+   Per-month growth is realized-only for the same reason — a projected month's "change" would be an
+   artifact of the forecast's own flat median.
+
+The per-year panel is the one surface that mixes measured and projected into a single bar, so with the
+Forecast toggle **off** it rebuilds from realized income alone (`lib/dividendGrowth.ts`), which is the
+only client-side growth arithmetic and copies the server's two rules exactly: adjacent years only,
+never divide by zero. Tests: `tests/test_dividend_growth.py`, `src/lib/dividendGrowth.test.ts`,
+`src/lib/delta.test.ts`.
+
 ---
 
 ## Contributions — money in per month
@@ -651,6 +700,24 @@ cd backend && venv\Scripts\activate && uvicorn app.main:app --reload --port 8000
 cd frontend && npm run dev          # http://localhost:5173
 ```
 
+**Set `SCHEDULER_ENABLED=false` in `backend/.env` for any local run.** Starting the backend is not a
+neutral act: the lifespan handler arms the 08:00/13:00/15:00/20:00/22:00 Europe/Berlin jobs, which call
+the live Flex API with the real token from `.env` and hit Yahoo — both rules at the top of this file,
+from a dev machine. `settings.scheduler_enabled` defaults to **True** so production is unaffected, and
+a disabled scheduler logs a warning because otherwise it looks exactly like a healthy site whose data
+has quietly stopped moving. Pinned by `test_scheduler_is_enabled_by_default`.
+
+Two traps when pointing a browser at a local stack:
+
+- **Check which port Vite actually took.** If 5173 is occupied it silently moves to 5174 and prints it
+  once. A second dev server on 5173 configured against production means you are looking at prod data
+  and issuing requests to the live site — including `/api/dividends/summary`, which can enqueue a
+  Yahoo dividend sync.
+- **A real-data snapshot beats the stale local DB.** `sqlite3 .backup` on the VPS, copied down, and
+  `DATABASE_URL` pointed at it (the checked-in local `portfolio.db` predates trades, cash flows and
+  the IBKR dividend era, so it exercises none of the interesting shapes). Delete the copy afterwards —
+  `*.db` is gitignored, but it is real account data.
+
 `tests/test_api_smoke.py` runs **every read endpoint through the real HTTP stack** against a fixture
 carrying the shapes that actually break: a dual-listed ticker, a closed lot, a dividend row with a NULL
 net, a pre-ownership zero row, a non-EUR security, CHF as base. Every other test calls services
@@ -659,9 +726,10 @@ raiser for that whole module, so an accidental network reach fails loudly; `/api
 is excluded because it lazy-fetches Yahoo on a cache miss, and POST routes are excluded because they
 start real syncs. **Add a case here when an endpoint's response shape changes.**
 
-Tests (289, all offline — no IBKR, Yahoo or FX-provider calls):
+Tests (313 backend + 45 frontend, all offline — no IBKR, Yahoo or FX-provider calls):
 ```bash
 cd backend && ./venv/Scripts/python.exe -m pytest tests/ -q
+cd frontend && npx tsc -b && npm run test && npm run build
 ```
 
 Useful:
