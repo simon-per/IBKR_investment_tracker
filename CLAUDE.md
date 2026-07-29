@@ -370,6 +370,39 @@ withholding-fields migration, which carry a NULL net — **use those two helpers
 the columns directly.** Existing junk is removable with `app/cli/prune_empty_dividends.py --dry-run`
 (deletes only rows the readers already ignore; never a row still awaiting computation).
 
+### The forecast — four rules that were each a bug first
+
+**Size from `amount_per_share`, not from income received.** The payout schedule belongs to the company,
+not to how long we have held it. Keying on realized income meant a payer bought weeks ago looked like a
+non-payer, and **only 15 of 36 held securities could be forecast** — TSMC, Samsung, SK Hynix, HPE and the
+**SOXQ ETF** each had 20–59 per-share records and projected nothing. Now 20 payers project.
+
+**Infer cadence from ONE dated series.** The same dividend is stored twice — yfinance under its ex-date,
+IBKR under its pay date, weeks apart — which halves the apparent gap: ASML's quarterly schedule read as
+74 days (5 payouts a year) and SBI's monthly as 28 (13 a year). Deduplication cannot fix it, because
+Mastercard's ex-to-pay lag of 29 days exceeds a monthly payer's whole cycle. Where yfinance rows exist
+(`amount_per_share is not null`, ≥2 of them) they alone define the schedule; IBKR rows still supply the
+net amounts.
+
+**Step by the calendar.** Dividends pay on a day of the month, so a fixed day-step drifts — 31 days gave
+SBI 11 payouts a year instead of 12, and 91 days walked a quarterly payer from the 15th to the 14th to
+the 13th. A gap near a calendar period snaps to it (`CALENDAR_PERIODS`), keeping the schedule's own day
+and clamping at month end; anything else keeps day-stepping.
+
+**Judge staleness from *now*, not from the horizon.** The stopped-payer guard compares against `as_of`,
+because the distance to a future horizon is a property of the question. Otherwise asking about 2027 made
+every payer look stopped and returned an empty year.
+
+`forecast_basis` reports which amount was used: `net` when a dividend has actually been received (net of
+withholding), `gross_estimate` when only yfinance's gross per-share exists — the latter runs a little
+high and the UI badges it. Future years are selectable (`years` offers `as_of.year + 1`) and a future
+year is forecast in full rather than from today.
+
+**Accumulating ETFs correctly show nothing** — DBPG, EMIM, IWDA, SXR8, VWCE, XAIX, XNAS (the `1C`/`ACC`
+suffixes), alongside genuine non-payers (AMD, Amazon, Arista, NU, Credo, Ondas). Verified rather than
+assumed: each has 600+ cached prices, so the Yahoo ticker resolves and the empty dividend series is real.
+**Don't "fix" their absence.**
+
 **Forecasts are inferred, because nothing forward-looking is cached** — no announced dividends
 anywhere, and the fundamentals/earnings tables carry no dividend fields. `dividend_forecast.py` is a
 pure module (no DB, no network, fast unit tests): cadence is the **median gap** between recent
@@ -609,7 +642,7 @@ raiser for that whole module, so an accidental network reach fails loudly; `/api
 is excluded because it lazy-fetches Yahoo on a cache miss, and POST routes are excluded because they
 start real syncs. **Add a case here when an endpoint's response shape changes.**
 
-Tests (276, all offline — no IBKR, Yahoo or FX-provider calls):
+Tests (289, all offline — no IBKR, Yahoo or FX-provider calls):
 ```bash
 cd backend && ./venv/Scripts/python.exe -m pytest tests/ -q
 ```
