@@ -28,7 +28,7 @@ type TimeRange = '1W' | 'MTD' | '1M' | '3M' | '6M' | 'YTD' | '1Y' | '2Y' | 'ALL'
 
 export function Dashboard() {
   const queryClient = useQueryClient()
-  const { baseCurrency, supportedCurrencies, setBaseCurrency, isUpdating: currencyUpdating } = useBaseCurrency()
+  const { baseCurrency, supportedCurrencies, setBaseCurrency, isUpdating: currencyUpdating, updateError: currencyError } = useBaseCurrency()
   const curSym = useCurrencySymbol()
   const [selectedRange, setSelectedRange] = useState<TimeRange>('1Y')
   const [selectedBenchmarks, setSelectedBenchmarks] = useState<string[]>(() => {
@@ -360,6 +360,11 @@ export function Dashboard() {
                   <option key={c} value={c}>{c}</option>
                 ))}
               </select>
+              {currencyError && (
+                <span className="max-w-[12rem] text-xs leading-tight text-red-600 dark:text-red-400" role="alert">
+                  {currencyError}
+                </span>
+              )}
               <ThemeToggle />
               <Button
                 onClick={handleSync}

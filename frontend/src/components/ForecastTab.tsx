@@ -3,7 +3,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Area, AreaChart } from 'recharts'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '@/lib/api'
-import { useCurrencySymbol } from '@/lib/CurrencyContext'
+import { useBaseCurrency, useCurrencySymbol } from '@/lib/CurrencyContext'
 
 const STORAGE_KEYS = {
   monthlyContribution: 'forecast.monthlyContribution',
@@ -22,6 +22,7 @@ function readNumber(key: string, fallback: number, min: number, max: number): nu
 
 export function ForecastTab() {
   const curSym = useCurrencySymbol()
+  const { baseCurrency } = useBaseCurrency()
   const [monthlyContribution, setMonthlyContribution] = useState(() => readNumber(STORAGE_KEYS.monthlyContribution, 1000, 0, 1000000))
   const [expectedReturn, setExpectedReturn] = useState(() => readNumber(STORAGE_KEYS.expectedReturn, 8, 0, 30))
   const [startFromZero, setStartFromZero] = useState(() => {
@@ -261,7 +262,7 @@ export function ForecastTab() {
                   max="1000000"
                   step="100"
                 />
-                <span className="text-sm text-muted-foreground">EUR</span>
+                <span className="text-sm text-muted-foreground">{baseCurrency}</span>
               </div>
             </div>
 

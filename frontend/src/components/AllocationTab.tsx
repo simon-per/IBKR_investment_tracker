@@ -479,6 +479,18 @@ export function AllocationTab() {
         </Card>
       )}
 
+      {syncMutation.isError && (
+        <Card className="border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950">
+          <CardContent className="pt-6">
+            <p className="text-sm text-red-800 dark:text-red-200">
+              Sync failed
+              {syncMutation.error instanceof Error ? ` — ${syncMutation.error.message}` : ''}.
+              Yahoo may be rate-limiting; try again in a while.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Sector Breakdown - Full Width Treemap */}
       <AllocationTreemap
         title="Sector Breakdown"
