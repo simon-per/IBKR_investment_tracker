@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query
@@ -59,7 +59,11 @@ def _is_summary_stale(summary: dict) -> bool:
     if not last_updated:
         return True
     try:
-        return (datetime.now() - datetime.fromisoformat(last_updated)) > _STALE_AFTER
+        last = datetime.fromisoformat(last_updated)
+        if last.tzinfo is None:
+            # Rows serialized before the utc_iso fix are naive UTC.
+            last = last.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - last) > _STALE_AFTER
     except ValueError:
         return True
 

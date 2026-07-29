@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.security import Security
 from app.models.taxlot import TaxLot
 from app.repositories.dividend_repository import DividendRepository
+from app.repositories.sync_run_repository import utc_iso
 from app.services.currency_service import CurrencyService
 from app.services.dividend_forecast import HistPayment, project_dividends
 
@@ -424,7 +425,9 @@ class DividendService:
         if payments:
             latest = max((p.last_computed for p in payments if p.last_computed), default=None)
             if latest:
-                last_updated = latest.isoformat()
+                # Naive UTC in the column; tag it, or the browser parses it as local
+                # (the same misread utc_iso() exists to prevent on sync_runs).
+                last_updated = utc_iso(latest)
 
         return {
             "monthly": monthly_list,           # NET per month
