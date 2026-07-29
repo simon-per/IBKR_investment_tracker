@@ -63,6 +63,7 @@ READ_ENDPOINTS = [
     "/api/dividends/summary",
     "/api/dividends/breakdown",
     f"/api/dividends/breakdown?year={TODAY.year}",
+    f"/api/dividends/breakdown?year={TODAY.year + 1}",   # a future year
     "/api/dividends/breakdown?forecast=false",
     f"/api/tax/report?year={TODAY.year}",
     f"/api/tax/report.csv?year={TODAY.year}",
@@ -89,6 +90,9 @@ async def _seed(session: AsyncSession) -> None:
         # Non-EUR, so price FX conversion is exercised.
         Security(id=3, isin="US0378331005", symbol="AAPL", description="Apple Inc",
                  currency="USD", conid=103, asset_category="STK", exchange="NASDAQ"),
+        # Bought weeks ago: per-share history but nothing received yet.
+        Security(id=4, isin="TW0002330008", symbol="TSMC", description="TSMC",
+                 currency="EUR", conid=104, asset_category="STK", exchange="TWSE"),
     ]
     for s in securities:
         session.add(s)
@@ -97,6 +101,7 @@ async def _seed(session: AsyncSession) -> None:
         (1, START, "10", "1000", None),
         (2, START + timedelta(days=10), "4", "400", None),
         (3, START + timedelta(days=5), "20", "2000", SOLD_ON),   # closed mid-window
+        (4, TODAY - timedelta(days=30), "50", "500", None),      # bought weeks ago
     ]
     for sid, opened, qty, cost, closed in lots:
         session.add(TaxLot(
@@ -128,6 +133,16 @@ async def _seed(session: AsyncSession) -> None:
              pay_date=TODAY - timedelta(days=60), shares_held=Decimal("0"),
              gross_amount_eur=Decimal("12"), withholding_tax_eur=Decimal("2"),
              net_amount_eur=Decimal("10"), source="ibkr"),
+        # A payer bought recently: quarterly per-share history, nothing received
+        # yet. This is the shape that had TSMC, Samsung and the SOXQ ETF
+        # projecting nothing at all.
+        *[
+            dict(security_id=4, ex_date=TODAY - timedelta(days=d),
+                 amount_per_share=Decimal("0.25"), shares_held=Decimal("0"),
+                 gross_amount_eur=Decimal("0"), withholding_tax_eur=Decimal("0"),
+                 net_amount_eur=Decimal("0"), source="yfinance_estimate")
+            for d in (275, 184, 92)
+        ],
         # Legacy shape: gross set, net NULL — the row that 500'd production.
         dict(security_id=1, ex_date=TODAY - timedelta(days=150),
              pay_date=TODAY - timedelta(days=150), shares_held=Decimal("10"),
@@ -236,6 +251,18 @@ def test_the_shapes_that_broke_production_serialize(client):
 
     summary = client.get("/api/dividends/summary").json()
     assert all(abs(m["amount_eur"]) > 0 for m in summary["monthly"])
+
+    # A payer bought recently, with per-share history but nothing received yet,
+    # must still be forecast — and must say the amount is a gross estimate.
+    tsmc = next(r for r in bd["securities"] if r["symbol"] == "TSMC")
+    assert tsmc["payouts"] == 0 and tsmc["forecast_payouts"] > 0
+    assert tsmc["forecast_basis"] == "gross_estimate"
+
+    # Next year is offered and projects a full twelve months.
+    nxt = client.get(f"/api/dividends/breakdown?year={TODAY.year + 1}").json()
+    assert TODAY.year + 1 in nxt["years"]
+    assert len(nxt["months"]) == 12
+    assert nxt["total_forecast_net_eur"] > 0
 
     # A sale mid-window must not read as a total loss.
     attr = client.get(
