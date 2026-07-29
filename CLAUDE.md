@@ -8,6 +8,11 @@ it has been both CHF and EUR, and every money figure moves with it.
 
 **Live:** https://portfolio.srv1211053.hstgr.cloud · **Repo is PUBLIC** (never commit account data)
 
+**Read [STATUS.md](STATUS.md) too, and update it when you finish a session.** This file is the
+durable half — architecture and the invariants that were each a bug first. STATUS.md is the
+perishable half: what is in flight, what is known-broken, what needs a human, and the local-dev
+traps that keep costing time.
+
 ---
 
 ## ⚠️ Two rules that must never be broken
