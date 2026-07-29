@@ -287,6 +287,8 @@ class DividendSecurityRow(BaseModel):
     """Per-security dividend totals for the selected window."""
     security_id: int
     symbol: str
+    # Disambiguates a ticker listed on two venues (identity is isin + exchange).
+    exchange: Optional[str] = None
     description: str
     payouts: int
     gross_eur: float

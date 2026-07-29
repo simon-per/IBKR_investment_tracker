@@ -570,6 +570,11 @@ class DividendService:
             sec_rows.append({
                 "security_id": sid,
                 "symbol": _symbol(sid),
+                # Identity is isin + exchange, so the same ticker can appear twice
+                # (ASML on NASDAQ and on AEB). The chart merges them — one company,
+                # one stack colour — but the table lists them separately, and
+                # without the venue the two rows are indistinguishable.
+                "exchange": (sec.exchange if sec else None),
                 "description": (sec.description or sec.symbol) if sec else f"#{sid}",
                 "payouts": row["payouts"],
                 "gross_eur": round(float(row["gross"]), 2),

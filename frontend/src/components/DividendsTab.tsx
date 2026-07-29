@@ -194,6 +194,15 @@ export function DividendsTab() {
     return showForecast ? rows : rows.filter((r) => r.payouts > 0)
   }, [data, showForecast])
 
+  // A ticker listed on two venues (ASML on NASDAQ and AEB) is two securities and
+  // two rows; the chart merges them into one company, so only the table needs the
+  // venue — and only where it actually disambiguates.
+  const duplicatedSymbols = useMemo(() => {
+    const seen = new Map<string, number>()
+    for (const r of securities) seen.set(r.symbol, (seen.get(r.symbol) ?? 0) + 1)
+    return new Set([...seen.entries()].filter(([, n]) => n > 1).map(([s]) => s))
+  }, [securities])
+
   const hasAnything = (data?.total_net_eur ?? 0) > 0 || (data?.total_forecast_net_eur ?? 0) > 0
 
   return (
@@ -347,7 +356,14 @@ export function DividendsTab() {
                 <tbody>
                   {securities.map((row) => (
                     <tr key={row.security_id} className="border-b border-border/50">
-                      <td className="px-2 py-1.5 font-medium">{row.symbol}</td>
+                      <td className="px-2 py-1.5 font-medium">
+                        {row.symbol}
+                        {duplicatedSymbols.has(row.symbol) && row.exchange && (
+                          <span className="ml-1 font-normal text-xs text-muted-foreground">
+                            {row.exchange}
+                          </span>
+                        )}
+                      </td>
                       <td className="max-w-[16rem] truncate px-2 py-1.5 text-muted-foreground" title={row.description}>
                         {row.description}
                       </td>

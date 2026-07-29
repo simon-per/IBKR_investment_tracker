@@ -161,6 +161,37 @@ async def test_a_sold_position_gets_no_forecast():
 
 
 @pytest.mark.asyncio
+async def test_a_dual_listed_ticker_stays_distinguishable():
+    """
+    Identity is isin + exchange, so ASML on NASDAQ and on AEB are two securities.
+    The chart merges them by symbol (one company, one colour) but the table lists
+    both — carrying the venue is what keeps those rows apart.
+    """
+    engine, session = await _make_session()
+    try:
+        session.add(Security(id=3, isin="NL0010273215", symbol="ASML", description="ASML",
+                             currency="EUR", conid=300, asset_category="STK", exchange="NASDAQ"))
+        session.add(Security(id=4, isin="NL0010273215", symbol="ASML", description="ASML",
+                             currency="EUR", conid=400, asset_category="STK", exchange="AEB"))
+        await session.flush()
+        await _seed_payment(session, 3, date(2026, 2, 10), "10.00", "ibkr")
+        await _seed_payment(session, 4, date(2026, 2, 10), "2.50", "ibkr")
+
+        out = await DividendService(session).get_dividend_breakdown(
+            year=2026, include_forecast=False, as_of=AS_OF,
+        )
+        asml = [r for r in out["securities"] if r["symbol"] == "ASML"]
+        assert len(asml) == 2
+        assert {r["exchange"] for r in asml} == {"NASDAQ", "AEB"}
+        # The chart still sees one company: both payments land on one stack key.
+        feb = next(m for m in out["months"] if m["month"] == "2026-02")
+        assert feb["actual"]["ASML"] == 12.50
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_legacy_row_with_no_net_falls_back_to_gross():
     """
     Rows predating the withholding-fields migration carry gross but a NULL net.

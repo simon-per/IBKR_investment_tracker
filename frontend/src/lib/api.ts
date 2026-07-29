@@ -344,6 +344,8 @@ export interface DividendMonthBar {
 export interface DividendSecurityRow {
   security_id: number;
   symbol: string;
+  /** Set when the same ticker is listed on two venues (identity is isin + exchange). */
+  exchange: string | null;
   description: string;
   payouts: number;
   gross_eur: number;
