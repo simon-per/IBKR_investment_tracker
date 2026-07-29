@@ -7,9 +7,10 @@ import { useFormatCurrency } from '@/lib/CurrencyContext'
 interface PortfolioSummaryCardsProps {
   summary: PortfolioSummary | undefined
   isLoading?: boolean
+  isError?: boolean
 }
 
-export function PortfolioSummaryCards({ summary, isLoading }: PortfolioSummaryCardsProps) {
+export function PortfolioSummaryCards({ summary, isLoading, isError }: PortfolioSummaryCardsProps) {
   const formatCurrency = useFormatCurrency()
 
   if (isLoading) {
@@ -26,6 +27,18 @@ export function PortfolioSummaryCards({ summary, isLoading }: PortfolioSummaryCa
           </Card>
         ))}
       </div>
+    )
+  }
+
+  if (isError) {
+    // Not the sync CTA: a backend error is indistinguishable from an empty
+    // portfolio otherwise, and syncing won't fix a server that isn't answering.
+    return (
+      <Card>
+        <CardContent className="py-8 text-center text-muted-foreground">
+          Couldn't load the portfolio summary — the backend didn't respond. It retries automatically.
+        </CardContent>
+      </Card>
     )
   }
 

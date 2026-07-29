@@ -88,14 +88,14 @@ export function Dashboard() {
   }, [selectedRange])
 
   // Fetch portfolio summary
-  const { data: summary, isLoading: summaryLoading } = useQuery({
+  const { data: summary, isLoading: summaryLoading, isError: summaryError } = useQuery({
     queryKey: ['portfolio', 'summary'],
     queryFn: () => api.getPortfolioSummary(),
     staleTime: 30 * 60 * 1000,
   })
 
   // Fetch portfolio value over time
-  const { data: valueOverTime, isLoading: chartLoading } = useQuery({
+  const { data: valueOverTime, isLoading: chartLoading, isError: chartError } = useQuery({
     queryKey: ['portfolio', 'value-over-time', dateRange],
     queryFn: () => api.getPortfolioValueOverTime(dateRange.start, dateRange.end),
     staleTime: 30 * 60 * 1000,
@@ -347,6 +347,24 @@ export function Dashboard() {
                   {schedulerStatus.last_sync.message}
                 </p>
               )}
+              {/* Warnings ride on SUCCESSFUL runs (stale prices, skipped lots,
+                  reclassified transfers) — they were computed and persisted but
+                  never rendered anywhere, which is how a mispriced position once
+                  went unnoticed for months. */}
+              {(schedulerStatus?.last_sync?.warnings?.length ?? 0) > 0 && (
+                <details className="mt-1 max-w-3xl">
+                  <summary className="cursor-pointer text-xs font-medium text-amber-700 dark:text-amber-400">
+                    ⚠ {schedulerStatus?.last_sync?.warnings?.length} warning
+                    {(schedulerStatus?.last_sync?.warnings?.length ?? 0) > 1 ? 's' : ''} from the
+                    last sync
+                  </summary>
+                  <ul className="mt-1 list-disc space-y-0.5 pl-5 text-xs text-amber-700/90 dark:text-amber-400/90">
+                    {(schedulerStatus?.last_sync?.warnings ?? []).map((w, i) => (
+                      <li key={i}>{w}</li>
+                    ))}
+                  </ul>
+                </details>
+              )}
             </div>
             <div className="flex gap-2 items-center">
               <select
@@ -430,7 +448,7 @@ export function Dashboard() {
           {/* Performance Tab */}
           <TabsContent value="performance" className="space-y-8">
             {/* Summary Cards */}
-            <PortfolioSummaryCards summary={summary} isLoading={summaryLoading} />
+            <PortfolioSummaryCards summary={summary} isLoading={summaryLoading} isError={summaryError} />
 
             {/* Performance Metrics - Time-Filtered KPIs */}
             <PerformanceMetricsCards
@@ -505,6 +523,7 @@ export function Dashboard() {
                   data={valueOverTime || []}
                   benchmarks={benchmarkDatasets}
                   isLoading={chartLoading}
+                  isError={chartError}
                 />
               </CardContent>
             </Card>

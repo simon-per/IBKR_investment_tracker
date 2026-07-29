@@ -23,9 +23,10 @@ interface PortfolioValueChartProps {
   data: PortfolioValuePoint[]
   benchmarks?: BenchmarkDataset[]
   isLoading?: boolean
+  isError?: boolean
 }
 
-export function PortfolioValueChart({ data, benchmarks = [], isLoading }: PortfolioValueChartProps) {
+export function PortfolioValueChart({ data, benchmarks = [], isLoading, isError }: PortfolioValueChartProps) {
   const formatCurrency = useFormatCurrency()
   const curSym = useCurrencySymbol()
   const [showCostBasis, setShowCostBasis] = useState(true)
@@ -183,6 +184,21 @@ export function PortfolioValueChart({ data, benchmarks = [], isLoading }: Portfo
     return (
       <div className="w-full h-[600px] flex items-center justify-center bg-muted/10 rounded-lg">
         <div className="text-muted-foreground">Loading chart data...</div>
+      </div>
+    )
+  }
+
+  // A server error must not impersonate an empty portfolio — the sync CTA
+  // below can't fix a backend that isn't answering.
+  if (isError) {
+    return (
+      <div className="w-full h-[600px] flex items-center justify-center bg-muted/10 rounded-lg border border-dashed">
+        <div className="text-center">
+          <p className="text-muted-foreground">Couldn't load the chart</p>
+          <p className="text-sm text-muted-foreground mt-2">
+            The backend didn't respond — it may be redeploying. It retries automatically.
+          </p>
+        </div>
       </div>
     )
   }
