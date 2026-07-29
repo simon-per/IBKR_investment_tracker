@@ -192,6 +192,34 @@ async def test_a_dual_listed_ticker_stays_distinguishable():
 
 
 @pytest.mark.asyncio
+async def test_one_ticker_two_instruments_is_never_summed_into_one_series():
+    """
+    The same symbol under two ISINs may be one company on two venues or two
+    unrelated companies (SBI is Sprott in Toronto and SBI Holdings in Tokyo).
+    Nothing here can tell those apart, so the chart key takes the venue.
+    """
+    engine, session = await _make_session()
+    try:
+        session.add(Security(id=5, isin="USN070592100", symbol="ASML", description="ASML ADR",
+                             currency="USD", conid=500, asset_category="STK", exchange="NASDAQ"))
+        session.add(Security(id=6, isin="NL0010273215", symbol="ASML", description="ASML NV",
+                             currency="EUR", conid=600, asset_category="STK", exchange="AEB"))
+        await session.flush()
+        await _seed_payment(session, 5, date(2026, 2, 10), "10.00", "ibkr")
+        await _seed_payment(session, 6, date(2026, 2, 10), "2.50", "ibkr")
+
+        out = await DividendService(session).get_dividend_breakdown(
+            year=2026, include_forecast=False, as_of=AS_OF,
+        )
+        feb = next(m for m in out["months"] if m["month"] == "2026-02")
+        assert feb["actual"] == {"ASML (NASDAQ)": 10.00, "ASML (AEB)": 2.50}
+        assert feb["actual_total_eur"] == 12.50
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_legacy_row_with_no_net_falls_back_to_gross():
     """
     Rows predating the withholding-fields migration carry gross but a NULL net.

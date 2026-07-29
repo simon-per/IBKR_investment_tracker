@@ -451,9 +451,24 @@ class DividendService:
                 "forecast_net": Decimal("0"), "sources": set(),
             }
 
+        # A ticker is only a safe chart key while it means one instrument. The same
+        # symbol under two ISINs may be one company on two venues (ASML's Amsterdam
+        # ordinary and its US listing) or two unrelated companies — SBI is Sprott in
+        # Toronto and SBI Holdings in Tokyo — and nothing here can tell those apart,
+        # so it takes the venue suffix rather than silently summing them. Two rows
+        # sharing an ISIN are the same instrument and still merge.
+        isins_per_symbol: Dict[str, set] = defaultdict(set)
+        for sec in securities.values():
+            isins_per_symbol[sec.symbol].add(sec.isin)
+        ambiguous = {sym for sym, isins in isins_per_symbol.items() if len(isins) > 1}
+
         def _symbol(security_id: int) -> str:
             sec = securities.get(security_id)
-            return sec.symbol if sec else f"#{security_id}"
+            if not sec:
+                return f"#{security_id}"
+            if sec.symbol in ambiguous and sec.exchange:
+                return f"{sec.symbol} ({sec.exchange})"
+            return sec.symbol
 
         monthly_actual: Dict[str, Dict[str, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
         monthly_forecast: Dict[str, Dict[str, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
