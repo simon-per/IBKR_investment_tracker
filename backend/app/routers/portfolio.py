@@ -131,10 +131,12 @@ async def get_annualized_return(
         )
 
     portfolio_service = PortfolioService(db)
-    xirr_pct, num_cash_flows, eff_start, eff_end = await portfolio_service.calculate_xirr(start_date, end_date)
+    xirr_pct, num_cash_flows, eff_start, eff_end, method = await portfolio_service.calculate_xirr(start_date, end_date)
 
     return AnnualizedReturnResponse(
-        method="xirr",
+        # "simple_period" for <30-day windows — a raw period return the UI must
+        # not present as annualized.
+        method=method,
         annualized_return_pct=round(xirr_pct, 2) if xirr_pct is not None else None,
         start_date=eff_start.isoformat(),
         end_date=eff_end.isoformat(),

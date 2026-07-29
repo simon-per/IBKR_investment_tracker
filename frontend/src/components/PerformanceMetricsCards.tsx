@@ -4,6 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 interface PerformanceMetricsCardsProps {
   metrics: {
     xirr: number | null
+    xirrMethod?: string
     maxDrawdown: number
     sharpeRatio: number
     winRate: number
@@ -45,7 +46,9 @@ export function PerformanceMetricsCards({ metrics, isLoading }: PerformanceMetri
       {/* Annual Return (XIRR) */}
       <Card>
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <CardTitle className="text-sm font-medium">Annual Return (XIRR)</CardTitle>
+          <CardTitle className="text-sm font-medium">
+            {metrics.xirrMethod === 'simple_period' ? 'Period Return' : 'Annual Return (XIRR)'}
+          </CardTitle>
           {isPositiveXIRR ? (
             <TrendingUp className="h-4 w-4 text-green-600" />
           ) : (

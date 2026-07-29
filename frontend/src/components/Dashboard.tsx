@@ -204,6 +204,8 @@ export function Dashboard() {
 
     // 1. Annual Return (XIRR) - from backend, fallback to null
     const xirr = annualizedReturn?.annualized_return_pct ?? null
+    // "simple_period" for <30-day windows: a raw period return, not annualized.
+    const xirrMethod = annualizedReturn?.method ?? 'xirr'
 
     // 2. Maximum Drawdown (deposit-adjusted using cumulative investment returns)
     // Track deposit-adjusted portfolio value so deposits don't mask real drawdowns
@@ -271,8 +273,9 @@ export function Dashboard() {
     const profitablePositions = positions.filter(p => p.gain_loss_eur > 0).length
     const winRate = positions.length > 0 ? (profitablePositions / positions.length) * 100 : 0
 
-    // 5. Calmar Ratio (XIRR / |Max Drawdown|)
-    const calmarRatio = xirr !== null && maxDrawdown < 0
+    // 5. Calmar Ratio (XIRR / |Max Drawdown|) — needs an ANNUALIZED numerator,
+    // so it goes blank on short ranges where only a period return exists.
+    const calmarRatio = xirr !== null && xirrMethod === 'xirr' && maxDrawdown < 0
       ? xirr / Math.abs(maxDrawdown)
       : null
 
@@ -286,6 +289,7 @@ export function Dashboard() {
 
     return {
       xirr,
+      xirrMethod,
       maxDrawdown,
       sharpeRatio,
       winRate,

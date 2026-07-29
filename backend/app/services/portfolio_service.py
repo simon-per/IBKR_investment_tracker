@@ -815,16 +815,22 @@ class PortfolioService:
         self,
         start_date: date,
         end_date: date
-    ) -> Tuple[Optional[float], int, date, date]:
+    ) -> Tuple[Optional[float], int, date, date, str]:
         """
         Calculate XIRR (money-weighted annualized return) for the portfolio.
 
         Cash flows:
         - Negative: portfolio market value on start_date (money already invested)
         - Negative: each tax lot opened in (start_date, end_date] at its cost_basis_eur
+        - Positive: proceeds of each lot closed inside the window (market price at
+          close date — same pricing as the valuations, so a rotation nets to ~zero
+          instead of counting the re-buy as fresh money and crushing the return)
+        - Positive: net dividends received in the window (era-spliced sources)
         - Positive: portfolio market value on end_date (terminal value)
 
-        Returns: (annualized_return_pct or None, num_cash_flows)
+        Returns: (return_pct or None, num_cash_flows, eff_start, eff_end, method)
+        where method is "xirr" (annualized) or "simple_period" (<30 days — a raw
+        period return, which the UI must not label as annual).
         """
         import pyxirr
 
@@ -837,7 +843,7 @@ class PortfolioService:
         taxlots_with_securities = result.all()
 
         if not taxlots_with_securities:
-            return None, 0, start_date, end_date
+            return None, 0, start_date, end_date, "xirr"
 
         # Pre-load caches for start and end dates
         unique_securities = {security for _, security in taxlots_with_securities}
@@ -850,7 +856,7 @@ class PortfolioService:
         effective_end_date = self._find_latest_price_date(end_date, price_cache)
         if effective_end_date is None or effective_end_date <= start_date:
             logger.warning(f"No usable price data found near {end_date}")
-            return None, 0, start_date, end_date
+            return None, 0, start_date, end_date, "xirr"
 
         # Similarly find effective start date
         effective_start_date = self._find_latest_price_date(start_date, price_cache)
@@ -885,6 +891,35 @@ class PortfolioService:
                 dates.append(taxlot.open_date)
                 amounts.append(-float(base_fx.convert(taxlot.cost_basis_eur, taxlot.open_date)))
 
+        # Inflows: capital released by sales inside the window, priced like the
+        # valuations (market price at close date). Lots closed ON the effective
+        # end date are excluded: the end valuation still carries them (a lot is
+        # active through its close date), so proceeds there would double-count.
+        # If the close-date convention ever flips to exclude-on-close, widen this
+        # window to effective_end_date in the same change.
+        realized = await self.realized_rows_from_closed_lots(
+            base_fx,
+            start=effective_start_date,
+            end=effective_end_date - timedelta(days=1),
+        )
+        for row in realized:
+            dates.append(row["close_date"])
+            amounts.append(float(row["proceeds"]))
+
+        # Inflows: net dividends received in the window. Era-spliced exactly like
+        # the dividend views, so the two sources never double-count a payment.
+        from app.repositories.dividend_repository import DividendRepository
+        from app.services.dividend_service import DividendService
+        payments, _ = DividendService._splice_by_era(
+            await DividendRepository(self.db).get_computed_dividends()
+        )
+        for p in payments:
+            on_date = p.pay_date or p.ex_date
+            if effective_start_date < on_date <= effective_end_date \
+                    and (p.net_amount_eur or Decimal("0")) > 0:
+                dates.append(on_date)
+                amounts.append(float(base_fx.convert(p.net_amount_eur, on_date)))
+
         # Terminal inflow: portfolio value at effective end date
         if end_mv > 0:
             dates.append(effective_end_date)
@@ -892,28 +927,34 @@ class PortfolioService:
 
         num_cash_flows = len(dates)
 
-        # Need at least 2 cash flows (one negative, one positive)
-        if num_cash_flows < 2 or start_mv <= 0 or end_mv <= 0:
-            return None, num_cash_flows, effective_start_date, effective_end_date
+        # XIRR is well-posed as soon as money goes in and value comes out. A
+        # window may legitimately start at zero (before the first purchase) or
+        # end at zero (fully liquidated — the sale proceeds carry the return);
+        # what it needs is a sign change, not positive valuations at both ends.
+        if not (any(a < 0 for a in amounts) and any(a > 0 for a in amounts)):
+            return None, num_cash_flows, effective_start_date, effective_end_date, "xirr"
 
-        # For very short periods (< 30 days), return simple period return
+        # Very short periods (< 30 days) would annualize a small move into an
+        # absurd figure, so return a plain period return — and say so via the
+        # method field instead of letting the UI label it "annual".
         days_diff = (effective_end_date - effective_start_date).days
         if days_diff < 30:
-            total_invested = -sum(a for a in amounts if a < 0)
-            if total_invested > 0:
-                simple_return = (end_mv / total_invested - 1) * 100
-                return simple_return, num_cash_flows, effective_start_date, effective_end_date
-            return None, num_cash_flows, effective_start_date, effective_end_date
+            total_out = -sum(a for a in amounts if a < 0)
+            total_in = sum(a for a in amounts if a > 0)
+            if total_out > 0:
+                simple_return = (total_in / total_out - 1) * 100
+                return simple_return, num_cash_flows, effective_start_date, effective_end_date, "simple_period"
+            return None, num_cash_flows, effective_start_date, effective_end_date, "simple_period"
 
         try:
             xirr_result = pyxirr.xirr(dates, amounts)
             if xirr_result is None:
                 logger.warning("XIRR calculation did not converge")
-                return None, num_cash_flows, effective_start_date, effective_end_date
-            return xirr_result * 100, num_cash_flows, effective_start_date, effective_end_date
+                return None, num_cash_flows, effective_start_date, effective_end_date, "xirr"
+            return xirr_result * 100, num_cash_flows, effective_start_date, effective_end_date, "xirr"
         except Exception as e:
             logger.warning(f"XIRR calculation failed: {e}")
-            return None, num_cash_flows, effective_start_date, effective_end_date
+            return None, num_cash_flows, effective_start_date, effective_end_date, "xirr"
 
     async def get_performance_attribution(
         self,
