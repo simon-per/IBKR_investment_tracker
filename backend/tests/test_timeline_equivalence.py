@@ -9,7 +9,14 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.pool import StaticPool
 
+from app.database import Base
+import app.models  # noqa: F401
+from app.models.market_price import MarketPrice
+from app.models.security import Security
+from app.models.taxlot import TaxLot
 from app.services.portfolio_service import BaseFx, PortfolioService
 
 START = date(2026, 3, 2)
@@ -128,3 +135,93 @@ def test_external_flow_reports_purchases_at_cost_and_sales_at_proceeds():
     # old inference wrong.
     assert by_date["2026-03-10"]["external_flow_eur"] == pytest.approx(50.0)  # a purchase
     assert by_date["2026-03-11"]["external_flow_eur"] == pytest.approx(0.0)   # a quiet day
+
+
+def test_first_row_reports_only_that_days_flow():
+    """
+    Lots opened before the window seed the opening state; they are history, not
+    day-0 flows. The catch-up loop used to feed every pre-window purchase into
+    pending_flow, so the first row reported the whole acquisition history
+    (410 EUR here) as that day's external flow.
+    """
+    lots, price_cache, fx_cache, currency_map, _ = _fixture()
+    svc = PortfolioService.__new__(PortfolioService)
+    base_fx = BaseFx("EUR", {})
+
+    swept = svc._calculate_timeline_swept(
+        START, END, lots, price_cache, fx_cache, currency_map, base_fx,
+    )
+    assert swept[0]["date"] == START.isoformat()
+    # Three lots (100 + 200 + 110 EUR) predate the window; nothing happened on
+    # the first day itself, so its flow is zero.
+    assert swept[0]["external_flow_eur"] == pytest.approx(0.0)
+
+    # A purchase ON the window start IS that day's own flow — and only it.
+    eur = lots[0][1]
+    swept = svc._calculate_timeline_swept(
+        START, END, lots + [(_lot(START, "3", "40"), eur)],
+        price_cache, fx_cache, currency_map, base_fx,
+    )
+    assert swept[0]["external_flow_eur"] == pytest.approx(40.0)
+
+
+@pytest.mark.asyncio
+async def test_a_lot_closed_on_the_window_start_adds_no_disposal_flow():
+    """
+    The disposal window is (start, end], matching exclude-on-close: a lot sold
+    ON the window start never contributed value to the series (its own close
+    event removes it from day 0), so its proceeds must not land in day 0's
+    external_flow_eur — that would be a flow against value the series never
+    held. A lot closed strictly inside the window still flows normally.
+    """
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:", poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session = AsyncSession(engine, expire_on_commit=False)
+    try:
+        window_start, window_end = date(2026, 3, 2), date(2026, 3, 6)  # Mon-Fri
+        session.add(Security(id=1, isin="US0000000001", symbol="AAA",
+                             description="AAA", currency="EUR", conid=101,
+                             asset_category="STK", exchange="XETRA"))
+
+        def _db_lot(qty, cost, close_date=None):
+            return TaxLot(
+                security_id=1, open_date=date(2026, 1, 5), close_date=close_date,
+                is_open=close_date is None, quantity=Decimal(qty),
+                cost_basis=Decimal(cost), cost_basis_eur=Decimal(cost),
+                price_per_unit=Decimal(cost) / Decimal(qty), currency="EUR",
+            )
+
+        session.add_all([
+            _db_lot("10", "100", close_date=window_start),   # sold ON day 0
+            _db_lot("10", "100"),                             # held throughout
+            _db_lot("5", "50", close_date=date(2026, 3, 4)),  # sold mid-window
+        ])
+        d = window_start
+        while d <= window_end:
+            session.add(MarketPrice(security_id=1, date=d,
+                                    close_price=Decimal("11"),
+                                    currency="EUR", source="test"))
+            d += timedelta(days=1)
+        await session.flush()
+
+        timeline = await PortfolioService(session).get_portfolio_value_over_time(
+            window_start, window_end
+        )
+        flows = {row["date"]: row["external_flow_eur"] for row in timeline}
+
+        # Day 0: the lot sold that day was never in the series (day-0 value
+        # carries only the other 15 shares), so no disposal flow either.
+        assert timeline[0]["date"] == window_start.isoformat()
+        assert flows["2026-03-02"] == pytest.approx(0.0)
+        # The mid-window sale still reports its proceeds (5 sh x 11) as money
+        # leaving the tracked holdings on its own day.
+        assert flows["2026-03-04"] == pytest.approx(-55.0)
+        assert flows["2026-03-03"] == pytest.approx(0.0)
+        assert flows["2026-03-05"] == pytest.approx(0.0)
+    finally:
+        await session.close()
+        await engine.dispose()

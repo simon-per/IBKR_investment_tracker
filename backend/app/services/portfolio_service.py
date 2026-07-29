@@ -26,6 +26,11 @@ logger = logging.getLogger(__name__)
 # part-month of history isn't rounded away.
 _DAYS_PER_MONTH = 365.25 / 12
 
+# Forward-fill horizon for market prices: _preload_market_prices extends its
+# query this many days before the window, and _find_latest_price_date must not
+# search deeper — the search cannot see past what the preload fetched.
+PRICE_LOOKBACK_DAYS = 14
+
 
 def _shift_months(from_date: date, months: int) -> date:
     """
@@ -175,9 +180,14 @@ class PortfolioService:
         # external flow rather than leaving the frontend to infer one from the
         # cost-basis line — which reads a sale as (cost − proceeds) of phantom
         # return and distorts drawdown and Sharpe.
+        # Window is (start, end] under exclude-on-close, mirroring calculate_xirr
+        # and the attribution endpoint: a lot sold ON start_date never entered
+        # the series' value (its own close event removes it from day 0), so
+        # booking its proceeds would be a flow against value the series never
+        # held. Change all three together.
         disposals_by_day: Dict[date, Decimal] = {}
         for row in await self.realized_rows_from_closed_lots(
-            base_fx, start=start_date, end=end_date
+            base_fx, start=start_date + timedelta(days=1), end=end_date
         ):
             d = row["close_date"]
             disposals_by_day[d] = disposals_by_day.get(d, Decimal("0")) + row["proceeds"]
@@ -229,6 +239,15 @@ class PortfolioService:
         total_cost = Decimal("0")
         timeline: List[Dict] = []
         i = 0
+        # Events strictly before the window seed the opening state — they are
+        # history, not flows. Without this, the catch-up loop below fed every
+        # pre-window purchase into pending_flow and the first row reported the
+        # portfolio's whole acquisition history as that day's external flow.
+        while i < len(events) and events[i][0] < start_date:
+            _, sid, dq, dc = events[i]
+            qty_by_sec[sid] = qty_by_sec.get(sid, Decimal("0")) + dq
+            total_cost += dc
+            i += 1
         d = start_date
         # Flows accumulate until the next emitted row: only weekdays are emitted,
         # so a purchase or sale dated on a weekend belongs to the following one.
@@ -1237,11 +1256,12 @@ class PortfolioService:
         self,
         target_date: date,
         price_cache: Dict,
-        max_lookback_days: int = 30
+        max_lookback_days: int = PRICE_LOOKBACK_DAYS
     ) -> Optional[date]:
         """
         Find the latest date on or before target_date that has price data
-        for at least one security in the cache.
+        for at least one security in the cache. Bounded by PRICE_LOOKBACK_DAYS:
+        the search cannot see past what _preload_market_prices fetched.
         """
         for days_back in range(0, max_lookback_days + 1):
             check_date = target_date - timedelta(days=days_back)
@@ -1255,7 +1275,7 @@ class PortfolioService:
         securities: set,
         start_date: date,
         end_date: date,
-        lookback_days: int = 14
+        lookback_days: int = PRICE_LOOKBACK_DAYS
     ) -> Tuple[Dict, Dict]:
         """
         Pre-load all market prices for securities in date range.
