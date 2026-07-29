@@ -601,7 +601,15 @@ cd backend && venv\Scripts\activate && uvicorn app.main:app --reload --port 8000
 cd frontend && npm run dev          # http://localhost:5173
 ```
 
-Tests (241, all offline — no IBKR, Yahoo or FX-provider calls):
+`tests/test_api_smoke.py` runs **every read endpoint through the real HTTP stack** against a fixture
+carrying the shapes that actually break: a dual-listed ticker, a closed lot, a dividend row with a NULL
+net, a pre-ownership zero row, a non-EUR security, CHF as base. Every other test calls services
+directly, which is how a `Decimal + None` reached production behind a green suite. `yfinance` is a
+raiser for that whole module, so an accidental network reach fails loudly; `/api/portfolio/benchmark`
+is excluded because it lazy-fetches Yahoo on a cache miss, and POST routes are excluded because they
+start real syncs. **Add a case here when an endpoint's response shape changes.**
+
+Tests (276, all offline — no IBKR, Yahoo or FX-provider calls):
 ```bash
 cd backend && ./venv/Scripts/python.exe -m pytest tests/ -q
 ```
