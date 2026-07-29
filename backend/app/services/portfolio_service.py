@@ -171,23 +171,104 @@ class PortfolioService:
         exchange_rate_cache = await self._preload_exchange_rates(unique_securities, start_date, end_date, price_currency_cache=price_currency_cache)
         base_fx = await self._load_base_fx()
 
-        # Calculate portfolio value for each business day
-        portfolio_timeline = []
-        current_date = start_date
-
-        while current_date <= end_date:
-            # Skip weekends
-            if current_date.weekday() < 5:
-                daily_value = self._calculate_daily_value(
-                    current_date, taxlots_with_securities, price_cache, exchange_rate_cache,
-                    price_currency_cache=price_currency_cache, base_fx=base_fx
-                )
-                daily_value["base_currency"] = base_fx.base_currency
-                portfolio_timeline.append(daily_value)
-
-            current_date += timedelta(days=1)
-
+        # One sweep over the whole range instead of a per-day × per-lot loop.
+        portfolio_timeline = self._calculate_timeline_swept(
+            start_date, end_date, taxlots_with_securities, price_cache,
+            exchange_rate_cache, price_currency_cache, base_fx,
+        )
+        for row in portfolio_timeline:
+            row["base_currency"] = base_fx.base_currency
         return portfolio_timeline
+
+    def _calculate_timeline_swept(
+        self,
+        start_date: date,
+        end_date: date,
+        taxlots_with_securities: List,
+        price_cache: Dict,
+        exchange_rate_cache: Dict,
+        price_currency_cache: Optional[Dict],
+        base_fx: BaseFx,
+    ) -> List[Dict]:
+        """
+        The full timeline in one sweep — numerically identical to calling
+        _calculate_daily_value per day (pinned by tests/test_timeline_equivalence),
+        but O(days × securities) instead of O(days × lots): the per-lot pieces
+        that never depend on the valuation date (base-converted cost at open_date,
+        quantity) fold into running sums via open/close events, so each day only
+        prices each held security once instead of once per lot. At ~1000 lots over
+        ~570 business days that removes ~99% of the inner-loop work on the chart
+        endpoint. _calculate_daily_value stays for point queries (XIRR endpoints).
+        """
+        events = []  # (date, security_id, qty_delta, cost_delta_base)
+        securities_by_id: Dict[int, Security] = {}
+        for lot, sec in taxlots_with_securities:
+            securities_by_id[sec.id] = sec
+            cost = base_fx.convert(lot.cost_basis_eur, lot.open_date)
+            events.append((lot.open_date, sec.id, lot.quantity, cost))
+            if lot.close_date:
+                # Exclude-on-close: the removal applies ON the close date.
+                events.append((lot.close_date, sec.id, -lot.quantity, -cost))
+        events.sort(key=lambda e: e[0])
+
+        qty_by_sec: Dict[int, Decimal] = {}
+        total_cost = Decimal("0")
+        timeline: List[Dict] = []
+        i = 0
+        d = start_date
+        while d <= end_date:
+            while i < len(events) and events[i][0] <= d:
+                _, sid, dq, dc = events[i]
+                qty_by_sec[sid] = qty_by_sec.get(sid, Decimal("0")) + dq
+                total_cost += dc
+                i += 1
+
+            if d.weekday() < 5:
+                mv_eur = Decimal("0")
+                for sid, qty in qty_by_sec.items():
+                    if qty <= 0:
+                        continue
+                    price = self._get_market_price_with_fallback(sid, d, price_cache)
+                    if not price:
+                        sec = securities_by_id[sid]
+                        logger.warning(
+                            f"Skipping position for security {sid} ({sec.symbol}) on {d}: "
+                            f"no market price available"
+                        )
+                        continue
+                    sec = securities_by_id[sid]
+                    price_currency = (
+                        price_currency_cache.get(sid, sec.currency)
+                        if price_currency_cache else sec.currency
+                    )
+                    if price_currency != "EUR":
+                        rate = self._get_exchange_rate_with_fallback(
+                            price_currency, d, exchange_rate_cache
+                        )
+                        if not rate:
+                            logger.warning(
+                                f"Skipping position for security {sid} on {d}: "
+                                f"no exchange rate for {price_currency}"
+                            )
+                            continue
+                        mv_eur += qty * price * rate
+                    else:
+                        mv_eur += qty * price
+
+                mv = base_fx.convert(mv_eur, d)
+                gain = mv - total_cost
+                timeline.append({
+                    "date": d.isoformat(),
+                    "cost_basis_eur": float(total_cost),
+                    "market_value_eur": float(mv),
+                    "gain_loss_eur": float(gain),
+                    "gain_loss_percent": float(
+                        (gain / total_cost * 100) if total_cost > 0 else 0
+                    ),
+                })
+            d += timedelta(days=1)
+
+        return timeline
 
     async def get_current_portfolio_summary(self) -> Dict:
         """
