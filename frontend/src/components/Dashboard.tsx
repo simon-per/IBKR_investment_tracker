@@ -12,6 +12,7 @@ import { ContributionsStrip } from './ContributionsStrip'
 import { PositionsList } from './PositionsList'
 import { PerformanceAttribution } from './PerformanceAttribution'
 import { MonthlyReturnsHeatmap } from './MonthlyReturnsHeatmap'
+import { MonthlyDeploymentCard } from './MonthlyDeploymentCard'
 import { DividendSummary } from './DividendSummary'
 import { AllocationTab } from './AllocationTab'
 import { ForecastTab } from './ForecastTab'
@@ -103,7 +104,7 @@ export function Dashboard() {
   })
 
   // Fetch positions
-  const { data: positions, isLoading: positionsLoading } = useQuery({
+  const { data: positions, isLoading: positionsLoading, isError: positionsError } = useQuery({
     queryKey: ['portfolio', 'positions'],
     queryFn: () => api.getPositions(),
   })
@@ -149,7 +150,7 @@ export function Dashboard() {
   })
 
   // Fetch performance attribution for selected time range
-  const { data: attribution, isLoading: attributionLoading } = useQuery({
+  const { data: attribution, isLoading: attributionLoading, isError: attributionError } = useQuery({
     queryKey: ['portfolio', 'attribution', dateRange],
     queryFn: () => api.getPerformanceAttribution(dateRange.start, dateRange.end),
     enabled: !!dateRange.start && !!dateRange.end,
@@ -485,14 +486,17 @@ export function Dashboard() {
             {/* Monthly Returns Heatmap */}
             <MonthlyReturnsHeatmap data={valueOverTime} isLoading={chartLoading} />
 
+            {/* Monthly Deployment (capital put to work per month) */}
+            <MonthlyDeploymentCard data={contributions} isLoading={contributionsLoading} />
+
             {/* Dividend Income Heatmap */}
             <DividendSummary />
 
             {/* Performance Attribution */}
-            <PerformanceAttribution data={attribution} isLoading={attributionLoading} />
+            <PerformanceAttribution data={attribution} isLoading={attributionLoading} isError={attributionError} />
 
             {/* Positions Table */}
-            <PositionsList positions={positions || []} isLoading={positionsLoading} />
+            <PositionsList positions={positions || []} isLoading={positionsLoading} isError={positionsError} />
           </TabsContent>
 
           {/* Allocation Tab */}
