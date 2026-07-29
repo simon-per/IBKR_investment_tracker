@@ -18,9 +18,10 @@ import type { PerformanceAttributionResponse } from '@/lib/api'
 interface PerformanceAttributionProps {
   data: PerformanceAttributionResponse | undefined
   isLoading: boolean
+  isError?: boolean
 }
 
-export function PerformanceAttribution({ data, isLoading }: PerformanceAttributionProps) {
+export function PerformanceAttribution({ data, isLoading, isError }: PerformanceAttributionProps) {
   const formatCurrency = useFormatCurrency()
   const [open, setOpen] = useState(false)
 
@@ -66,6 +67,12 @@ export function PerformanceAttribution({ data, isLoading }: PerformanceAttributi
         <CardContent>
           {isLoading ? (
             <div className="h-[400px] w-full animate-pulse rounded-md bg-muted" />
+          ) : isError ? (
+            // A server error must not impersonate "no P&L changes" — see
+            // PortfolioValueChart's error state for the same pattern.
+            <p className="text-muted-foreground text-center py-8">
+              Couldn't load the attribution — the backend didn't respond. It retries automatically.
+            </p>
           ) : sorted.length === 0 ? (
             <p className="text-muted-foreground text-center py-8">
               No significant P&L changes in this period.

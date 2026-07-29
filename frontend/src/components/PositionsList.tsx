@@ -8,6 +8,7 @@ import { ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react'
 interface PositionsListProps {
   positions: Position[]
   isLoading?: boolean
+  isError?: boolean
 }
 
 type SortColumn = 'symbol' | 'description' | 'rating' | 'quantity' | 'cost_basis_eur' | 'market_value_eur' | 'gain_loss_eur' | 'gain_loss_percent' | 'portfolio_percent'
@@ -49,7 +50,7 @@ const getRatingScore = (consensus: string | undefined): number => {
   }
 }
 
-export function PositionsList({ positions, isLoading }: PositionsListProps) {
+export function PositionsList({ positions, isLoading, isError }: PositionsListProps) {
   const formatCurrency = useFormatCurrency()
   const [sortColumn, setSortColumn] = useState<SortColumn>('market_value_eur')
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc')
@@ -136,6 +137,23 @@ export function PositionsList({ positions, isLoading }: PositionsListProps) {
         <CardContent>
           <div className="text-center text-muted-foreground py-8">
             Loading positions...
+          </div>
+        </CardContent>
+      </Card>
+    )
+  }
+
+  // A server error must not impersonate an empty portfolio — the sync CTA
+  // below can't fix a backend that isn't answering.
+  if (isError) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>Positions</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="text-center text-muted-foreground py-8">
+            Couldn't load positions — the backend didn't respond. It retries automatically.
           </div>
         </CardContent>
       </Card>

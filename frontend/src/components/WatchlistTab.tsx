@@ -4,6 +4,7 @@ import { api } from '@/lib/api'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
+import { useFormatCurrency } from '@/lib/CurrencyContext'
 import { RefreshCw, Plus, Trash2, ArrowDown, ArrowUp, Pencil } from 'lucide-react'
 
 
@@ -25,16 +26,6 @@ type SortColumn =
   | 'fwd_eps_growth'
   | 'profit_margins'
 type SortDirection = 'asc' | 'desc'
-
-function formatCurrency(value: number | null, currency: string | null): string {
-  if (value === null) return '-'
-  return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: currency || 'USD',
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(value)
-}
 
 function formatPercent(value: number | null): string {
   if (value === null) return '-'
@@ -96,6 +87,11 @@ type TooltipState = { label: string; description: string; formula?: string; x: n
 
 export function WatchlistTab() {
   const queryClient = useQueryClient()
+  const formatBase = useFormatCurrency()
+  // Per-row data_currency via the shared formatter's override; a row with no
+  // currency falls back to the base currency rather than a hardcoded USD.
+  const formatCurrency = (value: number | null, currency: string | null): string =>
+    value === null ? '-' : formatBase(value, currency ?? undefined)
   const [tickerInput, setTickerInput] = useState('')
   const [sortColumn, setSortColumn] = useState<SortColumn>('buy_score')
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc')

@@ -402,12 +402,12 @@ function AllocationTreemap({
 export function AllocationTab() {
   const queryClient = useQueryClient()
 
-  const { data: allocation, isLoading } = useQuery({
+  const { data: allocation, isLoading, isError: allocationError } = useQuery({
     queryKey: ['allocation', 'portfolio'],
     queryFn: () => api.getPortfolioAllocation(),
   })
 
-  const { data: status } = useQuery({
+  const { data: status, isError: statusError } = useQuery({
     queryKey: ['allocation', 'status'],
     queryFn: () => api.getAllocationStatus(),
   })
@@ -434,6 +434,18 @@ export function AllocationTab() {
 
   return (
     <div className="space-y-6">
+      {/* A fetch error must not impersonate empty allocation data — the
+          treemaps below just render blank when the backend isn't answering. */}
+      {(allocationError || statusError) && (
+        <Card className="border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950">
+          <CardContent className="pt-6">
+            <p className="text-sm text-red-800 dark:text-red-200">
+              Couldn't load allocation data — the backend didn't respond. It retries automatically.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Sync Status */}
       {needsSync && (
         <Card className="border-yellow-200 dark:border-yellow-800 bg-yellow-50 dark:bg-yellow-950">
