@@ -41,9 +41,16 @@ async def add_to_watchlist(
     )
     await db.commit()
 
-    # Immediately sync data
-    service = WatchlistService(db)
-    await service.sync_item(item.yahoo_ticker, force=True)
+    # Immediately sync data — through the shared gate: this is a publicly reachable
+    # Yahoo trigger, and without it rapid-fire adds of distinct tickers are exactly
+    # the unthrottled fetch storm the gate exists to stop. Busy or cooling: the add
+    # itself still succeeds, last_synced stays null, and the next sync fills it in.
+    try:
+        with single_flight(SYNC_PIPELINE, cooldown_seconds=60):
+            service = WatchlistService(db)
+            await service.sync_item(item.yahoo_ticker, force=True)
+    except SyncBusy:
+        pass
 
     # Re-fetch with cached data
     item = await repo.get_by_id(item.id)

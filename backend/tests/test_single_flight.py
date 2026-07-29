@@ -106,3 +106,91 @@ async def test_the_dividend_card_does_not_start_a_second_yahoo_pass(monkeypatch)
 
     assert not called
     assert div._sync_in_progress is False
+
+
+async def _watchlist_session():
+    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+    from sqlalchemy.pool import StaticPool
+    from app.database import Base
+    import app.models  # noqa: F401
+    from app.models.watchlist_item import WatchlistItem
+
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(
+            lambda c: Base.metadata.create_all(c, tables=[WatchlistItem.__table__])
+        )
+    return engine, AsyncSession(engine, expire_on_commit=False)
+
+
+def _reset_gate(monkeypatch):
+    """SYNC_PIPELINE state is module-global; earlier tests stamp its cooldown clock."""
+    import app.single_flight as sf
+
+    monkeypatch.setattr(sf, "_running", set())
+    monkeypatch.setattr(sf, "_last_start", {})
+
+
+@pytest.mark.asyncio
+async def test_adding_a_watchlist_ticker_never_fetches_while_the_pipeline_is_held(monkeypatch):
+    """
+    POST /api/watchlist fires a per-add yfinance fetch. It must go through the
+    shared gate — but the add itself must still succeed, or a running 08:00 job
+    would turn a bookkeeping action into a 429.
+    """
+    from app.routers import watchlist as wl
+    from app.schemas.portfolio import AddWatchlistItemRequest
+
+    _reset_gate(monkeypatch)
+    engine, session = await _watchlist_session()
+    fetched = []
+
+    async def _record(self, ticker, force=False):
+        fetched.append(ticker)
+
+    monkeypatch.setattr(wl.WatchlistService, "sync_item", _record)
+
+    try:
+        with single_flight(SYNC_PIPELINE):      # a scheduled job owns the pipeline
+            response = await wl.add_to_watchlist(
+                AddWatchlistItemRequest(yahoo_ticker="msft"), db=session
+            )
+
+        assert fetched == []                    # no Yahoo touch while held
+        assert response.yahoo_ticker == "MSFT"  # but the row was created
+        assert response.last_synced is None
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_rapid_fire_watchlist_adds_get_one_fetch_not_n(monkeypatch):
+    from app.routers import watchlist as wl
+    from app.schemas.portfolio import AddWatchlistItemRequest
+
+    _reset_gate(monkeypatch)
+    engine, session = await _watchlist_session()
+    fetched = []
+
+    async def _record(self, ticker, force=False):
+        fetched.append(ticker)
+
+    monkeypatch.setattr(wl.WatchlistService, "sync_item", _record)
+
+    try:
+        for ticker in ("aaa", "bbb", "ccc"):
+            await wl.add_to_watchlist(
+                AddWatchlistItemRequest(yahoo_ticker=ticker), db=session
+            )
+
+        assert fetched == ["AAA"]               # the cooldown absorbs the burst
+        items = await wl.get_watchlist(db=session)
+        assert {i.yahoo_ticker for i in items} == {"AAA", "BBB", "CCC"}
+    finally:
+        await session.close()
+        await engine.dispose()
