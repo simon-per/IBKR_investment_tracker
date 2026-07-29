@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal, get_db
 from app.services.fundamentals_service import FundamentalsService
-from app.single_flight import SyncBusy, is_running, single_flight
+from app.single_flight import SYNC_PIPELINE, SyncBusy, is_running, single_flight
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +17,7 @@ async def _run_sync_background(force_refresh: bool) -> None:
     try:
         # The handler already answered, so the gate lives here, spanning the
         # actual Yahoo work rather than the enqueue.
-        with single_flight("fundamentals-sync"):
+        with single_flight(SYNC_PIPELINE):
             async with AsyncSessionLocal() as db:
                 try:
                     service = FundamentalsService(db)
@@ -34,7 +34,7 @@ async def sync_fundamentals(
     force_refresh: bool = Query(False, description="Force refresh all, even fresh data"),
 ):
     """Kick off a fundamentals sync in the background and return immediately."""
-    if is_running("fundamentals-sync"):
+    if is_running(SYNC_PIPELINE):
         return {"status": "already_running", "message": "Fundamentals sync is already in progress"}
     background_tasks.add_task(_run_sync_background, force_refresh)
     return {
@@ -51,7 +51,7 @@ async def sync_fundamentals(
 async def sync_stale_fundamentals(db: AsyncSession = Depends(get_db)):
     """Sync only fundamentals that are stale (older than 7 days)."""
     try:
-        with single_flight("fundamentals-sync", cooldown_seconds=300):
+        with single_flight(SYNC_PIPELINE, cooldown_seconds=300):
             service = FundamentalsService(db)
             result = await service.sync_stale_fundamentals()
             return {"status": "success", **result}

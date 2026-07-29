@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.services.watchlist_service import WatchlistService
-from app.single_flight import SyncBusy, single_flight
+from app.single_flight import SYNC_PIPELINE, SyncBusy, single_flight
 from app.repositories.watchlist_repository import WatchlistRepository
 from app.schemas.portfolio import (
     WatchlistItemResponse,
@@ -102,7 +102,7 @@ async def sync_watchlist(
 ):
     """Force refresh all watchlist items."""
     try:
-        with single_flight("watchlist-sync", cooldown_seconds=300):
+        with single_flight(SYNC_PIPELINE, cooldown_seconds=300):
             service = WatchlistService(db)
             result = await service.sync_all(force=force)
             return result

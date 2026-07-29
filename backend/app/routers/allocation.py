@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.services.allocation_service import AllocationService
-from app.single_flight import SyncBusy, single_flight
+from app.single_flight import SYNC_PIPELINE, SyncBusy, single_flight
 
 
 router = APIRouter()
@@ -24,7 +24,7 @@ async def sync_allocation_data(
     """
     try:
         # Public route, one Yahoo request per security: one at a time, cooled down.
-        with single_flight("allocation-sync", cooldown_seconds=300):
+        with single_flight(SYNC_PIPELINE, cooldown_seconds=300):
             service = AllocationService(db)
             result = await service.sync_allocation_data(force_refresh=force_refresh)
             return result

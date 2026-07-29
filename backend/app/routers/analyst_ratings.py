@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.services.analyst_rating_service import AnalystRatingService
-from app.single_flight import SyncBusy, single_flight
+from app.single_flight import SYNC_PIPELINE, SyncBusy, single_flight
 
 
 router = APIRouter()
@@ -30,7 +30,7 @@ async def sync_analyst_ratings(db: AsyncSession = Depends(get_db)):
     """
     try:
         # Public route, one Yahoo request per security: one at a time, cooled down.
-        with single_flight("ratings-sync", cooldown_seconds=300):
+        with single_flight(SYNC_PIPELINE, cooldown_seconds=300):
             rating_service = AnalystRatingService(db)
 
             # Sync all securities
@@ -71,7 +71,7 @@ async def sync_stale_analyst_ratings(db: AsyncSession = Depends(get_db)):
         Summary of synced data
     """
     try:
-        with single_flight("ratings-sync", cooldown_seconds=300):
+        with single_flight(SYNC_PIPELINE, cooldown_seconds=300):
             rating_service = AnalystRatingService(db)
             result = await rating_service.sync_stale_ratings()
 
