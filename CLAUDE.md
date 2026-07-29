@@ -853,10 +853,18 @@ bars (`source='ibkr'`, `2026-06-29..07-27`) and Yahoo later filled the other 481
 exactly as `get_missing_dates()` implies. Yahoo's 27 Jul close for `SBI.TO` came back at **4.79 CAD**,
 identical to IBKR's own bar, which independently confirms both the mapping and the import.
 
-Dividends: 57 cash-transaction rows → 26 IBKR dividend payments (43.31 gross / 7.00 withholding /
-36.31 net EUR). 2026 reports `dividend_source='ibkr'` and `realized_source='trades'`; realized
-−105.40 EUR over 4 closed lots. The tax report's `holdings_snapshot_total` matches the portfolio
+Dividends: 57 cash-transaction rows → 26 IBKR dividend payments, all with real withholding, running
+from mid-February. 2026 reports `dividend_source='ibkr'` and `realized_source='trades'`; realized is
+a small net loss over 4 closed lots. The tax report's `holdings_snapshot_total` matches the portfolio
 summary to the cent, which is the shared-code guarantee holding.
+
+Figures are described rather than published, as elsewhere in this file — the repo is public, and a
+pasted total also goes stale silently: the ones that used to sit here were superseded when the manual
+XML re-ingest upserted corrected amounts, and read as a discrepancy months later. **Check the numbers
+against the API or the DB, never against this file.** The reconciliations worth keeping are the
+*relationships*: per-date FX means the IBKR EUR net and the tax report's base-currency net differ by a
+percent or two rather than matching exactly, and the breakdown's year total is the IBKR era plus the
+estimates that precede its boundary.
 
 **Reconciled against IBKR to 0.12%** on 2026-07-27. Compare the app against `gross_position_value`,
 never net liquidation (which adds cash and accrued dividends) — "buying power" is a margin metric
