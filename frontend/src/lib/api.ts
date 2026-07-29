@@ -339,6 +339,13 @@ export interface DividendSummaryResponse {
 
 export interface DividendMonthBar {
   month: string;                    // "YYYY-MM"
+  /**
+   * Growth of the REALIZED figure only, vs the previous month and the same month
+   * a year earlier. null when the base is zero (constant for a quarterly payer)
+   * or when the month holds only forecast.
+   */
+  mom_pct?: number | null;
+  yoy_pct?: number | null;
   // NOTE: values carry the selected base_currency.
   actual: Record<string, number>;   // symbol -> net received
   forecast: Record<string, number>; // symbol -> projected net (cadence-based)
@@ -359,9 +366,73 @@ export interface DividendSecurityRow {
   forecast_payouts: number;
   forecast_net_eur: number;
   trailing_yield_pct: number | null;
+  /** TTM net over what the position cost, rather than what it is worth now. */
+  yield_on_cost_pct: number | null;
+  /** Share of the window's total (actual + forecast). */
+  share_pct: number | null;
+  next_pay_date: string | null;
   source: 'ibkr' | 'estimate' | 'mixed' | null; // null = forecast-only row
   /** 'net' = sized from dividends received; 'gross_estimate' = withholding not deducted. */
   forecast_basis: 'net' | 'gross_estimate' | null;
+}
+
+/** A figure beside the comparable it is measured against. */
+export interface DividendDelta {
+  net_eur: number;
+  prev_net_eur: number | null;
+  /** null whenever the base is zero — undefined, not large. Render a dash. */
+  pct: number | null;
+}
+
+export interface DividendAnnualRow {
+  year: number;
+  net_eur: number;
+  forecast_net_eur: number;
+  /** net + forecast — what the bar length shows, and what yoy_pct compares. */
+  total_eur: number;
+  yoy_pct: number | null;
+  /** This row or its comparable contains projection, so the chip is forward-looking. */
+  yoy_includes_forecast: boolean;
+  /** The prior year did not cover a full year, so the percentage overstates growth. */
+  yoy_vs_partial: boolean;
+  /** This year's realized figure covers less than the whole calendar year. */
+  partial: boolean;
+}
+
+export interface DividendLatestMonth {
+  month: string;
+  net_eur: number;
+  mom_pct: number | null;
+  yoy_pct: number | null;
+}
+
+/**
+ * Growth of dividend income, computed over the FULL history regardless of the
+ * year filter — with a year selected the response carries no prior-year months,
+ * so none of this could be derived client-side.
+ */
+export interface DividendGrowth {
+  /** Trailing 12 months vs the 12 before. The headline: raw MoM swings ±90% on cadence. */
+  ttm: DividendDelta;
+  /** The two windows straddle the estimate/actual boundary — badge, don't equate. */
+  ttm_crosses_era: boolean;
+  /** Jan 1 → today vs Jan 1 → the same day last year. Strictly like-for-like. */
+  ytd: DividendDelta;
+  avg_month: DividendDelta;
+  next_12m_eur: number;
+  /** Forecast against measured — mark it as projected. */
+  next_12m_vs_ttm_pct: number | null;
+  annual: DividendAnnualRow[];
+  latest_month: DividendLatestMonth | null;
+}
+
+/** One projected payment, dated — the dividend calendar. */
+export interface DividendUpcomingPayment {
+  date: string;
+  security_id: number;
+  symbol: string;
+  net_eur: number;
+  basis: 'net' | 'gross_estimate' | null;
 }
 
 export interface DividendBreakdownResponse {
@@ -374,6 +445,9 @@ export interface DividendBreakdownResponse {
   /** Era-splice boundary: estimates strictly before, IBKR actuals from here. */
   ibkr_from: string | null;
   base_currency: string;
+  /** Optional so an older backend payload still parses. */
+  growth?: DividendGrowth | null;
+  upcoming?: DividendUpcomingPayment[];
 }
 
 export interface TaxDividendRow {

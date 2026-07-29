@@ -1,6 +1,7 @@
 import { PiggyBank } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useCurrencySymbol, useFormatCurrency } from '@/lib/CurrencyContext'
+import { deltaColor } from '@/lib/delta'
 import type { ContributionsResponse, ContributionWindow } from '@/lib/api'
 
 interface ContributionsStripProps {
@@ -13,15 +14,6 @@ const WINDOW_LABELS: Record<ContributionWindow['label'], string> = {
   '12m': '12M',
   '6m': '6M',
   '3m': '3M',
-}
-
-/** Deltas inside this band are ordinary variation, not a trend worth colouring. */
-const FLAT_BAND_PCT = 5
-
-function deltaColor(pct: number): string {
-  if (pct > FLAT_BAND_PCT) return 'text-green-600 dark:text-green-400'
-  if (pct < -FLAT_BAND_PCT) return 'text-red-600 dark:text-red-400'
-  return 'text-muted-foreground'
 }
 
 /** Whole units: cents on a monthly average are noise, and the tooltip keeps the exact figure. */
