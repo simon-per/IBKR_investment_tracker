@@ -12,7 +12,7 @@ import random
 import asyncio
 import yfinance as yf
 
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.security import Security
@@ -38,6 +38,13 @@ class DividendService:
         market_service = MarketDataService(self.db)
         return await market_service._get_yahoo_ticker(security)
 
+    async def _first_lot_dates(self) -> Dict[int, date]:
+        """Earliest lot open_date per security — the point a dividend can first be earned."""
+        rows = await self.db.execute(
+            select(TaxLot.security_id, func.min(TaxLot.open_date)).group_by(TaxLot.security_id)
+        )
+        return {sid: first for sid, first in rows.all() if first}
+
     async def sync_dividend_data(self) -> Dict:
         """Fetch dividend ex-dates from yfinance for all securities."""
         result = await self.db.execute(select(Security))
@@ -49,9 +56,18 @@ class DividendService:
 
         logger.info(f"Syncing dividends for {len(securities)} securities")
 
+        # yfinance returns a security's ENTIRE dividend history — Coca-Cola since the
+        # 1960s — and every ex-date before we owned a share earns nothing, so
+        # compute_dividend_income just writes a zero row to mark it processed. On this
+        # account that was 1355 of 1446 rows, reaching back to 1985: pure noise that
+        # every reader then has to filter (and one that already caused a bug when a
+        # filter was relaxed). Ingest only what could have been earned.
+        first_lot = await self._first_lot_dates()
+
         dividends_added = 0
         errors = 0
         skipped = 0
+        pre_ownership_skipped = 0
 
         for i, security in enumerate(securities, 1):
             try:
@@ -77,8 +93,15 @@ class DividendService:
                     logger.info(f"No dividends found for {security.symbol}")
                     continue
 
+                # No lots at all yet (a security whose statement arrived before any
+                # purchase) → keep everything rather than guess a cutoff.
+                owned_from = first_lot.get(security.id)
+
                 for dt_index, amount in dividends_series.items():
                     ex_date = dt_index.date() if hasattr(dt_index, 'date') else dt_index
+                    if owned_from and ex_date < owned_from:
+                        pre_ownership_skipped += 1
+                        continue
                     await self.repo.upsert_payment({
                         'security_id': security.id,
                         'ex_date': ex_date,
@@ -96,11 +119,15 @@ class DividendService:
                 await self.db.rollback()
                 continue
 
-        logger.info(f"Dividend sync complete: added={dividends_added}, skipped={skipped}, errors={errors}")
+        logger.info(
+            f"Dividend sync complete: added={dividends_added}, skipped={skipped}, "
+            f"pre_ownership_skipped={pre_ownership_skipped}, errors={errors}"
+        )
         return {
             'securities_processed': len(securities) - skipped,
             'dividends_added': dividends_added,
             'skipped': skipped,
+            'pre_ownership_skipped': pre_ownership_skipped,
             'errors': errors,
             'message': f'Synced dividends: {dividends_added} records from {len(securities) - skipped} securities',
         }
