@@ -347,3 +347,38 @@ async def test_realized_falls_back_to_closed_lots_when_no_sell_trades():
     finally:
         await session.close()
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_pre_ownership_zero_rows_do_not_pad_the_report():
+    """
+    yfinance stores a security's whole dividend history, so ex-dates from before
+    it was bought sit in the table as zero rows. On this account 70 of the 96
+    rows the 2025 report listed were 0.00 — noise in a filing aid.
+    """
+    engine, session = await _make_session()
+    try:
+        repo = DividendRepository(session)
+        # Bought later: this ex-date earned nothing.
+        await repo.upsert_payment({
+            "security_id": 1, "ex_date": date(2025, 2, 10), "pay_date": date(2025, 2, 10),
+            "currency": "EUR", "shares_held": Decimal("0"),
+            "gross_amount_eur": Decimal("0"), "withholding_tax_eur": Decimal("0"),
+            "net_amount_eur": Decimal("0"), "source": "yfinance_estimate",
+        })
+        # Real income, legacy shape (net NULL) — must survive and use gross.
+        await repo.upsert_payment({
+            "security_id": 1, "ex_date": date(2025, 6, 12), "pay_date": date(2025, 6, 12),
+            "currency": "EUR", "shares_held": Decimal("10"),
+            "gross_amount_eur": Decimal("8"), "withholding_tax_eur": None,
+            "net_amount_eur": None, "source": "yfinance_estimate",
+        })
+        await session.commit()
+
+        report = await TaxService(session).get_tax_report(2025)
+        rows = report["dividend_income"]
+        assert [r["pay_date"] for r in rows] == ["2025-06-12"]
+        assert rows[0]["net"] == 8.0
+    finally:
+        await session.close()
+        await engine.dispose()

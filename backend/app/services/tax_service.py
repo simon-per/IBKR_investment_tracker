@@ -24,6 +24,7 @@ from app.models.trade import Trade
 from app.models.dividend_payment import DividendPayment
 from app.repositories.dividend_repository import DividendRepository
 from app.services.currency_service import CurrencyService
+from app.services.dividend_service import DividendService
 from app.services.portfolio_service import PortfolioService
 
 
@@ -80,9 +81,15 @@ class TaxService:
             on_date = dp.pay_date or dp.ex_date
             if on_date is None or on_date < start or on_date > end:
                 continue
+            # yfinance carries a security's whole dividend history, so ex-dates
+            # from before it was bought are stored as zero rows. They are not
+            # income and must not pad a filing aid: 70 of the 96 rows the 2025
+            # report listed were 0.00.
+            if not DividendService._is_income(dp):
+                continue
             gross_e = dp.gross_amount_eur or Decimal("0")
             wht_e = dp.withholding_tax_eur or Decimal("0")
-            net_e = dp.net_amount_eur if dp.net_amount_eur is not None else gross_e
+            net_e = DividendService._net_eur(dp)
             gross = base_fx.convert(gross_e, on_date)
             wht = base_fx.convert(wht_e, on_date)
             net = base_fx.convert(net_e, on_date)
