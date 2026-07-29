@@ -547,7 +547,10 @@ class PortfolioService:
             .where(
                 and_(
                     TaxLot.open_date <= on_date,
-                    or_(TaxLot.close_date.is_(None), TaxLot.close_date >= on_date),
+                    # Exclude-on-close, same window as _calculate_daily_value: a
+                    # position sold on 31 Dec is not held at year-end — it belongs
+                    # to that year's realized gains, not its Steuerwert.
+                    or_(TaxLot.close_date.is_(None), TaxLot.close_date > on_date),
                 )
             )
             .order_by(Security.symbol.asc())
@@ -892,15 +895,14 @@ class PortfolioService:
                 amounts.append(-float(base_fx.convert(taxlot.cost_basis_eur, taxlot.open_date)))
 
         # Inflows: capital released by sales inside the window, priced like the
-        # valuations (market price at close date). Lots closed ON the effective
-        # end date are excluded: the end valuation still carries them (a lot is
-        # active through its close date), so proceeds there would double-count.
-        # If the close-date convention ever flips to exclude-on-close, widen this
-        # window to effective_end_date in the same change.
+        # valuations (market price at close date). Window is (start, end], matching
+        # exclude-on-close: a lot sold ON the start date belongs to the prior
+        # period (its value never entered start_mv), while one sold ON the end
+        # date yields proceeds here precisely because end_mv no longer carries it.
         realized = await self.realized_rows_from_closed_lots(
             base_fx,
-            start=effective_start_date,
-            end=effective_end_date - timedelta(days=1),
+            start=effective_start_date + timedelta(days=1),
+            end=effective_end_date,
         )
         for row in realized:
             dates.append(row["close_date"])
@@ -1042,16 +1044,16 @@ class PortfolioService:
                 return val
 
             # Tax lot contributes to start value if opened on or before effective_start
-            # AND not already closed by effective_start
+            # AND still held at effective_start (exclude-on-close)
             if taxlot.open_date <= effective_start:
-                if not (taxlot.close_date and taxlot.close_date < effective_start):
+                if not (taxlot.close_date and taxlot.close_date <= effective_start):
                     price = self._get_market_price_with_fallback(sid, effective_start, price_cache)
                     entry["start_market_value"] += get_eur_value(taxlot.quantity, price, security, effective_start)
 
             # Tax lot contributes to end value if opened on or before effective_end
-            # AND not already closed by effective_end
+            # AND still held at effective_end (exclude-on-close)
             if taxlot.open_date <= effective_end:
-                if not (taxlot.close_date and taxlot.close_date < effective_end):
+                if not (taxlot.close_date and taxlot.close_date <= effective_end):
                     price = self._get_market_price_with_fallback(sid, effective_end, price_cache)
                     entry["end_market_value"] += get_eur_value(taxlot.quantity, price, security, effective_end)
 
@@ -1060,13 +1062,11 @@ class PortfolioService:
                 entry["new_investment"] += base_fx.convert(taxlot.cost_basis_eur, taxlot.open_date)
 
         # Capital returned by sales inside the window, priced like the valuations.
-        # Lots closed ON effective_end are excluded — the end valuation still
-        # carries them (a lot is active through its close date), so proceeds there
-        # would double-count. Mirrors calculate_xirr; change both together if the
-        # close-date convention ever flips.
+        # Window is (start, end] under exclude-on-close — mirrors calculate_xirr;
+        # change both together if the close-date convention ever moves again.
         disposals_by_sec: Dict[int, Decimal] = {}
         for r in await self.realized_rows_from_closed_lots(
-            base_fx, start=effective_start, end=effective_end - timedelta(days=1),
+            base_fx, start=effective_start + timedelta(days=1), end=effective_end,
         ):
             disposals_by_sec[r["security_id"]] = (
                 disposals_by_sec.get(r["security_id"], Decimal("0")) + r["proceeds"]
@@ -1381,8 +1381,11 @@ class PortfolioService:
             if taxlot.open_date > target_date:
                 continue
 
-            # Exclude taxlots that were closed before this date (lot is still active on its close date)
-            if taxlot.close_date and taxlot.close_date < target_date:
+            # A lot sold on D is no longer held at D's close: exclude ON the close
+            # date. This is what stops a same-day rotation from double-counting the
+            # day (old A still active + new B open), keeps Steuerwert and realized
+            # gains disjoint at year-end, and matches the benchmark's convention.
+            if taxlot.close_date and taxlot.close_date <= target_date:
                 continue
 
             # Cost basis converts at the lot's open_date (stable, FX-independent line)
