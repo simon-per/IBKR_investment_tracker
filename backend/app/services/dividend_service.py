@@ -263,6 +263,20 @@ class DividendService:
         return {"ibkr_dividends": saved, "message": f"Recorded {saved} IBKR dividend payments"}
 
     @staticmethod
+    def _is_income(p) -> bool:
+        """
+        True when a row represents money actually received.
+
+        yfinance returns a security's ENTIRE dividend history — Coca-Cola pays
+        since the 1960s — and compute_dividend_income() writes a zero row for
+        every ex-date where no shares were held, deliberately, so it isn't
+        reprocessed. Those are bookkeeping, not income: counting them gave the
+        summary 439 months back to 1985 of which 419 were empty.
+        """
+        return ((p.gross_amount_eur or Decimal("0")) > 0
+                or (p.net_amount_eur or Decimal("0")) > 0)
+
+    @staticmethod
     def _splice_by_era(payments: List) -> tuple:
         """
         Honest mix of the two sources: yfinance estimates strictly BEFORE the first
@@ -295,6 +309,7 @@ class DividendService:
         of withholding tax; gross and withholding totals are reported separately.
         """
         payments, ibkr_from = self._splice_by_era(await self.repo.get_computed_dividends())
+        payments = [p for p in payments if self._is_income(p)]
 
         # Project EUR amounts into the configured base currency at each date.
         from app.services.portfolio_service import PortfolioService
@@ -370,7 +385,7 @@ class DividendService:
         all_payments, ibkr_from = self._splice_by_era(await self.repo.get_computed_dividends())
         # Zero rows (an estimate computed while no shares were held at the ex-date)
         # are bookkeeping, not income — and they would poison the cadence inference.
-        all_payments = [p for p in all_payments if (p.net_amount_eur or Decimal("0")) > 0]
+        all_payments = [p for p in all_payments if self._is_income(p)]
 
         securities = {
             s.id: s for s in (await self.db.execute(select(Security))).scalars().all()

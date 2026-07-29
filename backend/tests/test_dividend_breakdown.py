@@ -161,6 +161,29 @@ async def test_a_sold_position_gets_no_forecast():
 
 
 @pytest.mark.asyncio
+async def test_the_summary_ignores_decades_of_empty_pre_ownership_rows():
+    """
+    yfinance returns a security's whole dividend history, and
+    compute_dividend_income writes a zero row for every ex-date with no shares
+    held. Counting those gave the card 439 months reaching back to 1985, of
+    which 419 were empty — the heatmap would render 41 blank year-rows.
+    """
+    engine, session = await _make_session()
+    try:
+        for y in (1985, 1999, 2015):
+            await _seed_payment(session, 1, date(y, 8, 12), "0", "yfinance_estimate", gross="0")
+        await _seed_payment(session, 1, date(2025, 11, 5), "4.00", "yfinance_estimate")
+        await _seed_payment(session, 1, date(2026, 3, 10), "6.00", "ibkr")
+
+        summary = await DividendService(session).get_dividend_summary()
+        assert [m["month"] for m in summary["monthly"]] == ["2025-11", "2026-03"]
+        assert summary["total_net_eur"] == 10.00
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_zero_amount_estimate_rows_are_not_income():
     engine, session = await _make_session()
     try:
