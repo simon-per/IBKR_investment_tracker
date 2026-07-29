@@ -338,10 +338,17 @@ export function DividendsTab() {
                 </span>
               ))}
               {showForecast && (data.total_forecast_net_eur ?? 0) > 0 && (
-                <span className="inline-flex items-center gap-1.5">
-                  <span className="h-2.5 w-2.5 rounded-sm border border-dashed border-muted-foreground/70" />
-                  translucent = forecast
-                </span>
+                <>
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className="h-2.5 w-2.5 rounded-sm border border-dashed border-muted-foreground/70" />
+                    translucent = forecast
+                  </span>
+                  {securities.some((r) => r.forecast_basis === 'gross_estimate') && (
+                    <span title="Those rows are projected from published gross dividends per share, because nothing has been received from them yet — withholding tax is not deducted">
+                      <span className="text-amber-600 dark:text-amber-500">*</span> gross estimate
+                    </span>
+                  )}
+                </>
               )}
             </div>
 
@@ -387,10 +394,26 @@ export function DividendsTab() {
                       >
                         {formatCurrency(row.net_eur)}
                       </td>
-                      <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground">
-                        {showForecast && row.forecast_net_eur > 0
-                          ? `+${formatCurrency(row.forecast_net_eur)}`
-                          : '—'}
+                      <td
+                        className="px-2 py-1.5 text-right tabular-nums text-muted-foreground"
+                        title={
+                          row.forecast_basis === 'gross_estimate'
+                            ? 'Projected from published gross dividends per share — withholding tax is not deducted, so this runs a little high'
+                            : row.forecast_basis === 'net'
+                              ? 'Projected from dividends actually received, net of withholding'
+                              : undefined
+                        }
+                      >
+                        {showForecast && row.forecast_net_eur > 0 ? (
+                          <>
+                            +{formatCurrency(row.forecast_net_eur)}
+                            {row.forecast_basis === 'gross_estimate' && (
+                              <span className="ml-0.5 text-amber-600 dark:text-amber-500">*</span>
+                            )}
+                          </>
+                        ) : (
+                          '—'
+                        )}
                       </td>
                       <td className="px-2 py-1.5 text-right tabular-nums">
                         {row.trailing_yield_pct != null ? `${row.trailing_yield_pct.toFixed(1)}%` : '—'}

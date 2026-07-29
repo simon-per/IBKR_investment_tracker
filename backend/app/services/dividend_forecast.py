@@ -3,10 +3,17 @@ Project future dividend payments from a security's own payment history.
 
 Nothing forward-looking is cached anywhere — no announced dividends, no calendar
 (the fundamentals/earnings tables carry no dividend fields) — so a forecast is
-necessarily inferred: the payout cadence comes from the spacing of past payments,
-the amount from the trailing payments scaled to the current holding. Pure
-functions, no DB and no network, so the inference rules are pinned by fast unit
-tests and can never violate the no-Yahoo-at-request-time rule.
+necessarily inferred: the payout cadence comes from the spacing of past
+ex-dates, the size from the recent dividend **per share** scaled to the holding
+we have now. Pure functions, no DB and no network, so the inference rules are
+pinned by fast unit tests and can never violate the no-Yahoo-at-request-time
+rule.
+
+Working per share rather than per payment received is what lets a security
+bought last month be forecast at all: the payout schedule is a property of the
+company, not of how long we have owned it. Keying on realized income instead
+left TSMC, Samsung, SK Hynix, HPE and the SOXQ ETF — every one a real payer —
+projecting nothing.
 """
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -14,7 +21,7 @@ from decimal import Decimal
 from statistics import median
 from typing import List, Optional
 
-# Cadence is inferred from the median gap between recent payments. Anything
+# Cadence is inferred from the median gap between recent ex-dates. Anything
 # slower than ~13 months is not a cadence, and anything faster than ~3 weeks is
 # noise (monthly is the fastest real payout schedule), so both refuse to forecast.
 MAX_GAP_DAYS = 400
@@ -31,15 +38,16 @@ STOPPED_AFTER_GAPS = 2.5
 
 @dataclass(frozen=True)
 class HistPayment:
-    """One historical payment: when, how much (net EUR), and the shares that earned it.
+    """
+    One historical dividend: when it went ex, and how much per share in EUR.
 
-    ``shares_held`` is None/0 when unknown (IBKR rows store a 0 sentinel and the
-    holding at the pay date may not be derivable) — the amount is then used
-    unscaled instead of being scaled to the current position size.
+    ``per_share_eur`` is None when the amount can't be established (an IBKR row
+    with no per-share figure and no usable share count). Such a payment still
+    counts towards the cadence — the date is evidence of the schedule — it just
+    can't contribute to the size.
     """
     on_date: date
-    net_eur: Decimal
-    shares_held: Optional[Decimal] = None
+    per_share_eur: Optional[Decimal] = None
 
 
 @dataclass(frozen=True)
@@ -49,7 +57,7 @@ class ForecastPayment:
 
 
 def infer_gap_days(dates: List[date]) -> Optional[int]:
-    """Median gap between the most recent payments, or None when no cadence exists."""
+    """Median gap between the most recent ex-dates, or None when no cadence exists."""
     uniq = sorted(set(dates))[-CADENCE_SAMPLE:]
     if len(uniq) < 2:
         return None
@@ -60,25 +68,20 @@ def infer_gap_days(dates: List[date]) -> Optional[int]:
     return gap
 
 
-def _trailing_amount(history: List[HistPayment], current_shares: Decimal) -> Optional[Decimal]:
+def _per_share(history: List[HistPayment]) -> Optional[Decimal]:
     """
-    Median of the recent payments, each scaled to the current holding where the
-    earning share count is known. The median (not mean) keeps a one-off special
-    dividend from inflating every projected payment.
+    Median dividend per share over the recent payments.
+
+    The median (not the mean) keeps a one-off special dividend from inflating
+    every projected payment.
     """
     recent = sorted(history, key=lambda p: p.on_date)[-CADENCE_SAMPLE:]
-    scaled: List[Decimal] = []
-    for p in recent:
-        if p.net_eur is None or p.net_eur <= 0:
-            continue
-        if p.shares_held and p.shares_held > 0 and current_shares > 0:
-            scaled.append(p.net_eur * current_shares / p.shares_held)
-        else:
-            scaled.append(p.net_eur)
-    if not scaled:
+    amounts = [p.per_share_eur for p in recent
+               if p.per_share_eur is not None and p.per_share_eur > 0]
+    if not amounts:
         return None
-    amount = median(scaled)
-    return amount if amount > 0 else None
+    value = median(amounts)
+    return value if value > 0 else None
 
 
 def project_dividends(
@@ -86,32 +89,38 @@ def project_dividends(
     current_shares: Decimal,
     horizon_start: date,
     horizon_end: date,
+    as_of: Optional[date] = None,
 ) -> List[ForecastPayment]:
     """
     Future payments for one security inside [horizon_start, horizon_end].
 
+    ``as_of`` is *now* — the point from which staleness is judged. It is separate
+    from ``horizon_start`` because asking about next year must not make every
+    payer look stopped: the distance to a future horizon is a property of the
+    question, not of the company.
+
     Returns [] whenever an honest projection isn't possible: nothing is held,
-    fewer than two past payments, no inferable cadence, the payer looks stopped,
-    or the horizon is empty.
+    fewer than two past ex-dates, no inferable cadence, no usable per-share
+    amount, the payer looks stopped, or the horizon is empty.
     """
     if current_shares <= 0 or horizon_start > horizon_end or not history:
         return []
 
-    paid = [p for p in history if p.net_eur and p.net_eur > 0]
-    gap = infer_gap_days([p.on_date for p in paid])
+    gap = infer_gap_days([p.on_date for p in history])
     if gap is None:
         return []
 
-    last_paid = max(p.on_date for p in paid)
-    if (horizon_start - last_paid).days > STOPPED_AFTER_GAPS * gap:
+    last_seen = max(p.on_date for p in history)
+    if ((as_of or horizon_start) - last_seen).days > STOPPED_AFTER_GAPS * gap:
         return []
 
-    amount = _trailing_amount(paid, current_shares)
-    if amount is None:
+    per_share = _per_share(history)
+    if per_share is None:
         return []
 
+    amount = per_share * current_shares
     out: List[ForecastPayment] = []
-    nxt = last_paid + timedelta(days=gap)
+    nxt = last_seen + timedelta(days=gap)
     while nxt <= horizon_end:
         if nxt >= horizon_start:
             out.append(ForecastPayment(on_date=nxt, net_eur=amount))

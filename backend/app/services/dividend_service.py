@@ -23,6 +23,12 @@ from app.services.dividend_forecast import HistPayment, project_dividends
 
 logger = logging.getLogger(__name__)
 
+# How much dividend history to keep from before a security was bought. The
+# forecast needs past ex-dates to infer a cadence, and a newly bought payer has
+# none of its own; three years is several cycles of any real schedule while
+# still discarding the decades yfinance returns.
+PRE_OWNERSHIP_HISTORY_YEARS = 3
+
 
 class DividendService:
     """Service for fetching and computing dividend income."""
@@ -61,8 +67,15 @@ class DividendService:
         # compute_dividend_income just writes a zero row to mark it processed. On this
         # account that was 1355 of 1446 rows, reaching back to 1985: pure noise that
         # every reader then has to filter (and one that already caused a bug when a
-        # filter was relaxed). Ingest only what could have been earned.
+        # filter was relaxed).
+        #
+        # But it cannot be cut at the purchase date either: the forecast infers a
+        # payout cadence from past ex-dates, so a security bought last month would
+        # have nothing to infer from and would be dropped from the forecast — which
+        # is exactly what happened to TSMC, Samsung and the SOXQ ETF. Keep a few
+        # years before ownership: enough to establish a schedule, not decades of it.
         first_lot = await self._first_lot_dates()
+        history_lookback = timedelta(days=365 * PRE_OWNERSHIP_HISTORY_YEARS)
 
         dividends_added = 0
         errors = 0
@@ -96,10 +109,11 @@ class DividendService:
                 # No lots at all yet (a security whose statement arrived before any
                 # purchase) → keep everything rather than guess a cutoff.
                 owned_from = first_lot.get(security.id)
+                keep_from = owned_from - history_lookback if owned_from else None
 
                 for dt_index, amount in dividends_series.items():
                     ex_date = dt_index.date() if hasattr(dt_index, 'date') else dt_index
-                    if owned_from and ex_date < owned_from:
+                    if keep_from and ex_date < keep_from:
                         pre_ownership_skipped += 1
                         continue
                     await self.repo.upsert_payment({
@@ -289,6 +303,25 @@ class DividendService:
         logger.info(f"Recorded {saved} IBKR dividend payment(s) from cash transactions")
         return {"ibkr_dividends": saved, "message": f"Recorded {saved} IBKR dividend payments"}
 
+    async def _latest_fx_to_eur(self, currencies, as_of: date) -> Dict[str, Decimal]:
+        """
+        Newest cached <currency>→EUR rate on or before ``as_of``, per currency.
+
+        Cache-only on purpose: this endpoint must never reach a provider. A future
+        payment is best sized with the latest known rate rather than the one that
+        applied when some historical dividend was paid.
+        """
+        out: Dict[str, Decimal] = {"EUR": Decimal("1")}
+        for cur in currencies:
+            if cur in out:
+                continue
+            recent = await self.currency_service._get_most_recent_rate(cur, as_of, "EUR")
+            if recent:
+                out[cur] = recent[0]
+            else:
+                logger.info(f"Dividend forecast: no cached {cur}->EUR rate, skipping its per-share amounts")
+        return out
+
     @staticmethod
     def _net_eur(p) -> Decimal:
         """
@@ -419,13 +452,16 @@ class DividendService:
         Reads only cached data — dividend_payments, taxlots, market_prices and
         exchange_rates — never Yahoo or IBKR. The history is era-spliced like the
         summary; forecasts are inferred per held security from its own payout
-        cadence and trailing amounts (see dividend_forecast.py). ``as_of`` is
+        cadence and per-share amounts (see dividend_forecast.py). ``year`` may be
+        a future one, in which case the whole year is forecast. ``as_of`` is
         injectable purely so tests can pin the forecast horizon.
         """
         as_of = as_of or date.today()
-        all_payments, ibkr_from = self._splice_by_era(await self.repo.get_computed_dividends())
-        # Zero rows (an estimate computed while no shares were held at the ex-date)
-        # are bookkeeping, not income — and they would poison the cadence inference.
+        # The forecast reads the RAW history: a zero row means "held nothing at that
+        # ex-date", which says nothing about whether the company pays — and its date
+        # is evidence of the schedule. Only the realized figures are filtered.
+        raw_payments = await self.repo.get_computed_dividends()
+        all_payments, ibkr_from = self._splice_by_era(raw_payments)
         all_payments = [p for p in all_payments if self._is_income(p)]
 
         securities = {
@@ -436,7 +472,12 @@ class DividendService:
         portfolio = PortfolioService(self.db)
         base_fx = await portfolio._load_base_fx()
 
-        years = sorted({(p.pay_date or p.ex_date).year for p in all_payments} | {as_of.year})
+        # Future years are selectable: a full year of projections is the point of
+        # having a cadence at all, and the next year is the one being planned.
+        years = sorted(
+            {(p.pay_date or p.ex_date).year for p in all_payments}
+            | {as_of.year, as_of.year + 1}
+        )
 
         win_start = date(year, 1, 1) if year is not None else None
         win_end = date(year, 12, 31) if year is not None else None
@@ -449,6 +490,7 @@ class DividendService:
                 "payouts": 0, "gross": Decimal("0"), "wht": Decimal("0"),
                 "net": Decimal("0"), "forecast_payouts": 0,
                 "forecast_net": Decimal("0"), "sources": set(),
+                "forecast_basis": None,
             }
 
         # A ticker is only a safe chart key while it means one instrument. The same
@@ -491,7 +533,9 @@ class DividendService:
             total_net += net
 
         if include_forecast:
-            horizon_start = as_of + timedelta(days=1)
+            # Never project into the past; for a future year that means the whole
+            # year, for the current one the remainder of it.
+            horizon_start = max(as_of + timedelta(days=1), win_start or date.min)
             horizon_end = win_end or date(as_of.year, 12, 31)
             if horizon_start <= horizon_end:
                 taxlots = list((await self.db.execute(select(TaxLot))).scalars().all())
@@ -509,26 +553,72 @@ class DividendService:
                         total += lot.quantity
                     return total
 
-                # Full spliced history (not window-filtered): cadence must be
-                # inferred from everything known, even when viewing one year.
+                # Built from the RAW history, not the era-spliced income: a payout
+                # from before we owned the share still evidences the schedule, and
+                # its per-share amount still sizes the next one. Keying on realized
+                # income left every recently-bought payer — TSMC, Samsung, SK Hynix,
+                # HPE, the SOXQ ETF — forecasting nothing.
+                fx_to_eur = await self._latest_fx_to_eur(
+                    {s.currency for s in securities.values() if s.currency}, as_of
+                )
                 hist_by_sec: Dict[int, List[HistPayment]] = defaultdict(list)
-                for p in all_payments:
+                basis_by_sec: Dict[int, str] = {}
+                for p in raw_payments:
                     on_date = p.pay_date or p.ex_date
-                    if on_date > as_of:
+                    if on_date is None or on_date > as_of:
                         continue
-                    shares = p.shares_held if (p.shares_held and p.shares_held > 0) \
-                        else shares_at(p.security_id, on_date)
+                    sec = securities.get(p.security_id)
+                    if sec is None:
+                        continue
+                    # Prefer a net-of-withholding per-share figure derived from what
+                    # actually landed; fall back to the gross per-share yfinance
+                    # publishes. Never mix the two inside one security — that would
+                    # average a gross figure against a net one.
+                    net_ps = None
+                    if self._is_income(p):
+                        # IBKR rows store a 0 sentinel in shares_held, so fall back
+                        # to the holding the tax lots show for that date.
+                        shares = (p.shares_held if (p.shares_held and p.shares_held > 0)
+                                  else shares_at(p.security_id, on_date))
+                        if shares > 0:
+                            net_ps = self._net_eur(p) / shares
+                    gross_ps = None
+                    if p.amount_per_share and p.amount_per_share > 0:
+                        rate = fx_to_eur.get(sec.currency or "EUR")
+                        if rate is not None:
+                            gross_ps = p.amount_per_share * rate
+                    if net_ps is not None:
+                        basis_by_sec[p.security_id] = "net"
                     hist_by_sec[p.security_id].append(HistPayment(
-                        on_date=on_date, net_eur=self._net_eur(p),
-                        shares_held=shares if shares > 0 else None,
+                        on_date=on_date, per_share_eur=(net_ps, gross_ps),
                     ))
+
+                # Collapse each security to one basis now that we know whether any
+                # realized figure exists for it.
+                for sid, entries in hist_by_sec.items():
+                    prefer_net = basis_by_sec.get(sid) == "net"
+                    hist_by_sec[sid] = [
+                        HistPayment(
+                            on_date=e.on_date,
+                            per_share_eur=(e.per_share_eur[0] if prefer_net
+                                           else e.per_share_eur[1]),
+                        )
+                        for e in entries
+                    ]
+                    if not prefer_net:
+                        basis_by_sec[sid] = "gross_estimate"
 
                 for sid, lots in lots_by_sec.items():
                     qty = shares_at(sid, as_of)
                     if qty <= 0:
                         continue
-                    for fp in project_dividends(hist_by_sec.get(sid, []), qty,
-                                                horizon_start, horizon_end):
+                    projected = project_dividends(hist_by_sec.get(sid, []), qty,
+                                                  horizon_start, horizon_end,
+                                                  as_of=as_of)
+                    if projected:
+                        by_sec.setdefault(sid, _new_row())["forecast_basis"] = \
+                            basis_by_sec.get(sid)
+                    for fp in projected:
                         if not _in_window(fp.on_date):
                             continue
                         amt = base_fx.convert(fp.net_eur, fp.on_date)
@@ -606,6 +696,10 @@ class DividendService:
                     ("mixed" if len(row["sources"]) > 1 else next(iter(row["sources"])))
                     if row["sources"] else None
                 ),
+                # 'net' when the projection is sized from dividends actually
+                # received, 'gross_estimate' when only yfinance's gross per-share
+                # exists — the latter ignores withholding and so runs a little high.
+                "forecast_basis": row["forecast_basis"],
             })
         sec_rows.sort(key=lambda r: r["net_eur"] + r["forecast_net_eur"], reverse=True)
 

@@ -298,6 +298,9 @@ class DividendSecurityRow(BaseModel):
     forecast_net_eur: float
     trailing_yield_pct: Optional[float] = None  # TTM net / current market value
     source: Optional[str] = None    # 'ibkr' | 'estimate' | 'mixed'; None = forecast-only
+    # 'net' = sized from dividends actually received; 'gross_estimate' = from
+    # yfinance's gross per-share only, so withholding isn't deducted.
+    forecast_basis: Optional[str] = None
 
 
 class DividendBreakdownResponse(BaseModel):

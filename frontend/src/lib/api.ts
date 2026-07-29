@@ -355,6 +355,8 @@ export interface DividendSecurityRow {
   forecast_net_eur: number;
   trailing_yield_pct: number | null;
   source: 'ibkr' | 'estimate' | 'mixed' | null; // null = forecast-only row
+  /** 'net' = sized from dividends received; 'gross_estimate' = withholding not deducted. */
+  forecast_basis: 'net' | 'gross_estimate' | null;
 }
 
 export interface DividendBreakdownResponse {

@@ -96,7 +96,8 @@ async def test_breakdown_groups_by_month_and_symbol_within_the_year():
             year=2026, include_forecast=False, as_of=AS_OF,
         )
         assert out["year"] == 2026
-        assert out["years"] == [2025, 2026]
+        # Next year is selectable so a full year of payouts can be planned.
+        assert out["years"] == [2025, 2026, 2027]
         assert len(out["months"]) == 12            # full axis so chart bars align
         feb = next(m for m in out["months"] if m["month"] == "2026-02")
         assert feb["actual"] == {"AAA": 5.00, "BBB": 3.00}
@@ -283,6 +284,82 @@ async def test_zero_amount_estimate_rows_are_not_income():
         )
         assert out["securities"] == []
         assert out["total_net_eur"] == 0.0
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_recently_bought_payer_is_forecast_from_its_own_history():
+    """
+    TSMC, Samsung, SK Hynix, HPE and the SOXQ ETF were all missing from the
+    forecast: bought weeks ago, so no dividend had yet been *received*, even
+    though each has years of per-share history. The schedule belongs to the
+    company, not to how long we have held it.
+    """
+    engine, session = await _make_session()
+    try:
+        bought = date(2026, 4, 20)
+        session.add(_lot(1, bought, "100"))
+        await session.flush()
+        # Quarterly per-share history, all of it from before we owned a share.
+        for d in (date(2025, 7, 15), date(2025, 10, 15),
+                  date(2026, 1, 15), date(2026, 4, 15)):
+            await DividendRepository(session).upsert_payment({
+                "security_id": 1, "ex_date": d, "pay_date": d, "currency": "EUR",
+                "amount_per_share": Decimal("0.50"), "shares_held": Decimal("0"),
+                "gross_amount_eur": Decimal("0"), "withholding_tax_eur": Decimal("0"),
+                "net_amount_eur": Decimal("0"), "source": "yfinance_estimate",
+            })
+
+        out = await DividendService(session).get_dividend_breakdown(
+            year=2026, include_forecast=True, as_of=AS_OF,
+        )
+        row = next(r for r in out["securities"] if r["symbol"] == "AAA")
+        assert row["payouts"] == 0          # nothing received yet...
+        assert row["forecast_payouts"] >= 2  # ...but the schedule is known
+        assert row["forecast_basis"] == "gross_estimate"
+        # 0.50/share x 100 shares
+        assert row["forecast_net_eur"] == pytest.approx(50.0 * row["forecast_payouts"])
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_next_year_is_forecast_in_full():
+    engine, session = await _make_session()
+    try:
+        session.add(_lot(1, date(2025, 1, 2), "10"))
+        await session.flush()
+        for d in (date(2025, 10, 15), date(2026, 1, 15), date(2026, 4, 15)):
+            await _seed_payment(session, 1, d, "10.00", "ibkr")
+
+        out = await DividendService(session).get_dividend_breakdown(
+            year=2027, include_forecast=True, as_of=AS_OF,
+        )
+        assert 2027 in out["years"]
+        assert [m["month"][:4] for m in out["months"]] == ["2027"] * 12
+        assert out["total_net_eur"] == 0.0          # nothing received in 2027 yet
+        assert out["total_forecast_net_eur"] > 0    # but the year is projected
+        assert sum(1 for m in out["months"] if m["forecast"]) >= 3
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_accumulating_etf_is_never_invented_into_the_forecast():
+    """No distributions means no rows means no projection — not a zero-filled one."""
+    engine, session = await _make_session()
+    try:
+        session.add(_lot(2, date(2025, 1, 2), "50"))
+        await session.flush()
+        out = await DividendService(session).get_dividend_breakdown(
+            year=2026, include_forecast=True, as_of=AS_OF,
+        )
+        assert all(r["symbol"] != "BBB" for r in out["securities"])
+        assert out["total_forecast_net_eur"] == 0.0
     finally:
         await session.close()
         await engine.dispose()
