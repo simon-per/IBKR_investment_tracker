@@ -5,7 +5,8 @@ Simulates "what if I bought S&P 500 / NASDAQ instead?" using actual tax lot date
 import asyncio
 import random
 import logging
-from typing import List, Dict, Optional, Tuple
+import time
+from typing import List, Dict, Optional, Set, Tuple
 from datetime import date, timedelta
 from decimal import Decimal
 from sqlalchemy import select, and_, delete
@@ -18,8 +19,83 @@ from app.models.security import Security
 from app.models.benchmark_price import BenchmarkPrice
 from app.models.exchange_rate import ExchangeRate
 from app.models.benchmark_timeline_cache import BenchmarkTimelineCache
+from app.single_flight import SYNC_PIPELINE, SyncBusy, single_flight
 
 logger = logging.getLogger(__name__)
+
+
+# GET /api/portfolio/benchmark is public, unauthenticated and lazy-fetches both
+# Yahoo and Frankfurter on a cache miss, so it needs the same protection as the
+# POST routes — but it needs *two* things, because the shared gate alone is not
+# enough here. The gate stops a fetch racing the 08:00 full_sync; it does not
+# stop a sequential loop, which re-fetches on every iteration. Trailing weekdays
+# the provider has no bar for (today before the close, a holiday at the range
+# end) stay permanently "missing" by design, so the range end is re-requested
+# forever — the same re-request-forever shape the holiday rule fixed for
+# market_prices. So each ticker and each currency also carries its own attempt
+# cooldown. Keyed per upstream target rather than globally: warming eight
+# distinct benchmarks is legitimate, re-hitting one of them is not.
+#
+# In-process, for the same reason single_flight is: one uvicorn worker.
+UPSTREAM_RETRY_COOLDOWN_SECONDS = 300
+
+_last_upstream_attempt: Dict[str, float] = {}
+
+
+def _throttled(key: str) -> bool:
+    """
+    True when ``key`` was attempted within the cooldown, meaning: don't fetch.
+
+    Records the attempt when it returns False, so the caller is free to proceed.
+    """
+    now = time.monotonic()
+    last = _last_upstream_attempt.get(key)
+    if last is not None and (now - last) < UPSTREAM_RETRY_COOLDOWN_SECONDS:
+        return True
+    _last_upstream_attempt[key] = now
+    return False
+
+
+def reset_upstream_throttle() -> None:
+    """Clear the attempt memo. For tests — the memo is process-lifetime state."""
+    _last_upstream_attempt.clear()
+
+
+def _missing_business_days(
+    start_date: date, end_date: date, cached: Set[date]
+) -> Set[date]:
+    """
+    Business days in [start, end] with no cached row, minus settled holidays.
+
+    An *interior* weekday hole (cached data either side) older than the grace
+    window is a day the market never traded: every request since has already
+    failed to fill it, and counting it as missing is what makes a cold range
+    re-hit the provider forever. Younger holes and leading/trailing gaps stay
+    missing so late data can still arrive and a purge-and-refill still heals.
+
+    Shared by the price and FX paths so the two can't drift; same rule as
+    MarketPriceRepository.get_missing_dates.
+    """
+    from app.repositories.market_price_repository import MarketPriceRepository
+
+    expected = set()
+    d = start_date
+    while d <= end_date:
+        if d.weekday() < 5:
+            expected.add(d)
+        d += timedelta(days=1)
+
+    missing = expected - cached
+    if missing and cached:
+        first_cached, last_cached = min(cached), max(cached)
+        holiday_cutoff = date.today() - timedelta(
+            days=MarketPriceRepository.HOLIDAY_GRACE_DAYS
+        )
+        missing = {
+            d for d in missing
+            if not (first_cached < d < last_cached and d < holiday_cutoff)
+        }
+    return missing
 
 
 BENCHMARKS = {
@@ -58,29 +134,17 @@ class BenchmarkService:
         )
         existing_dates = {row[0] for row in result.all()}
 
-        # Build set of expected business days
-        expected_dates = set()
-        d = start_date
-        while d <= end_date:
-            if d.weekday() < 5:
-                expected_dates.add(d)
-            d += timedelta(days=1)
-
-        missing = expected_dates - existing_dates
-        # Old interior holes are market holidays — same rule as
-        # MarketPriceRepository.get_missing_dates. Without it a cold request
-        # re-hits Yahoo forever because July 4th can never be filled.
-        if missing and existing_dates:
-            from app.repositories.market_price_repository import MarketPriceRepository
-            first_cached, last_cached = min(existing_dates), max(existing_dates)
-            holiday_cutoff = date.today() - timedelta(
-                days=MarketPriceRepository.HOLIDAY_GRACE_DAYS
-            )
-            missing = {
-                d for d in missing
-                if not (first_cached < d < last_cached and d < holiday_cutoff)
-            }
+        missing = _missing_business_days(start_date, end_date, existing_dates)
         if not missing:
+            return 0
+
+        # Cheap refusals before the expensive one: a ticker fetched moments ago
+        # serves cache, and a fetch never runs beside another pipeline.
+        if _throttled(f"price:{ticker}"):
+            logger.info(
+                f"Benchmark {ticker}: {len(missing)} dates missing but last attempted "
+                f"under {UPSTREAM_RETRY_COOLDOWN_SECONDS}s ago; serving cache"
+            )
             return 0
 
         # Fetch from Yahoo Finance (entire range; yfinance returns only trading days)
@@ -88,16 +152,32 @@ class BenchmarkService:
         fetch_start = min(missing) - timedelta(days=5)  # small buffer
         fetch_end = max(missing) + timedelta(days=1)
 
-        await asyncio.sleep(random.uniform(1.0, 2.0))  # rate-limit
+        try:
+            # The gate wraps the network call only, so a full cache hit costs the
+            # other routes nothing: entering it bumps the shared last-start clock
+            # that their cooldowns read, and a public GET should only do that when
+            # it genuinely went upstream.
+            with single_flight(SYNC_PIPELINE):
+                await asyncio.sleep(random.uniform(1.0, 2.0))  # rate-limit
+
+                # In a thread like every other yfinance call site — this is reachable
+                # from a public GET on any cache miss and would block the event loop.
+                def _fetch(t=ticker, s=fetch_start.isoformat(), e=fetch_end.isoformat()):
+                    return yf.Ticker(t).history(start=s, end=e, auto_adjust=True)
+
+                hist = await asyncio.to_thread(_fetch)
+        except SyncBusy as e:
+            logger.info(f"Benchmark {ticker}: pipeline busy ({e}); serving cached prices")
+            return 0
+        except Exception as e:
+            logger.error(f"Failed to fetch benchmark {ticker}: {e}")
+            try:
+                await self.db.rollback()
+            except Exception:
+                pass
+            return 0
 
         try:
-            # In a thread like every other yfinance call site — this is reachable
-            # from a public GET on any cache miss and would block the event loop.
-            def _fetch(t=ticker, s=fetch_start.isoformat(), e=fetch_end.isoformat()):
-                return yf.Ticker(t).history(start=s, end=e, auto_adjust=True)
-
-            hist = await asyncio.to_thread(_fetch)
-
             if hist.empty:
                 logger.warning(f"No data returned from Yahoo for {ticker}")
                 return 0
@@ -123,7 +203,7 @@ class BenchmarkService:
             return new_count
 
         except Exception as e:
-            logger.error(f"Failed to fetch benchmark {ticker}: {e}")
+            logger.error(f"Failed to persist benchmark {ticker} prices: {e}")
             try:
                 await self.db.rollback()
             except Exception:
@@ -276,30 +356,76 @@ class BenchmarkService:
 
         from app.services.currency_service import CurrencyService
 
-        currency_service = CurrencyService(self.db)
         # Tile the range in 30-day chunks. Each fetch covers [target-30, target]:
         # the first target IS start_date (covering the carry-forward lookback
         # buffer), the last is pinned to end_date — the old `while current <=
         # end` stepping left up to 29 days uncovered at the tail, so the most
         # recent chart points dropped and were recomputed on every call.
+        targets: List[date] = []
         target = start_date
         while True:
-            try:
-                await currency_service._batch_fetch_rates(
-                    from_currency=currency,
-                    target_date=target,
-                    to_currency="EUR",
-                    days_back=30,
-                )
-            except Exception as e:
-                logger.error(f"Failed to fetch FX rates {currency}→EUR for {target}: {e}")
-                try:
-                    await self.db.rollback()
-                except Exception:
-                    pass
+            targets.append(target)
             if target >= end_date:
                 break
             target = min(target + timedelta(days=30), end_date)
+
+        # _batch_fetch_rates issues its request unconditionally — it dedups per
+        # row, after the response — so tiling a five-year span cost ~60 provider
+        # requests on *every* chart load, a warm cache included. Ask what is
+        # actually missing first and fetch only the tiles that cover it.
+        cached = await self._cached_fx_dates(currency, start_date, end_date)
+        missing = _missing_business_days(start_date, end_date, cached)
+        if not missing:
+            return
+        targets = [
+            t for t in targets
+            if any(max(t - timedelta(days=30), start_date) <= m <= t for m in missing)
+        ]
+        if not targets:
+            return
+
+        if _throttled(f"fx:{currency}"):
+            logger.info(
+                f"FX {currency}→EUR: {len(missing)} dates missing but last attempted "
+                f"under {UPSTREAM_RETRY_COOLDOWN_SECONDS}s ago; serving cache"
+            )
+            return
+
+        currency_service = CurrencyService(self.db)
+        try:
+            with single_flight(SYNC_PIPELINE):
+                for target in targets:
+                    try:
+                        await currency_service._batch_fetch_rates(
+                            from_currency=currency,
+                            target_date=target,
+                            to_currency="EUR",
+                            days_back=30,
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to fetch FX rates {currency}→EUR for {target}: {e}")
+                        try:
+                            await self.db.rollback()
+                        except Exception:
+                            pass
+        except SyncBusy as e:
+            logger.info(f"FX {currency}→EUR: pipeline busy ({e}); serving cached rates")
+
+    async def _cached_fx_dates(
+        self, currency: str, start_date: date, end_date: date
+    ) -> Set[date]:
+        """Dates in [start, end] that already hold a currency→EUR rate."""
+        result = await self.db.execute(
+            select(ExchangeRate.date).where(
+                and_(
+                    ExchangeRate.from_currency == currency,
+                    ExchangeRate.to_currency == "EUR",
+                    ExchangeRate.date >= start_date,
+                    ExchangeRate.date <= end_date,
+                )
+            )
+        )
+        return {row[0] for row in result.all()}
 
     async def calculate_benchmark_value_over_time(
         self,

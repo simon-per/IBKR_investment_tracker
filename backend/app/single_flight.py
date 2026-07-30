@@ -45,6 +45,26 @@ def is_running(name: str) -> bool:
     return name in _running
 
 
+def cooldown_remaining(name: str, cooldown_seconds: int) -> int:
+    """
+    Seconds until ``name`` may be entered again, or 0 if it may be entered now.
+
+    Tests the cooldown without acquiring. A BackgroundTasks route answers before
+    its work starts, so the gate it holds is in the background function — the
+    handler needs to know it would be refused in order to say so, rather than
+    replying "started" to a run the background half then drops on the floor.
+    """
+    if not cooldown_seconds:
+        return 0
+    last = _last_start.get(name)
+    if last is None:
+        return 0
+    elapsed = time.monotonic() - last
+    if elapsed >= cooldown_seconds:
+        return 0
+    return int(cooldown_seconds - elapsed) + 1
+
+
 @contextmanager
 def single_flight(name: str, cooldown_seconds: int = 0):
     """

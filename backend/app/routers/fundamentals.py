@@ -5,11 +5,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal, get_db
 from app.services.fundamentals_service import FundamentalsService
-from app.single_flight import SYNC_PIPELINE, SyncBusy, is_running, single_flight
+from app.single_flight import (
+    SYNC_PIPELINE,
+    SyncBusy,
+    cooldown_remaining,
+    is_running,
+    single_flight,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# A full pass is ~5 Yahoo calls per security across the whole portfolio, so a
+# poller that waits for each pass to finish before starting the next runs them
+# back to back indefinitely — is_running() only fences *overlapping* runs. Same
+# 300s as /sync-stale and the other bulk Yahoo routes.
+SYNC_COOLDOWN_SECONDS = 300
 
 
 async def _run_sync_background(force_refresh: bool) -> None:
@@ -17,15 +29,15 @@ async def _run_sync_background(force_refresh: bool) -> None:
     try:
         # The handler already answered, so the gate lives here, spanning the
         # actual Yahoo work rather than the enqueue.
-        with single_flight(SYNC_PIPELINE):
+        with single_flight(SYNC_PIPELINE, cooldown_seconds=SYNC_COOLDOWN_SECONDS):
             async with AsyncSessionLocal() as db:
                 try:
                     service = FundamentalsService(db)
                     await service.sync_fundamentals_data(force_refresh=force_refresh)
                 except Exception as e:
                     logger.error(f"Background fundamentals sync failed: {e}")
-    except SyncBusy:
-        logger.info("Fundamentals sync already running; duplicate trigger dropped")
+    except SyncBusy as e:
+        logger.info(f"Fundamentals sync not started: {e}")
 
 
 @router.post("/sync")
@@ -36,6 +48,15 @@ async def sync_fundamentals(
     """Kick off a fundamentals sync in the background and return immediately."""
     if is_running(SYNC_PIPELINE):
         return {"status": "already_running", "message": "Fundamentals sync is already in progress"}
+    # The gate below is what actually enforces this; checking it here too is so
+    # the answer is honest rather than "started" for a run that gets dropped.
+    retry_after = cooldown_remaining(SYNC_PIPELINE, SYNC_COOLDOWN_SECONDS)
+    if retry_after:
+        raise HTTPException(
+            status_code=429,
+            detail=f"A sync started moments ago; retry in ~{retry_after}s",
+            headers={"Retry-After": str(retry_after)},
+        )
     background_tasks.add_task(_run_sync_background, force_refresh)
     return {
         "status": "started",

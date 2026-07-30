@@ -5,7 +5,12 @@ Code=1025 lockout mechanism, and /api/ is public and unauthenticated.
 """
 import pytest
 
-from app.single_flight import SYNC_PIPELINE, SyncBusy, single_flight
+from app.single_flight import (
+    SYNC_PIPELINE,
+    SyncBusy,
+    cooldown_remaining,
+    single_flight,
+)
 
 
 def test_the_gate_rejects_a_concurrent_entry_then_releases():
@@ -194,3 +199,54 @@ async def test_rapid_fire_watchlist_adds_get_one_fetch_not_n(monkeypatch):
     finally:
         await session.close()
         await engine.dispose()
+
+
+# ── POST /api/fundamentals/sync ────────────────────────────────────────
+#
+# is_running() fences only *overlapping* runs, so a poller that waits for each
+# pass to end before starting the next ran them back to back forever — ~5 Yahoo
+# calls per security per pass across the whole portfolio. Its sibling
+# /sync-stale always carried the 300s; this one never did.
+
+
+def test_cooldown_remaining_reports_zero_until_the_gate_is_entered():
+    import app.single_flight as sf
+
+    sf._last_start.pop("t-remaining", None)
+    assert cooldown_remaining("t-remaining", 300) == 0
+    with single_flight("t-remaining"):
+        pass
+    remaining = cooldown_remaining("t-remaining", 300)
+    assert 0 < remaining <= 301
+    assert cooldown_remaining("t-remaining", 0) == 0  # no cooldown, no wait
+
+
+@pytest.mark.asyncio
+async def test_rapid_fire_fundamentals_syncs_get_one_pass_not_n(monkeypatch):
+    from fastapi import BackgroundTasks, HTTPException
+    from app.routers import fundamentals as fnd
+
+    _reset_gate(monkeypatch)
+
+    first = await fnd.sync_fundamentals(BackgroundTasks(), force_refresh=True)
+    assert first["status"] == "started"
+
+    # Entering the gate is what stamps the cooldown clock, so run the queued work.
+    passes = []
+
+    async def _record(self, force_refresh=False):
+        passes.append(force_refresh)
+
+    monkeypatch.setattr(fnd.FundamentalsService, "sync_fundamentals_data", _record)
+    await fnd._run_sync_background(True)
+    assert passes == [True]
+
+    with pytest.raises(HTTPException) as exc:
+        await fnd.sync_fundamentals(BackgroundTasks(), force_refresh=True)
+    assert exc.value.status_code == 429
+    assert int(exc.value.headers["Retry-After"]) > 0
+
+    # And the background half refuses too, so the gate — not the handler — is
+    # what actually enforces it.
+    await fnd._run_sync_background(True)
+    assert passes == [True], "a second pass ran inside the cooldown"
