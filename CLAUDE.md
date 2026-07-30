@@ -8,7 +8,8 @@ it has been both CHF and EUR, and every money figure moves with it.
 
 **Live:** https://portfolio.srv1211053.hstgr.cloud · **Repo is PUBLIC** (never commit account data)
 
-**Read [STATUS.md](STATUS.md) too, and update it when you finish a session.** This file is the
+**Read [STATUS.md](STATUS.md) too, and leave it accurate before you stop — see
+[Keeping STATUS.md current](#keeping-statusmd-current), which is not optional.** This file is the
 durable half — architecture and the invariants that were each a bug first. STATUS.md is the
 perishable half: what is in flight, what is known-broken, what needs a human, and the local-dev
 traps that keep costing time.
@@ -85,6 +86,33 @@ re-initiating is unavoidable.
 `1003` not available (terminal), `1018` rate limit (1/sec, 10/min per token), `1019`/`1021` transient,
 `1025` **undocumented** token lockout from repeated failures (fatal, never retry), `1012` token expired,
 `1013` IP restriction, `1015` bad token. The official table stops at 1021 — 1025 appears nowhere in it.
+
+---
+
+## Keeping STATUS.md current
+
+STATUS.md answers "where does this actually stand?", and it is only worth reading if it is true.
+**Updating it is part of the work, not a courtesy afterwards.** The previous wording — "update it when
+you finish a session" — named no trigger a session could recognise, so it got skipped.
+
+**Leave it accurate before you stop, on any turn where your work changed what it should say:**
+
+- code, config or a migration changed — and *Worth doing next* should lose whatever you just finished
+- you shipped, reverted, or left something that needs watching after the next deploy
+- you found something known-broken or flaky, or something only a human can do (rotate a token, change
+  a Flex Query period, click through the IBKR portal)
+- a *Known rough edge* stopped being true, or a new accepted-not-a-bug appeared
+- you lost time to a *local-dev trap* that isn't in the list yet
+
+A turn that only answers a question and finds nothing new needs no edit — but **discovering something
+is a change of status even when no code moved**, so an audit that turns up real defects belongs in the
+file whether or not they get fixed the same day.
+
+**It is a snapshot, not a log.** Bump `Last updated`, add what became true, and **delete what stopped
+being true** instead of stacking corrections. `Recent sessions` is the one append-only part, capped at
+five one-liners — drop the oldest rather than letting it grow. And never accumulate **figures** (public
+repo, user-switchable base currency, and a pasted total goes stale silently) or **what git already
+records** — the log has what changed; STATUS.md has what is now true and what it costs the next person.
 
 ---
 

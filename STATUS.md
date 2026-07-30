@@ -4,11 +4,13 @@
 
 `CLAUDE.md` is the durable guide — architecture, invariants, and the rules that were each a bug
 first. **This file is the perishable half**: where the work actually stands, what is known-broken,
-and what is worth doing next. Read both at the start of a session; update this one at the end.
+and what is worth doing next. Read both before you start; **leave this one accurate before you stop**
+— CLAUDE.md's *Keeping STATUS.md current* says exactly when and what.
 
 Rules for keeping it useful: **delete entries once they stop being true** rather than accumulating
 history, and **describe figures rather than publishing them** (the repo is public, the base currency
 is user-switchable, and a pasted total goes stale silently — check the API or the DB instead).
+*Recent sessions* at the bottom is the single exception to the first rule, and it is capped at five.
 
 ---
 
@@ -131,3 +133,23 @@ Each of these cost real time at least once.
   figure moves with it, so never compare a number across sessions without checking it.
 - **Don't push within ~10 minutes of a Berlin sync slot** (08/13/15/20/22:00). Auto-deploy rebuilds
   in ~90 s with APScheduler in-process, so an overlapping deploy silently loses that sync.
+
+## Recent sessions (last 5)
+
+One line each, newest first. **Drop the oldest rather than growing this list** — `git log` holds the
+detail; this exists so the next session knows what just moved without reading it. Distinct from
+*Just landed* above, which is actionable (what to eyeball on prod) and gets deleted once verified:
+these lines are permanent, so don't "tidy up" the overlap by deleting the wrong one.
+
+- **2026-07-30** — five audit fixes: Yahoo gating on the benchmark GET + fundamentals sync,
+  `openDateTime` read off ibflex instead of an XML position index, a real SELL outranking the
+  cost-conserved heuristic, tax-report honesty flags, the dividend card relabelled net. Suite 313 → 331.
+- **2026-07-29** — correctness sweep (16 fixes) plus dividend growth (MoM/YoY) and the DividendsTab
+  rebuild; scheduler gated behind `SCHEDULER_ENABLED`; STATUS.md split out of CLAUDE.md.
+- **2026-07-28** — external cash ledger live on prod (deposits ingested, transfers excluded) and the
+  money-in splice; Dividends tab + breakdown endpoint; Flex token redacted from stored and served errors.
+- **2026-07-27** — SBI mapping repair: reject a Yahoo ticker quoting a different currency than the
+  security, second FX provider fallback for currencies the ECB set lacks, `manage_mappings` CLI for
+  the last table still edited by hand.
+- **2026-07-26** — third Flex token lockout, self-inflicted: stop re-requesting after `Code=1001` and
+  poll the same reference instead; offline XML ingest added as the escape hatch.
