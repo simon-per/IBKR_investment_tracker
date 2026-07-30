@@ -78,7 +78,7 @@ as described — see *Worth doing next* for the two fixes that would stop it.
 
 ## Worth doing next
 
-Rough priority. None of these are started.
+Rough priority. Item 8 is written but not installed; the rest are not started.
 
 1. **Growth chips for portfolio value and contributions**, in the same visual language as the
    Dividends tab (`DeltaChip`, `lib/delta.ts`). Explicitly deferred when the dividends work was
@@ -114,11 +114,17 @@ Rough priority. None of these are started.
 7. **A horizontal-scroll affordance on the wide tables.** The dividends position table has ten
    columns and scrolls inside its own container at narrow widths, with nothing hinting that it can.
    Scope is wider than it looks: `WatchlistTab` is 18 columns.
-8. **Give auto-deploy a sync-slot guard, and put the script in the repo.** `/root/auto-deploy.sh`
-   deploys on any `*/10` tick where origin/main is ahead, with no awareness of the schedule — that is
-   what cost today's `full_sync`. Skip when within ~10 min of a Berlin slot and let the next tick take
-   it; a deploy is never urgent, a lost 08:00 costs a day of price history. The script also lives
-   **only on the VPS**, unversioned and unreviewed, despite governing every deploy.
+8. **Install the guarded auto-deploy script — WRITTEN, NOT INSTALLED.** `ops/auto-deploy.sh` is now
+   in the repo (it previously existed only as `/root/auto-deploy.sh`, unversioned and unreviewed
+   despite governing every deploy) and adds the sync-slot guard: it refuses to deploy within 10
+   minutes either side of a Berlin slot and defers to the next tick, which is what would have saved
+   today's `full_sync`. The boundary logic is tested across all five slots, the quiet hours and the
+   midnight wrap. **The VPS still runs the old copy** — installing it changes deploy behaviour, so it
+   needs a deliberate step:
+
+       scp ops/auto-deploy.sh root@<host>:/tmp/ && ssh root@<host>          'install -m 755 /tmp/auto-deploy.sh /root/auto-deploy.sh'
+
+   Verify afterwards by watching `/root/auto-deploy.log` for a `SKIP: within 10min` line near a slot.
 9. **Persist the scheduler's job store.** The real fix behind the above: APScheduler runs in-process
    with an in-memory store, so any restart drops whatever slot it overlapped. A `SQLAlchemyJobStore`
    with `coalesce=True` and a `misfire_grace_time` would run the missed job on startup instead of
