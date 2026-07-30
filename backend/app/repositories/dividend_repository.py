@@ -66,10 +66,17 @@ class DividendRepository:
         return result.scalar_one_or_none()
 
     async def upsert_payment(self, data: dict) -> DividendPayment:
+        # Scoped by source, matching uix_dividend_security_source_exdate. Without
+        # it a yfinance ex-date landing on an IBKR pay date resolved to the *other*
+        # source's row and overwrote it — see the constraint's comment. Both
+        # callers already pass a source; default defensively rather than matching
+        # every source at once, which would reintroduce the collision.
+        source = data.get('source') or YFINANCE_SOURCE
         result = await self.session.execute(
             select(DividendPayment).where(
                 and_(
                     DividendPayment.security_id == data['security_id'],
+                    DividendPayment.source == source,
                     DividendPayment.ex_date == data['ex_date'],
                 )
             )

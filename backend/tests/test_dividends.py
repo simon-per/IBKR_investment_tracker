@@ -15,6 +15,7 @@ from app.models.security import Security
 from app.models.taxlot import TaxLot
 from app.models.dividend_payment import DividendPayment
 from app.models.app_settings import AppSetting
+from app.repositories.dividend_repository import DividendRepository
 from app.services.dividend_service import DividendService
 
 
@@ -208,6 +209,73 @@ async def test_an_estimate_only_history_reports_yfinance_estimate():
         assert summary["source"] == "yfinance_estimate"
         assert summary["ibkr_from"] is None
         assert summary["total_withholding_eur"] == 0.0
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+# ── The two sources no longer collide on one unique key ──────────────────
+#
+# `ex_date` means a real ex-date for yfinance rows and the *pay* date for IBKR
+# ones. Under the old (security_id, ex_date) key those shared one slot, so a
+# payer whose ex-to-pay lag landed on another record's date had the two rows
+# overwrite each other — relabelling real withholding as an estimate, or nulling
+# amount_per_share and dropping the security below the two-sample threshold the
+# forecast needs. Mastercard's 29-day lag already exceeds a monthly cycle.
+
+
+@pytest.mark.asyncio
+async def test_an_ibkr_pay_date_and_a_yfinance_ex_date_can_share_a_day():
+    engine, session = await _make_session()
+    try:
+        repo = DividendRepository(session)
+        collision = date(2026, 5, 2)
+
+        await repo.upsert_payment({
+            "security_id": 1, "ex_date": collision, "source": "yfinance_estimate",
+            "amount_per_share": Decimal("0.5"), "currency": "EUR",
+            "shares_held": Decimal("10"), "gross_amount_eur": Decimal("5"),
+        })
+        await repo.upsert_payment({
+            "security_id": 1, "ex_date": collision, "pay_date": collision,
+            "source": "ibkr", "currency": "EUR", "shares_held": Decimal("0"),
+            "gross_amount_eur": Decimal("7"), "withholding_tax_eur": Decimal("1"),
+            "net_amount_eur": Decimal("6"),
+        })
+        await session.commit()
+
+        rows = sorted(
+            (r.source, r.gross_amount_eur, r.amount_per_share)
+            for r in await repo.get_by_security(1)
+        )
+        assert len(rows) == 2, "the two sources must coexist, not overwrite"
+        assert rows[0] == ("ibkr", Decimal("7"), None)
+        # The estimate keeps its per-share figure, which the forecast's cadence needs.
+        assert rows[1][0] == "yfinance_estimate"
+        assert rows[1][2] == Decimal("0.5")
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_upsert_still_updates_its_own_source_in_place():
+    """Source-scoping must not turn every re-sync into a duplicate row."""
+    engine, session = await _make_session()
+    try:
+        repo = DividendRepository(session)
+        for gross in (Decimal("5"), Decimal("6")):
+            await repo.upsert_payment({
+                "security_id": 1, "ex_date": date(2026, 5, 2),
+                "source": "yfinance_estimate", "amount_per_share": Decimal("0.5"),
+                "currency": "EUR", "shares_held": Decimal("10"),
+                "gross_amount_eur": gross,
+            })
+        await session.commit()
+
+        rows = await repo.get_by_security(1)
+        assert len(rows) == 1
+        assert rows[0].gross_amount_eur == Decimal("6")
     finally:
         await session.close()
         await engine.dispose()

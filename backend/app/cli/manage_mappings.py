@@ -35,9 +35,11 @@ from typing import Optional, Tuple
 from sqlalchemy import func, select
 
 from app.database import AsyncSessionLocal
+from app.models.dividend_payment import DividendPayment
 from app.models.market_price import MarketPrice
 from app.models.security import Security
 from app.models.ticker_mapping import TickerMapping
+from app.repositories.dividend_repository import DividendRepository
 from app.repositories.market_price_repository import MarketPriceRepository
 from app.repositories.sync_run_repository import SyncRunRepository
 from app.repositories.ticker_mapping_repository import TickerMappingRepository
@@ -87,16 +89,26 @@ async def cmd_list(db) -> int:
         .group_by(MarketPrice.security_id)
     )).all())
 
+    # Newest estimate row per security. A dividend row older than the mapping's
+    # own updated_at was fetched under a *different* ticker — the SBI shape — so
+    # showing the two side by side puts that where the mapping is read.
+    newest_estimate = dict((await db.execute(
+        select(DividendPayment.security_id, func.max(DividendPayment.last_computed))
+        .where(DividendPayment.source == "yfinance_estimate")
+        .group_by(DividendPayment.security_id)
+    )).all())
+
     # sec/tkr side by side is the point: they must agree, or the mapping is pointing at
     # a different instrument than the security it claims to price.
     header = (
         f"{'id':>3}  {'IBKR':<18} {'Yahoo':<12} {'source':<8} "
-        f"{'secCcy':<7} {'tkrCcy':<7} {'prices':>7}  active"
+        f"{'secCcy':<7} {'tkrCcy':<7} {'prices':>7} {'divAge':>7}  active"
     )
     print(header)
     print("-" * len(header))
 
     disagreements = []
+    predating = []
     for m in mappings:
         security = await _find_security(db, m.ibkr_symbol, m.ibkr_exchange)
         sec_ccy = (security.currency if security else None) or "-"
@@ -108,11 +120,32 @@ async def cmd_list(db) -> int:
             flag = "  <-- CURRENCY DISAGREEMENT"
             disagreements.append((m, sec_ccy, tkr_ccy))
 
+        div_age = "-"
+        newest = newest_estimate.get(security.id) if security else None
+        if newest is not None:
+            div_age = f"{(datetime.now() - newest).days}d"
+            if m.updated_at and newest < m.updated_at:
+                flag += "  <-- DIVIDENDS PREDATE MAPPING"
+                predating.append((m, newest))
+
         print(
             f"{m.id:>3}  {m.ibkr_symbol + '@' + m.ibkr_exchange:<18} {m.yahoo_ticker:<12} "
-            f"{(m.source or ''):<8} {sec_ccy:<7} {tkr_ccy:<7} {n:>7}  "
+            f"{(m.source or ''):<8} {sec_ccy:<7} {tkr_ccy:<7} {n:>7} {div_age:>7}  "
             f"{'yes' if m.is_active else 'NO'}{flag}"
         )
+
+    if predating:
+        print(
+            f"\n{len(predating)} mapping(s) have dividend estimates older than the "
+            f"mapping itself — those rows came from a different ticker and still drive "
+            f"the forecast's cadence:"
+        )
+        for m, newest in predating:
+            print(
+                f"  {m.ibkr_symbol}@{m.ibkr_exchange}: newest estimate {newest:%Y-%m-%d}, "
+                f"mapping updated {m.updated_at:%Y-%m-%d}. Clear with "
+                f"`purge_dividend_estimates {m.ibkr_symbol} {m.ibkr_exchange}`"
+            )
 
     if disagreements:
         print(
@@ -168,6 +201,23 @@ async def cmd_set(
     existing = await service.ticker_mapping_repo.get_mapping(symbol, exchange)
     before = existing.yahoo_ticker if existing else None
 
+    # Changing the ticker retires whatever the old one produced. Prices are
+    # obvious; dividend estimates are not, and they outlive the mapping silently —
+    # that is the SBI failure exactly. Name them here, at the moment they become
+    # suspect, because nothing downstream will.
+    stale_estimates = 0
+    if security and before and before != yahoo_ticker:
+        stale_estimates = len(
+            await DividendRepository(db).get_estimates_for_security(security.id)
+        )
+        if stale_estimates:
+            print(
+                f"WARNING: {stale_estimates} yfinance dividend estimate(s) for "
+                f"{symbol}@{exchange} were fetched under {before} and are now suspect. "
+                f"They still drive the forecast's cadence. Clear them with "
+                f"`python -m app.cli.purge_dividend_estimates {symbol} {exchange}`."
+            )
+
     if dry_run:
         print(
             f"DRY RUN - would {'update' if existing else 'create'} "
@@ -201,6 +251,7 @@ async def cmd_disable(
 
     security = await _find_security(db, symbol, exchange)
     price_count = 0
+    estimate_count = 0
     if purge_prices:
         if not security:
             raise MappingError(
@@ -208,11 +259,19 @@ async def cmd_disable(
                 f"{symbol}@{exchange}"
             )
         price_count = await MarketPriceRepository(db).count_by_security(security.id)
+        # Dividend estimates are derived from the SAME Yahoo ticker, so a mapping
+        # that produced wrong prices produced wrong dividends too. Purging only
+        # prices is what left SBI's two poisoned rows behind to define a gold
+        # miner's payout schedule for a month after the mapping was corrected.
+        estimate_count = len(
+            await DividendRepository(db).get_estimates_for_security(security.id)
+        )
 
     if dry_run:
         print(
             f"DRY RUN - would disable {symbol}@{exchange} -> {mapping.yahoo_ticker}"
-            + (f" and delete {price_count} cached price(s)" if purge_prices else "")
+            + (f" and delete {price_count} cached price(s) and {estimate_count} "
+               f"dividend estimate(s)" if purge_prices else "")
         )
         return 0, {}
 
@@ -222,19 +281,26 @@ async def cmd_disable(
     await db.flush()
 
     deleted = 0
+    dividends_deleted = 0
     if purge_prices:
         deleted = await MarketPriceRepository(db).delete_all_for_security(security.id)
+        dividends_deleted = await DividendRepository(db).delete_estimates_for_security(
+            security.id
+        )
     await db.commit()
 
     print(f"Disabled {symbol}@{exchange} -> {mapping.yahoo_ticker}")
     if purge_prices:
         print(
-            f"Deleted {deleted} cached price(s) for security {security.id}. A scheduled "
-            f"market-data job will refill them — do not fetch by hand (see CLAUDE.md rule 1)."
+            f"Deleted {deleted} cached price(s) and {dividends_deleted} dividend "
+            f"estimate(s) for security {security.id}. IBKR dividend rows are kept — "
+            f"they carry real withholding and no mapping can invalidate them. A "
+            f"scheduled job will refill both — do not fetch by hand (CLAUDE.md rule 1)."
         )
     return 0, {
         "action": "disable", "symbol": symbol, "exchange": exchange,
         "yahoo_ticker": mapping.yahoo_ticker, "prices_deleted": deleted,
+        "dividend_estimates_deleted": dividends_deleted,
     }
 
 

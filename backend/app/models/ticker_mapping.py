@@ -3,7 +3,8 @@ Ticker Mapping Model
 Maps IBKR securities to Yahoo Finance ticker symbols.
 Useful for German ETFs and stocks that have different tickers on Yahoo Finance.
 """
-from sqlalchemy import Column, Integer, String, Boolean, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, UniqueConstraint
+from sqlalchemy.sql import func
 from app.database import Base
 
 
@@ -32,6 +33,16 @@ class TickerMapping(Base):
     source = Column(String(50), default="manual")  # "manual", "auto", "builtin"
     is_active = Column(Boolean, default=True)
     notes = Column(String(200), nullable=True)
+
+    # When this row was set, and when its ticker last changed. Without these,
+    # "did this cached price or dividend come from the mapping in force today?"
+    # is unanswerable — which is why a wrong SBI mapping poisoned derived data
+    # for months unnoticed. `updated_at` is what the dividend-provenance check
+    # compares each estimate row's last_computed against, so it must be touched
+    # on every edit, not just on insert.
+    created_at = Column(DateTime, server_default=func.now(), nullable=True)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(),
+                        nullable=True)
 
     # Unique constraint: one mapping per IBKR symbol+exchange
     __table_args__ = (

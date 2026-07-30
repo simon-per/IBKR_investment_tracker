@@ -286,3 +286,136 @@ async def test_list_reports_a_clean_table_and_the_price_counts(db, capsys):
 async def test_list_is_fine_with_an_empty_table(db, capsys):
     assert await cli.run(args("list")) == 0
     assert "No ticker mappings." in capsys.readouterr().out
+
+
+# --- a mapping change retires the dividend rows it produced ---------------------------
+#
+# The SBI recovery purged prices and refetched them, but nothing invalidated the
+# dividend estimates fetched under the wrong ticker. They survived, and because
+# _forecast_inputs() lets whichever series carries amount_per_share define the
+# cadence, those rows went on projecting a schedule the company does not have.
+
+
+def _estimate(security_id, ex_date, computed):
+    from app.models.dividend_payment import DividendPayment
+    return DividendPayment(
+        security_id=security_id, ex_date=ex_date, source="yfinance_estimate",
+        amount_per_share=Decimal("0.042"), currency="CAD",
+        shares_held=Decimal("50"), gross_amount_eur=Decimal("1.30"),
+        last_computed=computed,
+    )
+
+
+def _ibkr_row(security_id, on_date):
+    from app.models.dividend_payment import DividendPayment
+    return DividendPayment(
+        security_id=security_id, ex_date=on_date, pay_date=on_date, source="ibkr",
+        amount_per_share=None, currency="CAD", shares_held=Decimal("0"),
+        gross_amount_eur=Decimal("2.91"), withholding_tax_eur=Decimal("0"),
+        net_amount_eur=Decimal("2.91"),
+    )
+
+
+async def _dividends(db, security_id):
+    from app.models.dividend_payment import DividendPayment
+    rows = (await db.execute(
+        select(DividendPayment).where(DividendPayment.security_id == security_id)
+    )).scalars().all()
+    return sorted((r.ex_date, r.source) for r in rows)
+
+
+@pytest.mark.asyncio
+async def test_purge_clears_dividend_estimates_but_keeps_ibkr_rows(db):
+    from datetime import datetime
+    db.add_all([
+        _estimate(1, date(2026, 6, 23), datetime(2026, 6, 24)),
+        _estimate(1, date(2026, 7, 24), datetime(2026, 7, 25)),
+        _ibkr_row(1, date(2026, 7, 10)),
+    ])
+    await TickerMappingRepository(db).upsert_mapping(
+        ibkr_symbol="SBI", ibkr_exchange="TSE", yahoo_ticker="SBI", source="auto",
+    )
+    await db.commit()
+
+    rc = await cli.run(args("disable", "SBI", "TSE", "--purge-prices"))
+
+    assert rc == 0
+    assert await _prices(db, 1) == []
+    # The estimates go; the authoritative IBKR payment stays.
+    assert await _dividends(db, 1) == [(date(2026, 7, 10), "ibkr")]
+
+    run = (await _runs(db))[-1]
+    assert run.details["dividend_estimates_deleted"] == 2
+    assert run.details["prices_deleted"] == 2
+
+
+@pytest.mark.asyncio
+async def test_dry_run_purge_reports_dividends_and_deletes_nothing(db, capsys):
+    from datetime import datetime
+    db.add_all([_estimate(1, date(2026, 6, 23), datetime(2026, 6, 24))])
+    await TickerMappingRepository(db).upsert_mapping(
+        ibkr_symbol="SBI", ibkr_exchange="TSE", yahoo_ticker="SBI", source="auto",
+    )
+    await db.commit()
+
+    assert await cli.run(args("disable", "SBI", "TSE", "--purge-prices", "--dry-run")) == 0
+
+    out = capsys.readouterr().out
+    assert "1 dividend estimate(s)" in out
+    assert len(await _prices(db, 1)) == 2
+    assert len(await _dividends(db, 1)) == 1
+
+
+@pytest.mark.asyncio
+async def test_changing_a_ticker_warns_that_its_estimates_are_now_suspect(db, capsys):
+    from datetime import datetime
+    db.add_all([
+        _estimate(1, date(2026, 6, 23), datetime(2026, 6, 24)),
+        _estimate(1, date(2026, 7, 24), datetime(2026, 7, 25)),
+    ])
+    await TickerMappingRepository(db).upsert_mapping(
+        ibkr_symbol="SBI", ibkr_exchange="TSE", yahoo_ticker="SBI", source="auto",
+    )
+    await db.commit()
+
+    # Correcting the bare ticker to the Toronto listing is exactly when those
+    # rows stopped being trustworthy.
+    assert await cli.run(args("set", "SBI", "TSE", "SBI.TO")) == 0
+
+    out = capsys.readouterr().out
+    assert "2 yfinance dividend estimate(s)" in out
+    assert "are now suspect" in out
+    assert "purge_dividend_estimates SBI TSE" in out
+
+
+@pytest.mark.asyncio
+async def test_setting_an_unchanged_ticker_does_not_cry_wolf(db, capsys):
+    from datetime import datetime
+    db.add_all([_estimate(1, date(2026, 6, 23), datetime(2026, 6, 24))])
+    await TickerMappingRepository(db).upsert_mapping(
+        ibkr_symbol="SBI", ibkr_exchange="TSE", yahoo_ticker="SBI.TO", source="manual",
+    )
+    await db.commit()
+
+    assert await cli.run(args("set", "SBI", "TSE", "SBI.TO", "--notes", "re-pin")) == 0
+    assert "suspect" not in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_list_flags_dividends_that_predate_their_mapping(db, capsys):
+    from datetime import datetime
+    db.add_all([_estimate(1, date(2026, 6, 23), datetime(2026, 6, 24))])
+    await TickerMappingRepository(db).upsert_mapping(
+        ibkr_symbol="SBI", ibkr_exchange="TSE", yahoo_ticker="SBI.TO", source="manual",
+    )
+    await db.commit()
+    # The mapping was corrected after those rows were fetched.
+    mapping = (await _mappings(db, "SBI"))[0]
+    mapping.updated_at = datetime(2026, 7, 27)
+    await db.commit()
+
+    assert await cli.run(args("list")) == 0
+
+    out = capsys.readouterr().out
+    assert "DIVIDENDS PREDATE MAPPING" in out
+    assert "purge_dividend_estimates SBI TSE" in out

@@ -39,7 +39,17 @@ class DividendPayment(Base):
     security: Mapped["Security"] = relationship(back_populates="dividend_payments")
 
     __table_args__ = (
-        UniqueConstraint('security_id', 'ex_date', name='uix_dividend_security_exdate'),
+        # Source-aware on purpose. `ex_date` holds a real ex-date for yfinance rows
+        # and the *pay* date for IBKR ones, so a shared (security_id, ex_date) key
+        # let the two overwrite each other whenever a payer's ex-to-pay lag landed
+        # on another record's date — relabelling real withholding as an estimate,
+        # or nulling amount_per_share and dropping the security below the
+        # two-sample threshold the forecast needs. Mastercard's 29-day lag already
+        # exceeds a monthly payer's whole cycle, so that was reachable.
+        UniqueConstraint(
+            'security_id', 'source', 'ex_date',
+            name='uix_dividend_security_source_exdate',
+        ),
         # NOTE: security_id already has a column-level index (index=True above);
         # do not re-declare ix_dividend_payments_security_id here or create_all
         # emits a duplicate CREATE INDEX. The ex_date index has no column-level
