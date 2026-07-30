@@ -1,6 +1,6 @@
 # Working state
 
-**Last updated: 2026-07-29**
+**Last updated: 2026-07-30**
 
 `CLAUDE.md` is the durable guide — architecture, invariants, and the rules that were each a bug
 first. **This file is the perishable half**: where the work actually stands, what is known-broken,
@@ -47,22 +47,71 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 - **Accumulating ETFs correctly show no dividends** — DBPG, EMIM, IWDA, SXR8, VWCE, XAIX, XNAS.
   Verified, not assumed. **Don't "fix" their absence.**
 
+## Just landed (2026-07-30) — needs a live look after the next deploy
+
+Five fixes from a fresh audit, all committed with tests that fail against the old code. Suite went
+313 → 331 backend. The behaviour changes are documented in `CLAUDE.md`; what to eyeball on prod:
+
+1. **`GET /api/portfolio/benchmark` is gated at the fetch.** Ticking a *new* benchmark in the picker
+   still has to warm from Yahoo, so check one unused key (e.g. Nikkei 225) actually populates. If it
+   returns empty, the per-ticker 300s attempt memo is refusing — wait it out and retry, don't debug.
+2. **Tax report may now show a warnings banner and `—` for Steuerwert.** Both are correct behaviour
+   for a failure; the account's data should produce neither. A banner appearing means look at the logs.
+3. **The Dividend Income card on Performance should now read "net" and match the Dividends tab.**
+   Expect `mixed` provenance (estimates before the ledger, actuals after), not `ibkr`.
+4. **Reconciliation now lets a real SELL outrank the cost-conserved heuristic.** No visible change
+   expected — this account has no sub-1% trim on record — but a future small trim will now close a lot.
+5. **Tax-lot open dates come from ibflex.** Identical output for this all-STK account; the regression
+   check is that `min(taxlots.open_date)` and the ALL-range chart are unchanged after the next sync.
+
 ## Worth doing next
 
 Rough priority. None of these are started.
 
 1. **Growth chips for portfolio value and contributions**, in the same visual language as the
    Dividends tab (`DeltaChip`, `lib/delta.ts`). Explicitly deferred when the dividends work was
-   scoped — the pattern now exists and is tested, so this is mostly wiring.
+   scoped — the pattern now exists and is tested, so this is mostly wiring. Note it is a
+   *consolidation*, not pure wiring: `ContributionsStrip.tsx:108` already hand-rolls a competing chip
+   (`+7%` where `DeltaChip` renders `▲ +7.4%`), so that duplicate has to go at the same time.
 2. **Commit the visual-regression harness.** The Playwright screenshot loop that verified the
    Dividends tab lives *outside* the repo, so it is not reproducible from a clean checkout. It cannot
    simply become a `frontend` devDependency: `deploy.sh` runs `npm ci` on a `--no-cache` rebuild and
    Playwright's postinstall pulls ~150 MB of Chromium, which would tax every 10-minute deploy. Needs
    a separate package or a skipped-download flag.
-3. **A horizontal-scroll affordance on the wide tables.** The dividends position table has ten
+3. **Four collapsible cards cannot be opened without a mouse.** `MonthlyReturnsHeatmap.tsx:134`,
+   `MonthlyDeploymentCard.tsx:65`, `DividendSummary.tsx:107` and `PerformanceAttribution.tsx:54` put
+   `onClick` on `<CardHeader>` with no `tabIndex` / `role` / `onKeyDown` / `aria-expanded`, so Monthly
+   Returns, Monthly Deployment, Dividend Income and Performance Attribution are keyboard-unreachable.
+   Sortable `<th>`s in `FundamentalsTab.tsx:93` and `WatchlistTab.tsx:185` have the same problem, and
+   Watchlist's metric-definition tooltips are `onMouseEnter`-only — the only place PEG/RSI/TTM-growth
+   are defined. `PositionsList.tsx:178` already solves this properly with a real `<button>` inside the
+   `<th>`; lift and reuse it. `ui/tabs.tsx:31` has no `role="tablist"` / `aria-selected` either.
+4. **Four more surfaces let a backend failure look like empty data** — `ContributionsStrip.tsx:49`
+   (returns `null`, so the strip just vanishes), `MonthlyDeploymentCard.tsx:78`,
+   `DividendSummary.tsx:123`, and all four `FundamentalsTab` queries ("Click Sync Now"). Six other
+   components already fixed this class with explicit comments; this finishes the job. `TaxTab` got its
+   version on 2026-07-30, so the pattern to copy is right there.
+5. **YTD and MTD start a day early in any positive-UTC-offset timezone.** `Dashboard.tsx:58-76`:
+   `new Date(now.getFullYear(), 0, 1).toISOString()` is local midnight serialised as UTC, so Berlin
+   gets `2025-12-31` and New York gets `2026-01-01` for the same click. Same portfolio, different
+   numbers by locale. (A 31 Dec base is arguably the *right* YTD convention — the bug is that it is
+   accidental and locale-dependent, so pick one deliberately.)
+6. **`_ttm_growth_from_quarterly` is duplicated and divergent.** `watchlist_service.py:157` has a
+   5–7-quarter fallback tier that `fundamentals_service.py:85` lacks, so one security can report
+   different earnings growth on `/api/fundamentals/portfolio` and `/api/watchlist`.
+7. **A horizontal-scroll affordance on the wide tables.** The dividends position table has ten
    columns and scrolls inside its own container at narrow widths, with nothing hinting that it can.
-4. **Fold `PRE_OWNERSHIP_HISTORY_YEARS` pruning into a scheduled job.** `prune_empty_dividends.py`
+   Scope is wider than it looks: `WatchlistTab` is 18 columns.
+8. **`MarketPriceRepository.bulk_create` is a per-row SELECT + flush + refresh** (`:147`) despite the
+   `UniqueConstraint('security_id','date')` that makes SQLite `ON CONFLICT DO UPDATE` available —
+   a split-purge refill is ~1,500 statements while holding the sync gate.
+9. **Fold `PRE_OWNERSHIP_HISTORY_YEARS` pruning into a scheduled job.** `prune_empty_dividends.py`
    is a manual CLI; the ingest window now prevents new junk, so this is cleanup-only and low value.
+
+Also noted, not yet items: `Dashboard.tsx:84` hardcodes the ALL-range start at `2024-05-28` while
+`TaxTab.tsx:10` hardcodes `FIRST_TAX_YEAR = 2024` — transferred lots keep their **original**
+`open_date`, so check both against `min(taxlots.open_date)` before the 2025 backfill lands.
+`CLAUDE.md` says React 18; `package.json` pins `react@^19.2.0`.
 
 ## Local development traps
 

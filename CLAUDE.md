@@ -249,6 +249,23 @@ Migrations: `cd backend && alembic upgrade head` (the container CMD runs this on
 2. **Corporate actions** → deterministic reclassification (split/spinoff/merger), not a sale
 3. **Fallback heuristic** (quantity drop + `COST_CONSERVED_RATIO`) → `close_source='heuristic'`
 
+**That order is the code's order, and it wasn't until 2026-07-30.** The trade lookup used to run
+*third*, supplying only a date and a provenance tag after 2 and 3 had already decided — so a trim of
+**≤1% of cost basis** took the cost-conserved path and recorded **no closure at all** while IBKR's own
+SELL sat in `trades` for that window (200 shares at 20,000 sold down by 2 leaves 19,800, and
+`19800 >= 20000 * 0.99`). The disposal then never reached `calculate_xirr()`'s `+proceeds` inflow, the
+attribution's disposal term, that day's `external_flow_eur`, or the tax report's `closed_lot_estimate`.
+The two inferences now run **only when no SELL is on record**, so the reverse-split and cash-in-lieu
+protections are untouched — pinned from both sides in `tests/test_sync_helper.py`.
+
+**`open_date` comes off `position.openDateTime`, parsed by ibflex.** It used to be scraped from the raw
+XML into a separate list and matched back by position index, but that list kept only STK rows carrying
+the attribute while the loop enumerated *every* `OpenPosition` — so one bond/option row, or one lot
+without the attribute, shifted every index after it, and the `conid` check fell back to `reportDate`
+rather than realigning. One stray row silently stamped **every later lot** with the statement date.
+ibflex 0.15 does parse the field (`parse_element_attr` returns a `datetime`); the comment claiming
+otherwise was wrong. Don't reintroduce index matching. Tests: `tests/test_ibkr_parsers.py`.
+
 `restamp_unsourced_closed_lots()` then fixes lots closed *before* `<Trades>` existed: those carry the
 date the sync **noticed** the drop, not the sale date (CRM and NFLX read 2026-04-17 for a 2026-03-13
 sale). A lot is only re-stamped when exactly one SELL for that security matches its quantity and isn't
@@ -313,9 +330,9 @@ daily jobs, indefinitely, against an IP-based rate limit. An **interior** weekda
 both sides) older than `HOLIDAY_GRACE_DAYS` (30) now counts as a holiday: every sync since has already
 failed to fill it. Younger holes stay missing so late data can arrive, and **leading/trailing gaps stay
 missing at any age** — which is exactly what a purge-and-refill repair looks like, so `--purge-prices`
-and the split invalidation above still heal normally. `BenchmarkService._ensure_prices_available()`
-applies the same rule. Tests: `tests/test_missing_dates_holidays.py`,
-`tests/test_benchmark_fx_window.py`.
+and the split invalidation above still heal normally. `BenchmarkService` applies the same rule via its
+own `_missing_business_days()`, shared by its price *and* FX paths. Tests:
+`tests/test_missing_dates_holidays.py`, `tests/test_benchmark_fx_window.py`.
 
 The fetch is also **span-narrowed**: the Yahoo request starts a few days before `min(missing)`
 (`PRICE_FETCH_BUFFER_DAYS`), not at the window start — the 08:00 730-day job used to re-download two
@@ -358,6 +375,24 @@ for `holdings_as_of` (= 31 Dec for a past year, today for the current one) using
 `open_date`/`close_date` window as `_calculate_daily_value`, so it can't disagree with the portfolio
 timeline. Positions with no resolvable price near that date are **omitted**, not counted as zero.
 
+**A figure this report cannot justify is absent, not invented** (both halves were bugs until
+2026-07-30, and both broke the rule the rest of the codebase follows: skip the row, log it, report it).
+
+- `_to_eur()` returned the **unconverted foreign amount** when FX failed, so a TWD sale whose
+  trade-date rate fell outside `FALLBACK_MAX_AGE_DAYS` read ~35× high while `realized_source` still
+  said `trades` — the badge that means *authoritative* — with no `logger` call anywhere on the path. It
+  returns `None` now and the realized loop omits the row. If **every** SELL is unconvertible the
+  closed-lot approximation takes over (it reads `cost_basis_eur`, converted at ingest, so it needs no
+  trade-date rate) and the warning says *that* rather than claiming a hole.
+- An `except Exception: pass` turned any snapshot failure into a Steuerwert of **0.00**, served 200
+  with the note still claiming the holdings were valued at that date's closes. `holdings_snapshot_total`
+  is now **`None`** on failure — a missing wealth-tax base, not a zero one — alongside
+  `holdings_snapshot_error`, and the note says so.
+
+`warnings[]` on the report is the surface for both. It rides on a **successful** response, so it is
+structurally invisible unless rendered: `TaxTab` shows it as a banner and `to_csv()` writes a WARNINGS
+block. Tests: `tests/test_tax_service.py`, plus the shape assertions in `tests/test_api_smoke.py`.
+
 Frontend: `TaxTab.tsx`. It's a filing aid, not tax advice.
 
 ---
@@ -376,6 +411,18 @@ from `dividend_payments`, `taxlots`, `market_prices` and `exchange_rates`.
 `source='ibkr'`, so the moment July 2026's real rows landed, every pre-IBKR month vanished from the
 card — the repository's own docstring warns against exactly that. The boundary is reported as
 `ibkr_from`.
+
+**`get_dividend_summary()` returns NET, and its `source` is three-way.** Both were wrong on the
+Performance tab's *Dividend Income* card until 2026-07-30: the service annotates its own return
+`# NET per month`, but the card said "Gross dividend income by month" and footnoted "Estimated gross
+dividends via Yahoo Finance — withholding taxes … not reflected" over IBKR actuals net of real tax, so
+it silently disagreed with the Dividends tab and anyone reconciling DA-1 read net income as pre-tax.
+`total_gross_eur` / `total_withholding_eur` / `source` / `ibkr_from` were already on the wire and simply
+undeclared in `DividendSummaryResponse`. `source` was also binary — `'ibkr'` the moment any IBKR row
+existed, while the splice still carries the estimated months ahead of the boundary — and is now the
+same `ibkr` | `mixed` | `yfinance_estimate` flag the tax report uses (`_summary_source()`), which the
+footnote reads off. **`/api/dividends/summary` has no `response_model`**, so nothing but
+`tests/test_api_smoke.py` stops a rename silently blanking that note.
 
 **Only dividends that could have been earned are ingested.** `sync_dividend_data()` skips ex-dates
 before the security's earliest lot `open_date` (reported as `pre_ownership_skipped`); a security with no
@@ -652,6 +699,34 @@ distinct tickers were an unthrottled fetch storm. The add itself stays *outside*
 cooling, the row is created with `last_synced` null and the next sync fills it in, rather than a
 running 08:00 job turning a bookkeeping action into a 429. Tests: `tests/test_single_flight.py`.
 
+**`GET /api/portfolio/benchmark` is gated at the *fetch*, not the handler** (added 2026-07-30 — it was
+the last route with no gate at all; `portfolio.py` never imported `single_flight`). It lazy-fetches
+Yahoo and tiles Frankfurter on a cache miss, so looping the 8 keys in `BENCHMARKS` over the 5-year span
+the route allows could run beside the 08:00 `full_sync`. It must **not** wrap the handler:
+`sync_benchmark_prices()` only refreshes benchmarks that *already have rows*, so this route bootstraps
+the warm set — a cache-only GET leaves a first-time selection empty forever, and gating the read would
+429 the chart every morning. So the gate sits inside `_ensure_prices_available` /
+`_ensure_fx_rates_available` around the network call, and `SyncBusy` serves what is cached.
+
+Two consequences worth keeping straight. **Entering the gate bumps the shared last-start clock every
+other route's cooldown reads**, which is why the gate wraps only the actual fetch — a warm chart load
+must not 429 a manual IBKR sync. And **the gate cannot stop a sequential loop**, so each ticker and
+currency carries its own `UPSTREAM_RETRY_COOLDOWN_SECONDS` (300) attempt memo: trailing weekdays the
+provider has no bar for stay missing *by design*, so the range end is otherwise re-requested on every
+request forever — the same shape the holiday rule fixed for `market_prices`. Keyed **per upstream
+target**, because warming eight distinct benchmarks is legitimate and re-hitting one is not.
+`reset_upstream_throttle()` exists for tests, since the memo is process-lifetime state.
+
+`_ensure_fx_rates_available` also asks what is missing before tiling. `_batch_fetch_rates` issues its
+request **unconditionally** (it dedups per row, *after* the response), so a five-year chart load cost
+~60 provider requests every time regardless of the cache. It now uses the same holiday-aware
+missing-days rule as the price path, extracted to `_missing_business_days()` so the two can't drift.
+
+`POST /api/fundamentals/sync` finally carries the 300s this file already claimed for it. `is_running()`
+fences only *overlapping* runs, so a poller that waited for each pass to end ran them back to back
+indefinitely at ~5 Yahoo calls per security per pass. `cooldown_remaining()` lets a BackgroundTasks
+handler answer 429 honestly instead of replying `"started"` to a run the background half then drops.
+
 **Errors are redacted before they are stored or served (`app/redact.py`).** Flex sends the token as a
 `t=` URL parameter and `requests` transport errors stringify with the full URL, so a plain `str(e)` from
 a failed SendRequest carries it — and those went verbatim into `sync_runs.message`, which the public
@@ -731,7 +806,7 @@ raiser for that whole module, so an accidental network reach fails loudly; `/api
 is excluded because it lazy-fetches Yahoo on a cache miss, and POST routes are excluded because they
 start real syncs. **Add a case here when an endpoint's response shape changes.**
 
-Tests (313 backend + 45 frontend, all offline — no IBKR, Yahoo or FX-provider calls):
+Tests (331 backend + 45 frontend, all offline — no IBKR, Yahoo or FX-provider calls):
 ```bash
 cd backend && ./venv/Scripts/python.exe -m pytest tests/ -q
 cd frontend && npx tsc -b && npm run test && npm run build
@@ -855,6 +930,8 @@ Tests: `tests/test_currency_fallback.py`.
 | A new currency appears | Nothing to do if it's in `WARM_CURRENCIES` or the ECB set. Otherwise add it there — one edit, no extra request |
 | "Money added" spikes in one month | A transfer booked as a deposit. `manage_cash_flows list`, then `reclassify <ib_key> --as TRANSFER_IN`. **Never** trust an Added figure without eyeballing that list first |
 | "Money added" is blank or `—` | Expected before `deposits_from`: no IBKR deposit ledger exists for the pre-transfer years. Not a bug — Deployed covers that era |
+| Realized gains look low + a `warnings[]` entry names a currency | No FX rate for that trade date, so the sale was **omitted** rather than mis-scaled. Check `WARM_CURRENCIES` covers it |
+| Steuerwert reads `—` instead of a number | `holdings_snapshot_error`: the snapshot raised. Check the logs — this is deliberately *not* 0.00 |
 | A position's value is far off IBKR's | Suspect the `ticker_mappings` row before the price feed: run `manage_mappings list` and look for a currency disagreement, then compare `market_prices.close_price` against IBKR's `market_price` in the *same* currency |
 | App total ≠ IBKR total | Compare against `gross_position_value`, **not** net liquidation (which adds cash); and intraday the app holds the last *close* while IBKR quotes live |
 | Site "down" in the browser | Often TIM home DNS, not the server — verify with `Test-NetConnection`, not `nslookup` |
