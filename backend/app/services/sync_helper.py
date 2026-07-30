@@ -572,29 +572,31 @@ async def reconcile_taxlots(
         lot.security_id for lot in existing_open_lots
     }
 
-    for security_id in all_security_ids:
-        open_lots = await taxlot_repo.get_by_security_id(security_id, is_open=True)
-        for lot in open_lots:
-            snapshot[security_id].append({
-                "quantity": lot.quantity,
-                "cost_basis_eur": lot.cost_basis_eur,
-                "cost_basis": lot.cost_basis,
-                "currency": lot.currency,
-                "security_id": lot.security_id,
-                "open_date": lot.open_date,
-                "price_per_unit": lot.price_per_unit,
-            })
+    # Grouped from the rows already in hand. This used to issue one
+    # get_by_security_id() per security — ~40 extra round trips per sync for data
+    # `existing_open_lots` already holds, every field below included.
+    for lot in existing_open_lots:
+        snapshot[lot.security_id].append({
+            "quantity": lot.quantity,
+            "cost_basis_eur": lot.cost_basis_eur,
+            "cost_basis": lot.cost_basis,
+            "currency": lot.currency,
+            "security_id": lot.security_id,
+            "open_date": lot.open_date,
+            "price_per_unit": lot.price_per_unit,
+        })
 
     snapshot_lot_count = sum(len(lots) for lots in snapshot.values())
     logger.info(f"Snapshot: {snapshot_lot_count} existing open lots across {len(snapshot)} securities")
 
     # --- Phase B: Delete existing OPEN lots only (preserves closed lots) ---
-    for security_id in all_security_ids:
-        await taxlot_repo.delete_open_by_security_id(security_id)
+    # One statement for every security, not one per security.
+    await taxlot_repo.delete_open_by_security_ids(all_security_ids)
 
     # --- Phase C: Create new lots from IBKR data, track incoming quantity + cost per security ---
     incoming_qty: Dict[int, Decimal] = defaultdict(lambda: Decimal("0"))
     incoming_cost: Dict[int, Decimal] = defaultdict(lambda: Decimal("0"))
+    new_open_lots: List[Dict] = []
 
     for lot_data in taxlots_data:
         conid = lot_data["conid"]
@@ -630,17 +632,22 @@ async def reconcile_taxlots(
             "is_open": lot_data["is_open"],
         }
 
-        await taxlot_repo.create(taxlot_data)
+        new_open_lots.append(taxlot_data)
         taxlots_count += 1
         total_cost_basis_eur += cost_basis_eur
         incoming_qty[security_id] += lot_data["quantity"]
         incoming_cost[security_id] += lot_data["cost_basis"]
+
+    # One flush for the whole incoming set. create() refreshes each row it writes,
+    # which is two round trips per lot for an object every caller here discards.
+    await taxlot_repo.create_many(new_open_lots)
 
     # --- Phase D: Reconcile — detect sold positions by quantity drop per security ---
     # A sale is a reduction in shares held. Price drift (corporate actions) does
     # not change quantity, so it never triggers a closure here. Sold quantity is
     # attributed FIFO (oldest open_date first) across the snapshot lots.
     close_date = report_to_date
+    new_closed_lots: List[Dict] = []
 
     # Resolve conid for every snapshot security so we can look up its trades /
     # corporate actions (the incoming map only covers still-held securities).
@@ -741,7 +748,7 @@ async def reconcile_taxlots(
                 "close_date": effective_close_date,
                 "close_source": close_source,
             }
-            await taxlot_repo.create(closed_data)
+            new_closed_lots.append(closed_data)
 
             if take == lot["quantity"]:
                 lots_closed_full += 1
@@ -761,6 +768,9 @@ async def reconcile_taxlots(
                 f"Reconcile: security_id={security_id} sold_qty exceeded snapshot "
                 f"by {remaining}; closed lots may understate the sale"
             )
+
+    # Written before Phase E, which queries closed lots back out of the DB.
+    await taxlot_repo.create_many(new_closed_lots)
 
     # --- Phase E: adopt real sale dates for lots closed before <Trades> existed ---
     lots_restamped = await restamp_unsourced_closed_lots(taxlot_repo, trade_repo)

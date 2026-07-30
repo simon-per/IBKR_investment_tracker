@@ -50,6 +50,10 @@ class TaxLot(Base):
         Index('ix_is_open', 'is_open'),
         # Reconciliation's hot lookup: this security's open lots.
         Index('ix_taxlots_security_open', 'security_id', 'is_open'),
+        # realized_rows_from_closed_lots() ranges on close_date for five endpoints
+        # plus the tax report. close_date leads so it is a range scan; is_open
+        # trails so the `is_open = false` equality comes from the same index.
+        Index('ix_taxlots_close_date', 'close_date', 'is_open'),
     )
 
     def __repr__(self) -> str:

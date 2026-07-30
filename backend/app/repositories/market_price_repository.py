@@ -5,6 +5,7 @@ Handles database operations for historical market prices.
 from typing import List, Optional
 from datetime import date, timedelta
 from sqlalchemy import select, and_, delete, func
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from decimal import Decimal
 
@@ -144,15 +145,57 @@ class MarketPriceRepository:
             # Create new
             return await self.create(price_data)
 
+    # Chunked so the statement stays well inside SQLite's variable limit
+    # (SQLITE_MAX_VARIABLE_NUMBER, 999 on older builds) — a price row binds ~6
+    # parameters, so 100 rows is ~600.
+    UPSERT_CHUNK = 100
+
     async def bulk_create(self, prices_data: List[dict]) -> int:
         """
-        Bulk insert market prices.
-        Returns count of records created.
+        Insert or update many prices in one statement per chunk.
+
+        Was a loop over ``upsert()``, which costs a SELECT + flush + refresh *per
+        row* — three round trips each, despite the (security_id, date) unique
+        constraint making SQLite's ON CONFLICT DO UPDATE available. A split purge
+        refill is ~500 rows (~1,500 statements) while holding the sync gate, and a
+        cold 40-security sync is ~20,000 rows (~60,000 statements).
+
+        ``upsert()`` stays for single-row callers that want the ORM object back.
+        Returns the number of rows submitted, matching the previous contract (it
+        counted rows processed, not rows newly inserted).
         """
+        if not prices_data:
+            return 0
+
         count = 0
-        for price_data in prices_data:
-            await self.upsert(price_data)
-            count += 1
+        for start in range(0, len(prices_data), self.UPSERT_CHUNK):
+            chunk = prices_data[start:start + self.UPSERT_CHUNK]
+            stmt = sqlite_insert(MarketPrice).values(chunk)
+            # Update every supplied column except the identity itself, so a
+            # re-fetch corrects a restated close (a split) or a wrong currency.
+            updatable = {
+                c.name: getattr(stmt.excluded, c.name)
+                for c in MarketPrice.__table__.columns
+                if c.name not in ("id", "security_id", "date")
+                and c.name in chunk[0]
+            }
+            if updatable:
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=["security_id", "date"], set_=updatable
+                )
+            else:
+                stmt = stmt.on_conflict_do_nothing(
+                    index_elements=["security_id", "date"]
+                )
+            await self.session.execute(stmt)
+            count += len(chunk)
+
+        # Deliberately no expire_all() here. This writes behind the ORM's back, so
+        # the identity map can hold stale MarketPrice rows — but both callers commit
+        # immediately, and the production session is expire_on_commit=True, which
+        # refreshes them. Expiring here instead breaks a session that opted out of
+        # that (expire_on_commit=False): the next attribute access on *any* loaded
+        # object becomes a lazy refresh, which in async raises MissingGreenlet.
         return count
 
     async def delete_up_to(self, security_id: int, cutoff_date: date) -> int:

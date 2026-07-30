@@ -526,3 +526,64 @@ async def test_cost_conservation_still_suppresses_a_sale_with_no_sell_on_record(
     finally:
         await session.close()
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("n_securities,lots_each", [(10, 3), (30, 1)])
+async def test_reconcile_round_trips_do_not_scale_with_security_count(n_securities, lots_each):
+    """
+    Phase A issued one get_by_security_id() per security for rows
+    get_open_taxlots() had already returned; Phase B one delete per security, each
+    of which itself SELECTed and then ORM-deleted row by row; and Phase C refreshed
+    every lot it wrote, for an object both call sites discard.
+
+    Measured on the same 30 lots, before -> after:
+        10 securities x 3 lots:  51 SELECT + 10 DELETE + 30 INSERT (91) -> 1 + 1 + 30 (32)
+        30 securities x 1 lot:   91 SELECT + 30 DELETE + 30 INSERT (151) -> 1 + 1 + 30 (32)
+
+    Both shapes now cost the same, which is the real property: nothing scales with
+    the number of securities any more. Counted, not timed — a wall-clock assertion
+    would be flaky and would not say why.
+    """
+    from sqlalchemy import event
+
+    engine, session, repo = await _make_repo()
+    try:
+        conid_map = {}
+        for sec_id in range(1, n_securities + 1):
+            conid_map[str(100 + sec_id)] = sec_id
+            for i in range(lots_each):
+                await _seed_open_lot(repo, sec_id, date(2025, 11, 5 + i * 10), 10, 5.00)
+        await session.commit()
+
+        statements = []
+
+        def _on(conn, cursor, statement, params, context, executemany):
+            statements.append(statement.lstrip().split()[0].upper())
+
+        event.listen(engine.sync_engine, "before_cursor_execute", _on)
+        try:
+            # Same quantities back, so no closures: this isolates Phases A-C.
+            incoming = [
+                _incoming(str(100 + sec_id), date(2025, 11, 5 + i * 10), 10, 5.00)
+                for sec_id in range(1, n_securities + 1) for i in range(lots_each)
+            ]
+            await reconcile_taxlots(
+                repo, FakeCurrencyService(),
+                conid_to_security_id=conid_map,
+                taxlots_data=incoming,
+                report_to_date=date(2026, 6, 30),
+            )
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", _on)
+
+        total_lots = n_securities * lots_each
+        assert statements.count("SELECT") == 1, "the open-lot load, and nothing per-security"
+        assert statements.count("DELETE") == 1, "one batched delete for every security"
+        # One INSERT per lot remains (the ORM emits row-wise inserts); what is gone
+        # is the refresh SELECT that used to accompany each one.
+        assert statements.count("INSERT") == total_lots
+        assert len(statements) == total_lots + 2
+    finally:
+        await session.close()
+        await engine.dispose()

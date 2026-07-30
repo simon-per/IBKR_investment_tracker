@@ -4,7 +4,7 @@ Handles database operations for Tax Lots.
 """
 from typing import List, Optional
 from datetime import date
-from sqlalchemy import select
+from sqlalchemy import select, delete, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
@@ -95,6 +95,21 @@ class TaxLotRepository:
         await self.session.refresh(taxlot)
         return taxlot
 
+    async def create_many(self, rows: List[dict]) -> int:
+        """
+        Insert many tax lots with one flush and no per-row refresh.
+
+        ``create()`` flushes *and* refreshes each lot — two round trips per row,
+        and reconciliation writes every open lot on every sync (~975 here, so
+        ~1,950 statements) while discarding all of the returned objects. Callers
+        that need the persisted object back should still use ``create()``.
+        """
+        if not rows:
+            return 0
+        self.session.add_all([TaxLot(**row) for row in rows])
+        await self.session.flush()
+        return len(rows)
+
     async def update(self, taxlot_id: int, taxlot_data: dict) -> Optional[TaxLot]:
         """Update an existing tax lot"""
         taxlot = await self.get_by_id(taxlot_id)
@@ -139,9 +154,30 @@ class TaxLotRepository:
         Delete only OPEN tax lots for a security, preserving closed (historical) lots.
         Returns count of deleted lots.
         """
-        taxlots = await self.get_by_security_id(security_id, is_open=True)
-        count = len(taxlots)
-        for taxlot in taxlots:
-            await self.session.delete(taxlot)
+        return await self.delete_open_by_security_ids([security_id])
+
+    async def delete_open_by_security_ids(self, security_ids) -> int:
+        """
+        Delete the OPEN lots of many securities in one statement, preserving closed
+        (historical) lots. Returns the count deleted.
+
+        Reconciliation calls this once per sync for every security it touched. It
+        used to be a loop of per-security calls, each of which ran a SELECT and then
+        an ORM delete per row — an N+1 inside an N+1, ~40 extra round trips on this
+        portfolio before a single lot was written.
+
+        ``synchronize_session="fetch"`` matters: the caller is holding the very rows
+        this removes (it snapshots them first), and a bulk DELETE goes behind the
+        ORM's back. "fetch" costs one extra SELECT and leaves the identity map
+        correct, where the alternative is stale objects that reappear on flush.
+        """
+        ids = list(security_ids)
+        if not ids:
+            return 0
+        result = await self.session.execute(
+            delete(TaxLot)
+            .where(and_(TaxLot.security_id.in_(ids), TaxLot.is_open == True))  # noqa: E712
+            .execution_options(synchronize_session="fetch")
+        )
         await self.session.flush()
-        return count
+        return result.rowcount or 0
