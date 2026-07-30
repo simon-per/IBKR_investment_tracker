@@ -32,6 +32,12 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
   fatal-fast on purpose, and the schedule is designed so a later slot recovers. The **08:00
   `full_sync` is the dependable slot** — if that one also starts failing, use the offline XML path
   rather than retrying, which is what caused three token lockouts historically.
+- **MCO and MRVL each forecast off only 2 samples.** Surfaced by the new `forecast_samples` field the
+  day it shipped, and badged `n=2` in the dividends table. Not known-wrong — both are real payers with
+  plausible schedules — but two samples is the exact shape that let SBI project a fake monthly cadence,
+  so those projections deserve one look before being trusted. Check `manage_mappings list` for a
+  `DIVIDENDS PREDATE MAPPING` flag (which would mean the rows came from an older ticker) rather than
+  assuming either way.
 - **`market_prices` gaps heal only at 08:00.** The 7-day jobs restore current value after a split
   purge; the full history comes back at the next 730-day `full_sync`.
 
@@ -49,32 +55,38 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 - **Accumulating ETFs correctly show no dividends** — DBPG, EMIM, IWDA, SXR8, VWCE, XAIX, XNAS.
   Verified, not assumed. **Don't "fix" their absence.**
 
-## Just landed (2026-07-30) — needs a live look after the next deploy
+## Shipped 2026-07-30 — deployed and verified
 
-Two batches today. The earlier five (Yahoo gating, `openDateTime` off ibflex, SELL-beats-heuristic,
-tax-report honesty, dividend card net) are **deployed and verified on prod**. The second batch is the
-SBI dividend bug and its root cause; suite 313 → 357. What to eyeball:
+Two batches: five audit fixes (Yahoo gating, `openDateTime` off ibflex, SELL-beats-heuristic,
+tax-report honesty, dividend card net), then the SBI dividend bug and its root cause. Suite 313 → 357.
+Deployed `82b6b4d` by hand at 19:49 UTC, health 200.
 
-1. **SBI's forecast is deliberately empty.** The two poisoned estimate rows were purged on prod
-   (`manual_dividend_purge`, 2026-07-30). Income was unchanged to the cent — portfolio net 66.87 before
-   and after — and the forecast went 5 payouts / 12.17 → 0. **That emptiness is correct**, not a
-   regression: one IBKR payment cannot establish a cadence. It fills in when a second real payment
-   arrives, or when a genuine `SBI.TO` dividend series is fetched. Don't "fix" it.
-2. **A `DIVIDENDS PREDATE MAPPING` warning may appear** in market-data sync warnings for any other
-   security in the same shape. That is the new detector working; purge and let it refetch.
-3. **The dividends table has two new markers** — `n=2` on a thin forecast inference and `†` on a
-   partial-year trailing yield. Both are expected on recently-bought holdings.
-4. **A migration runs on the next deploy** (`o8d5f2a9b3c4`, `p9e6a3b0c4d5`): the dividend unique key
-   becomes source-aware, `ticker_mappings` gains timestamps, and `taxlots.close_date` gets an index.
-   Verified against a data-carrying copy, and auto-deploy backs up the DB first — but this is the one
-   change worth confirming came up clean.
+Confirmed on prod after that deploy, so none of it needs re-checking:
+
+- **Both migrations applied** (`alembic head: p9e6a3b0c4d5`). The `dividend_payments` table rebuild came
+  through clean: source-aware key present, old key gone, `ticker_mappings` timestamps added,
+  `ix_taxlots_close_date` created, and 172 dividends / 981 lots / 20 mappings all intact.
+- **SBI reads `payouts 1 | net 2.68 | forecast 0 | next None`.** Income unchanged to the cent
+  (portfolio net 66.87 either side of the purge); the phantom 5-payout / 12.17 forecast is gone.
+  **That emptiness is correct** — one IBKR payment cannot establish a cadence. Don't "fix" it.
+- The dividends table's two new markers are live: `n=2` on a thin forecast inference, `†` on a
+  partial-year trailing yield. Ten positions carry `†`, which is expected on recent buys.
+
+Still to watch: **tomorrow's 08:00 `full_sync` is the first Yahoo dividend fetch through the corrected
+`SBI.TO` mapping.** A real series means SBI forecasts from genuine data; nothing means SBI stays empty,
+also correct. Either way, read that sync's `warnings[]` for `DIVIDENDS PREDATE MAPPING` on any *other*
+security in the same shape.
 
 ## The 2026-07-30 08:00 full_sync was lost
 
 Pushing at 06:00 UTC deployed straight into the 08:00 Berlin slot, and `/api/scheduler/history` has no
 `full_sync` row for that day. Today's 730-day price refresh and yfinance dividend sync did not run, and
-both IBKR slots failed `1001`. Tomorrow's 08:00 recovers it. This is the documented trap firing exactly
-as described — see *Worth doing next* for the two fixes that would stop it.
+both IBKR slots failed `1001`. Tomorrow's 08:00 recovers it — nothing to do.
+
+This is the documented trap firing exactly as described. `ops/auto-deploy.sh` now carries the guard that
+would have prevented it, but **the VPS still runs the unguarded copy**: see *Worth doing next* item 8 for
+the one-line install, and item 9 for the persistent job store that would make the guard unnecessary. The
+19:49 deploy above was timed by hand instead, which is the workaround, not the fix.
 
 ## Worth doing next
 
@@ -160,15 +172,16 @@ Each of these cost real time at least once.
 ## Recent sessions (last 5)
 
 One line each, newest first. **Drop the oldest rather than growing this list** — `git log` holds the
-detail; this exists so the next session knows what just moved without reading it. Distinct from
-*Just landed* above, which is actionable (what to eyeball on prod) and gets deleted once verified:
-these lines are permanent, so don't "tidy up" the overlap by deleting the wrong one.
+detail; this exists so the next session knows what just moved without reading it. Distinct from the
+*Shipped* section above, which is actionable (what to check on prod, and what has already been
+confirmed) and gets deleted once nothing in it is outstanding: these lines are permanent, so don't
+"tidy up" the overlap by deleting the wrong one.
 
 - **2026-07-30** — two batches: five audit fixes (Yahoo gating, `openDateTime` off ibflex, SELL beats
   the cost-conserved heuristic, tax-report honesty, dividend card net), then the SBI dividend bug —
-  poisoned estimates purged, mapping changes now retire the rows they produced, source-aware dividend
-  key, provenance detector, batched price/lot writes. Suite 313 → 357. Lost the 08:00 full_sync to a
-  deploy.
+  poisoned estimates purged on prod, mapping changes now retire the rows they produced, source-aware
+  dividend key, provenance detector, batched price/lot writes, forecast/yield qualifiers. Suite
+  313 → 357, deployed and verified. Lost the 08:00 full_sync to a deploy landing in the slot.
 - **2026-07-29** — correctness sweep (16 fixes) plus dividend growth (MoM/YoY) and the DividendsTab
   rebuild; scheduler gated behind `SCHEDULER_ENABLED`; STATUS.md split out of CLAUDE.md.
 - **2026-07-28** — external cash ledger live on prod (deposits ingested, transfers excluded) and the
