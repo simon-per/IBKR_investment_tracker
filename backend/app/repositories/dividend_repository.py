@@ -1,9 +1,11 @@
 from typing import List, Optional
 from datetime import date, datetime
-from sqlalchemy import select, and_, func
+from sqlalchemy import select, and_, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.dividend_payment import DividendPayment
+
+YFINANCE_SOURCE = "yfinance_estimate"
 
 
 class DividendRepository:
@@ -11,6 +13,42 @@ class DividendRepository:
 
     def __init__(self, session: AsyncSession):
         self.session = session
+
+    async def get_estimates_for_security(self, security_id: int) -> List[DividendPayment]:
+        """The yfinance-derived rows only — the ones a ticker change invalidates."""
+        result = await self.session.execute(
+            select(DividendPayment)
+            .where(
+                and_(
+                    DividendPayment.security_id == security_id,
+                    DividendPayment.source == YFINANCE_SOURCE,
+                )
+            )
+            .order_by(DividendPayment.ex_date.asc())
+        )
+        return list(result.scalars().all())
+
+    async def delete_estimates_for_security(self, security_id: int) -> int:
+        """
+        Drop this security's yfinance-derived dividend rows. Returns the count.
+
+        Deliberately **never** touches an ``ibkr`` row: those come from the Flex
+        cash-transaction ledger, carry real withholding, and no ticker mapping can
+        invalidate them. The estimates are keyed to whatever Yahoo ticker was
+        resolved when they were written, so when that mapping turns out to have
+        been wrong they are the poisoned half — see the SBI case, where two rows
+        from a bare-ticker US listing survived the mapping fix and the price purge,
+        and went on defining a gold miner's dividend schedule.
+        """
+        result = await self.session.execute(
+            delete(DividendPayment).where(
+                and_(
+                    DividendPayment.security_id == security_id,
+                    DividendPayment.source == YFINANCE_SOURCE,
+                )
+            )
+        )
+        return result.rowcount or 0
 
     async def get_by_security(self, security_id: int) -> List[DividendPayment]:
         result = await self.session.execute(
