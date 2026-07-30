@@ -21,10 +21,12 @@ from app.repositories.security_repository import SecurityRepository
 from app.repositories.sync_run_repository import SyncRunRepository, utc_iso
 from app.services.benchmark_service import BenchmarkService, BENCHMARKS
 from app.models.benchmark_price import BenchmarkPrice
+from app.models.dividend_payment import DividendPayment
 from app.models.market_price import MarketPrice
 from app.models.security import Security
 from app.models.taxlot import TaxLot
-from sqlalchemy import select, distinct, func
+from app.models.ticker_mapping import TickerMapping
+from sqlalchemy import select, distinct, func, and_
 
 logger = logging.getLogger(__name__)
 
@@ -197,12 +199,21 @@ class SchedulerService:
                 #
                 # Guarded on its own: this is a diagnostic, and it must never be the
                 # reason a sync that actually fetched prices reports failure.
+                diagnostics = []
                 try:
-                    stale = await self.find_stale_priced_securities(db)
-                    if stale:
-                        result["warnings"] = stale
+                    diagnostics += await self.find_stale_priced_securities(db)
                 except Exception as e:
                     logger.warning(f"Could not check for stale prices: {e}")
+                # Same shape, same reasoning, for the dividend side: an estimate row
+                # older than its mapping came from a different ticker and silently
+                # keeps driving the forecast. Separately guarded so one diagnostic
+                # failing cannot hide the other.
+                try:
+                    diagnostics += await self.find_dividends_predating_their_mapping(db)
+                except Exception as e:
+                    logger.warning(f"Could not check dividend provenance: {e}")
+                if diagnostics:
+                    result["warnings"] = diagnostics
 
                 logger.info(f"Market data sync completed: {total_prices} prices fetched")
                 return result
@@ -270,6 +281,86 @@ class SchedulerService:
 
         if warnings:
             logger.warning(f"{len(warnings)} security(ies) with missing or stale prices")
+        return warnings
+
+    async def find_dividends_predating_their_mapping(self, db: AsyncSession) -> list:
+        """
+        Held securities whose dividend estimates were fetched under an older ticker.
+
+        The price side of this class has been watched since
+        `find_stale_priced_securities` — a missing price now warns. Nothing watched
+        the dividend side, which is why SBI's two rows survived the mapping's
+        correction to SBI.TO, the price purge, and a month of syncs: estimates are
+        keyed to whatever Yahoo ticker resolved when they were written, and
+        `_forecast_inputs()` then let them alone define a gold miner's payout
+        schedule while the real IBKR payment was skipped.
+
+        The signal is specific rather than a staleness guess: a row computed before
+        its mapping's `updated_at` came from a *different* ticker. A genuine
+        non-payer has no estimate rows at all, so it cannot trip this; a payer that
+        simply hasn't declared lately has rows newer than the mapping.
+
+        Returns `warnings[]`-ready strings, like its price-side counterpart.
+        """
+        held = await db.execute(
+            select(Security.id, Security.symbol, Security.exchange)
+            .join(TaxLot, TaxLot.security_id == Security.id)
+            .where(TaxLot.is_open == True)  # noqa: E712 — SQLAlchemy needs the operator
+            .group_by(Security.id)
+        )
+        held_rows = held.all()
+        if not held_rows:
+            return []
+
+        # Same two-queries-not-a-join reasoning as above: joining lots to dividend
+        # rows multiplies them for no benefit.
+        newest = await db.execute(
+            select(DividendPayment.security_id, func.max(DividendPayment.last_computed))
+            .where(
+                and_(
+                    DividendPayment.security_id.in_([row[0] for row in held_rows]),
+                    DividendPayment.source == "yfinance_estimate",
+                )
+            )
+            .group_by(DividendPayment.security_id)
+        )
+        newest_by_security = dict(newest.all())
+
+        mappings = await db.execute(
+            select(TickerMapping.ibkr_symbol, TickerMapping.ibkr_exchange,
+                   TickerMapping.yahoo_ticker, TickerMapping.updated_at)
+            .where(TickerMapping.is_active == True)  # noqa: E712
+        )
+        mapping_by_key = {
+            (sym, exch): (ticker, updated) for sym, exch, ticker, updated in mappings.all()
+        }
+
+        warnings = []
+        for security_id, symbol, exchange in held_rows:
+            newest_row = newest_by_security.get(security_id)
+            if newest_row is None:
+                continue  # no estimates: a non-payer, or IBKR-only. Nothing to suspect.
+            mapping = mapping_by_key.get((symbol, exchange))
+            if not mapping:
+                continue  # resolved by suffix or bare symbol; no mapping row to compare
+            ticker, updated_at = mapping
+            if updated_at is None or newest_row >= updated_at:
+                continue
+
+            name = f"{symbol}@{exchange}" if exchange else str(symbol)
+            warnings.append(
+                f"{name}: dividend estimates were last computed "
+                f"{newest_row:%Y-%m-%d} but the mapping to {ticker} changed "
+                f"{updated_at:%Y-%m-%d} — those rows came from a different ticker and "
+                f"still drive the forecast. Clear them with "
+                f"`python -m app.cli.purge_dividend_estimates {symbol} {exchange}`"
+            )
+
+        if warnings:
+            logger.warning(
+                f"{len(warnings)} security(ies) hold dividend estimates older than "
+                f"their ticker mapping"
+            )
         return warnings
 
     async def sync_exchange_rates(self, days_back: int = 30) -> dict:
