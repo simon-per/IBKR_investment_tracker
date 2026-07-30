@@ -306,6 +306,17 @@ def test_the_shapes_that_broke_production_serialize(client):
     # The tax report's honesty fields survive the HTTP layer. holdings_snapshot_total
     # is nullable now — a failed snapshot is a missing wealth-tax base, not a zero
     # one — so the route must not coerce None to 0.0 or drop the flag.
+    # The two qualifying fields on a security row must survive DividendSecurityRow —
+    # a Pydantic model drops what it does not declare, and both exist precisely to
+    # stop a figure being read as more solid than it is.
+    for row in bd["securities"]:
+        assert "trailing_yield_partial" in row and isinstance(
+            row["trailing_yield_partial"], bool
+        )
+        assert "forecast_samples" in row and "forecast_cadence_days" in row
+        if row["forecast_payouts"] > 0:
+            assert row["forecast_samples"] and row["forecast_samples"] >= 2
+
     tax = client.get(f"/api/tax/report?year={TODAY.year}").json()
     assert tax["holdings_snapshot_error"] is False
     assert tax["holdings_snapshot_total"] is not None

@@ -405,3 +405,69 @@ async def test_the_two_sources_do_not_halve_the_inferred_cadence():
     finally:
         await session.close()
         await engine.dispose()
+
+
+# ── Two figures that used to mislead silently ────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_recently_bought_holding_flags_its_partial_trailing_yield():
+    """
+    trailing_yield_pct divides trailing-12M income by the FULL position value, so a
+    holding bought weeks ago reads a fraction of its real yield — SBI showed 1.0%
+    off a single payment. Badged rather than annualized: scaling up would invent
+    income the schedule may not support.
+    """
+    engine, session = await _make_session()
+    try:
+        session.add(_lot(1, date(2026, 3, 20), "10"))          # ~6 weeks before AS_OF
+        session.add(_lot(2, date(2024, 1, 5), "10"))           # long held
+        await _seed_payment(session, 1, date(2026, 4, 10), "3.00", "ibkr")
+        await _seed_payment(session, 2, date(2026, 4, 10), "3.00", "ibkr")
+        await session.commit()
+
+        out = await DividendService(session).get_dividend_breakdown(
+            include_forecast=False, as_of=AS_OF
+        )
+        rows = {r["security_id"]: r for r in out["securities"]}
+
+        assert rows[1]["trailing_yield_partial"] is True
+        assert rows[1]["days_held_in_ttm"] < 90
+        assert rows[2]["trailing_yield_partial"] is False
+        assert rows[2]["days_held_in_ttm"] >= 350
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_forecast_reports_how_thin_its_inference_is():
+    """
+    forecast_basis said net-vs-estimate but nothing about sample count, so SBI's
+    five projected payouts off two rows from the wrong ticker looked like any other
+    projection. Two samples is a guess with a schedule attached; say so.
+    """
+    engine, session = await _make_session()
+    try:
+        session.add(_lot(1, date(2024, 1, 5), "10"))
+        # Exactly two dated per-share payments, a month apart — the SBI shape.
+        for on_date in (date(2026, 3, 20), date(2026, 4, 20)):
+            await DividendRepository(session).upsert_payment({
+                "security_id": 1, "ex_date": on_date, "currency": "EUR",
+                "amount_per_share": Decimal("0.5"), "shares_held": Decimal("10"),
+                "gross_amount_eur": Decimal("5"), "net_amount_eur": Decimal("5"),
+                "withholding_tax_eur": Decimal("0"), "source": "yfinance_estimate",
+            })
+        await session.commit()
+
+        out = await DividendService(session).get_dividend_breakdown(
+            include_forecast=True, as_of=AS_OF
+        )
+        row = next(r for r in out["securities"] if r["security_id"] == 1)
+
+        assert row["forecast_payouts"] > 0, "it must actually be projecting"
+        assert row["forecast_samples"] == 2
+        assert 26 <= row["forecast_cadence_days"] <= 35   # read as monthly
+    finally:
+        await session.close()
+        await engine.dispose()

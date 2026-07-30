@@ -375,6 +375,13 @@ export interface DividendSecurityRow {
   forecast_payouts: number;
   forecast_net_eur: number;
   trailing_yield_pct: number | null;
+  /**
+   * True when the position wasn't held for the whole trailing year, so the yield
+   * divides a partial year's income by a full position value and reads low.
+   * Deliberately not annualized — that would invent income.
+   */
+  trailing_yield_partial: boolean;
+  days_held_in_ttm: number | null;
   /** TTM net over what the position cost, rather than what it is worth now. */
   yield_on_cost_pct: number | null;
   /** Share of the window's total (actual + forecast). */
@@ -383,6 +390,10 @@ export interface DividendSecurityRow {
   source: 'ibkr' | 'estimate' | 'mixed' | null; // null = forecast-only row
   /** 'net' = sized from dividends received; 'gross_estimate' = withholding not deducted. */
   forecast_basis: 'net' | 'gross_estimate' | null;
+  /** How many dated payments defined the schedule. 2 is a guess with a schedule attached. */
+  forecast_samples: number | null;
+  /** Median gap the cadence settled on, in days. */
+  forecast_cadence_days: number | null;
 }
 
 /** A figure beside the comparable it is measured against. */

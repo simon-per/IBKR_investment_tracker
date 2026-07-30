@@ -20,7 +20,7 @@ from app.models.taxlot import TaxLot
 from app.repositories.dividend_repository import DividendRepository
 from app.repositories.sync_run_repository import utc_iso
 from app.services.currency_service import CurrencyService
-from app.services.dividend_forecast import HistPayment, project_dividends
+from app.services.dividend_forecast import HistPayment, infer_gap_days, project_dividends
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +29,12 @@ logger = logging.getLogger(__name__)
 # none of its own; three years is several cycles of any real schedule while
 # still discarding the decades yfinance returns.
 PRE_OWNERSHIP_HISTORY_YEARS = 3
+
+# Below this many days held inside the trailing year, a trailing-12M yield divides
+# a partial year's income by a full position value and so reads low. 350 rather
+# than 365 to absorb a lot opened a few days into the window without flagging
+# every long-held position.
+TTM_FULL_COVERAGE_DAYS = 350
 
 
 def _summary_source(payments, ibkr_from) -> str:
@@ -654,6 +660,7 @@ class DividendService:
                 "net": Decimal("0"), "forecast_payouts": 0,
                 "forecast_net": Decimal("0"), "sources": set(),
                 "forecast_basis": None,
+                "forecast_samples": None, "forecast_cadence_days": None,
             }
 
         # A ticker is only a safe chart key while it means one instrument. The same
@@ -760,6 +767,15 @@ class DividendService:
                              if _in_window(fp.on_date) and fp.on_date <= chart_end]
                 if in_window:
                     by_sec.setdefault(sid, _new_row())["forecast_basis"] = basis
+                    # How thin the inference is. A projection off two samples is a
+                    # guess with a schedule attached — SBI's five payouts rested on
+                    # exactly two rows from the wrong ticker, and nothing on the page
+                    # said so. Recorded per security so the UI can badge it.
+                    history = hist_by_sec.get(sid, [])
+                    by_sec[sid]["forecast_samples"] = len(history)
+                    by_sec[sid]["forecast_cadence_days"] = infer_gap_days(
+                        [h.on_date for h in history]
+                    )
                 for fp in in_window:
                     amt = base_fx.convert(fp.net_eur, fp.on_date)
                     row = by_sec[sid]
@@ -902,6 +918,24 @@ class DividendService:
             d = p.pay_date or p.ex_date
             if ttm_start <= d <= as_of:
                 ttm_net[p.security_id] += base_fx.convert(self._net_eur(p), d)
+
+        # How much of that trailing year the position was actually held for. A
+        # holding bought seven weeks ago divides seven weeks of income by a full
+        # position value, so its yield reads a fraction of the truth — SBI showed
+        # 1.0% off a single payment. The figure is not wrong to compute, but it is
+        # wrong to present unqualified, so report the coverage and let the UI badge
+        # it, the same way `yoy_vs_partial` handles the first year of income.
+        # One aggregate rather than reusing the forecast's lot map, which only
+        # exists when include_forecast is set — this figure must be right either way.
+        earliest_open = dict((await self.db.execute(
+            select(TaxLot.security_id, func.min(TaxLot.open_date))
+            .group_by(TaxLot.security_id)
+        )).all())
+        ttm_days_held: Dict[int, int] = {}
+        for sid, first_open in earliest_open.items():
+            if first_open is None:
+                continue
+            ttm_days_held[sid] = max(0, (as_of - max(first_open, ttm_start)).days)
         mv_by_sec: Dict[int, Decimal] = {}
         cost_by_sec: Dict[int, Decimal] = {}
         try:
@@ -973,6 +1007,14 @@ class DividendService:
                     round(float(ttm / mv * 100), 2)
                     if mv and mv > 0 and ttm > 0 else None
                 ),
+                # True when the position wasn't held for the whole trailing year, so
+                # a partial year's income is being divided by a full position value
+                # and the yield reads low. Badged, not silently annualized: scaling
+                # up would invent income the schedule may not support.
+                "trailing_yield_partial": (
+                    ttm_days_held.get(sid, 0) < TTM_FULL_COVERAGE_DAYS
+                ),
+                "days_held_in_ttm": ttm_days_held.get(sid),
                 # Same income over what the position cost rather than what it is
                 # worth: on an appreciated holding the two diverge, and the gap is
                 # the part a current-yield figure hides.
@@ -996,6 +1038,11 @@ class DividendService:
                 # received, 'gross_estimate' when only yfinance's gross per-share
                 # exists — the latter ignores withholding and so runs a little high.
                 "forecast_basis": row["forecast_basis"],
+                # How thin the projection's inference is: how many dated payments
+                # defined the schedule, and the median gap it settled on. Two
+                # samples is a guess with a schedule attached.
+                "forecast_samples": row["forecast_samples"],
+                "forecast_cadence_days": row["forecast_cadence_days"],
             })
         sec_rows.sort(key=lambda r: r["net_eur"] + r["forecast_net_eur"], reverse=True)
 

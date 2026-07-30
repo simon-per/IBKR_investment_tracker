@@ -353,7 +353,20 @@ export function DividendsTab() {
                           <span className="text-amber-600 dark:text-amber-500">*</span> gross estimate
                         </span>
                       )}
+                      {securities.some(
+                        (r) => r.forecast_net_eur > 0 && (r.forecast_samples ?? 9) <= 2
+                      ) && (
+                        <span title="The schedule for those rows was inferred from only one or two past payments, so the cadence is a guess rather than an observed pattern">
+                          <span className="text-amber-600 dark:text-amber-500">n=2</span> thin
+                          inference
+                        </span>
+                      )}
                     </>
+                  )}
+                  {securities.some((r) => r.trailing_yield_partial && r.trailing_yield_pct != null) && (
+                    <span title="Those positions were held for less than the full trailing year, so a partial year's income is divided by the full position value and the yield reads low. Not annualized, because that would invent income.">
+                      <span className="text-muted-foreground">†</span> partial-year yield
+                    </span>
                   )}
                 </div>
 
@@ -456,6 +469,20 @@ export function DividendsTab() {
                                 {row.forecast_basis === 'gross_estimate' && (
                                   <span className="ml-0.5 text-amber-600 dark:text-amber-500">*</span>
                                 )}
+                                {row.forecast_samples != null && row.forecast_samples <= 2 && (
+                                  <span
+                                    className="ml-0.5 text-amber-600 dark:text-amber-500"
+                                    title={
+                                      `Inferred from only ${row.forecast_samples} past payment(s)` +
+                                      (row.forecast_cadence_days
+                                        ? `, ${row.forecast_cadence_days} days apart`
+                                        : '') +
+                                      ' — treat the schedule as a guess'
+                                    }
+                                  >
+                                    n={row.forecast_samples}
+                                  </span>
+                                )}
                               </>
                             ) : (
                               '—'
@@ -466,8 +493,26 @@ export function DividendsTab() {
                               ? monthLabel(row.next_pay_date.slice(0, 7), true)
                               : '—'}
                           </td>
-                          <td className="px-2 py-1.5 text-right tabular-nums">
-                            {row.trailing_yield_pct != null ? `${row.trailing_yield_pct.toFixed(2)}%` : '—'}
+                          <td
+                            className="px-2 py-1.5 text-right tabular-nums"
+                            title={
+                              row.trailing_yield_partial && row.trailing_yield_pct != null
+                                ? `Held only ${row.days_held_in_ttm ?? '<365'} of the last 365 days, ` +
+                                  `so a partial year's income is divided by the full position ` +
+                                  `value — the real yield is higher`
+                                : undefined
+                            }
+                          >
+                            {row.trailing_yield_pct != null ? (
+                              <>
+                                {row.trailing_yield_pct.toFixed(2)}%
+                                {row.trailing_yield_partial && (
+                                  <span className="ml-0.5 text-muted-foreground">†</span>
+                                )}
+                              </>
+                            ) : (
+                              '—'
+                            )}
                           </td>
                           <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground">
                             {row.yield_on_cost_pct != null ? `${row.yield_on_cost_pct.toFixed(2)}%` : '—'}

@@ -313,6 +313,11 @@ class DividendSecurityRow(BaseModel):
     forecast_payouts: int
     forecast_net_eur: float
     trailing_yield_pct: Optional[float] = None  # TTM net / current market value
+    # True when the position wasn't held for the whole trailing year, so the yield
+    # above divides a partial year's income by a full position value and reads low.
+    # Not annualized: scaling up would invent income the schedule may not support.
+    trailing_yield_partial: bool = False
+    days_held_in_ttm: Optional[int] = None
     # TTM net over what the position cost. Higher than the trailing yield on a
     # holding that has appreciated, which is the point of showing both.
     yield_on_cost_pct: Optional[float] = None
@@ -322,6 +327,12 @@ class DividendSecurityRow(BaseModel):
     # 'net' = sized from dividends actually received; 'gross_estimate' = from
     # yfinance's gross per-share only, so withholding isn't deducted.
     forecast_basis: Optional[str] = None
+    # How thin the projection's inference is: how many dated payments defined the
+    # schedule, and the median gap it settled on. Two samples is a guess with a
+    # schedule attached — SBI's five projected payouts rested on exactly two rows
+    # from the wrong ticker, and nothing on the page said so.
+    forecast_samples: Optional[int] = None
+    forecast_cadence_days: Optional[int] = None
 
 
 class DividendDelta(BaseModel):
