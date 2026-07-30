@@ -330,9 +330,18 @@ export interface DividendMonthlyItem {
 }
 
 export interface DividendSummaryResponse {
+  /** NET of withholding, era-spliced. The `_eur` suffix is legacy — these are base currency. */
   monthly: DividendMonthlyItem[];
   ytd_eur: number;
+  /** NET (back-compat key for total_net_eur). */
   total_eur: number;
+  total_net_eur: number;
+  total_gross_eur: number;
+  total_withholding_eur: number;
+  /** 'mixed' is the boundary era: estimates before `ibkr_from`, actuals from there on. */
+  source: 'ibkr' | 'mixed' | 'yfinance_estimate';
+  ibkr_from: string | null;
+  base_currency: string;
   last_updated: string | null;
   sync_in_progress: boolean;
 }

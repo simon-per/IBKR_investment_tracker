@@ -31,6 +31,22 @@ logger = logging.getLogger(__name__)
 PRE_OWNERSHIP_HISTORY_YEARS = 3
 
 
+def _summary_source(payments, ibkr_from) -> str:
+    """
+    Which provenance the summary's figures actually carry: 'ibkr', 'mixed' or
+    'yfinance_estimate'.
+
+    Same three-way flag the tax report uses, and for the same reason: the era
+    splice keeps estimated months before the first IBKR payment, so once the
+    ledger starts, the card's total is IBKR actuals *plus* the estimates ahead of
+    it. Reporting a flat 'ibkr' claims real withholding for a period with none.
+    """
+    if not ibkr_from:
+        return "yfinance_estimate"
+    sources = {p.source for p in payments}
+    return "ibkr" if sources <= {"ibkr"} else "mixed"
+
+
 class DividendService:
     """Service for fetching and computing dividend income."""
 
@@ -577,7 +593,10 @@ class DividendService:
             "total_gross_eur": round(float(total_gross), 2),
             "total_withholding_eur": round(float(total_wht), 2),
             "total_net_eur": round(float(total_net), 2),
-            "source": "ibkr" if ibkr_from else "yfinance_estimate",
+            # Three-way, like the tax report's flag: once the ledger starts the card
+            # still carries the estimated months that precede it, so a flat "ibkr"
+            # would claim real withholding for a period that has none.
+            "source": _summary_source(payments, ibkr_from),
             "ibkr_from": ibkr_from.isoformat() if ibkr_from else None,
             "last_updated": last_updated,
             "base_currency": base_fx.base_currency,

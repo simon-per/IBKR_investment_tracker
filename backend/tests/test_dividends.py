@@ -149,3 +149,65 @@ def test_staleness_check_reads_aware_and_legacy_naive_timestamps():
     assert _is_summary_stale({**base, "last_updated": old_aware}) is True
     assert _is_summary_stale({**base, "last_updated": old_naive}) is True
     assert _is_summary_stale({**base, "last_updated": "not-a-date"}) is True
+
+
+# ── The summary card's provenance flag ──────────────────────────────────
+#
+# The card's figures are NET and era-spliced, but it reported a flat
+# source='ibkr' the moment any IBKR row existed — while still carrying the
+# estimated months that precede the ledger. The UI's footnote read off that
+# flag, so it claimed either real withholding for a period with none or, in the
+# other direction, "estimated gross via Yahoo, withholding not reflected" over
+# IBKR actuals net of real tax.
+
+
+@pytest.mark.asyncio
+async def test_the_boundary_era_reports_mixed_not_ibkr():
+    engine, session = await _make_session()
+    try:
+        # An estimate in January, real IBKR rows from May: both survive the splice.
+        session.add(DividendPayment(
+            security_id=1, ex_date=date(2026, 1, 15), source="yfinance_estimate",
+            amount_per_share=Decimal("1"), currency="EUR", shares_held=Decimal("5"),
+            gross_amount_eur=Decimal("5"), withholding_tax_eur=Decimal("0"),
+            net_amount_eur=Decimal("5"),
+        ))
+        await session.flush()
+        svc = DividendService(session)
+        await svc.sync_dividends_from_cash_transactions(
+            [_ct("DIVIDEND", 100), _ct("WHTAX", -15)], {"100": 1}
+        )
+        await session.commit()
+
+        summary = await svc.get_dividend_summary()
+
+        assert summary["source"] == "mixed"
+        assert summary["ibkr_from"] == "2026-05-02"
+        # Both eras contribute: 5 estimated + 85 net actual.
+        assert summary["total_net_eur"] == 90.0
+        assert summary["total_withholding_eur"] == 15.0
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_estimate_only_history_reports_yfinance_estimate():
+    engine, session = await _make_session()
+    try:
+        session.add(DividendPayment(
+            security_id=1, ex_date=date(2026, 1, 15), source="yfinance_estimate",
+            amount_per_share=Decimal("1"), currency="EUR", shares_held=Decimal("5"),
+            gross_amount_eur=Decimal("5"), withholding_tax_eur=Decimal("0"),
+            net_amount_eur=Decimal("5"),
+        ))
+        await session.commit()
+
+        summary = await DividendService(session).get_dividend_summary()
+
+        assert summary["source"] == "yfinance_estimate"
+        assert summary["ibkr_from"] is None
+        assert summary["total_withholding_eur"] == 0.0
+    finally:
+        await session.close()
+        await engine.dispose()

@@ -44,8 +44,8 @@ export function DividendSummary() {
     },
   })
 
-  const { yearRows, maxMonthlyAmount } = useMemo(() => {
-    if (!data?.monthly?.length) return { yearRows: [], maxMonthlyAmount: 0 }
+  const { yearRows, maxMonthlyAmount, maxYearTotal } = useMemo(() => {
+    if (!data?.monthly?.length) return { yearRows: [], maxMonthlyAmount: 0, maxYearTotal: 0 }
 
     // Build year → month grid
     const yearMap = new Map<number, (number | null)[]>()
@@ -71,11 +71,18 @@ export function DividendSummary() {
     rows.sort((a, b) => b.year - a.year)
     // Filter out years with no dividend income
     const filtered = rows.filter(r => r.yearTotal > 0)
-    return { yearRows: filtered, maxMonthlyAmount: maxAmt }
+    return {
+      yearRows: filtered,
+      maxMonthlyAmount: maxAmt,
+      maxYearTotal: filtered.reduce((m, r) => Math.max(m, r.yearTotal), 0),
+    }
   }, [data])
 
-  // Summary text for collapsed state
-  let summaryText: React.ReactNode = 'Gross dividend income by month'
+  // Summary text for collapsed state. These figures are NET of withholding and
+  // era-spliced (estimates before ibkr_from, IBKR actuals from there on) — the
+  // card used to call them gross Yahoo estimates, so the Performance tab silently
+  // disagreed with the Dividends tab and DA-1 withholding read as pre-tax income.
+  let summaryText: React.ReactNode = 'Net dividend income by month'
   if (data) {
     const parts: React.ReactNode[] = []
     if (data.ytd_eur > 0) {
@@ -101,6 +108,18 @@ export function DividendSummary() {
     }
     if (parts.length > 0) summaryText = <>{parts}</>
   }
+
+  // Yahoo's estimates are gross with no withholding; IBKR's rows are net of the
+  // tax actually deducted. Saying which applies is the whole point of the note,
+  // and 'mixed' is the boundary era where both do.
+  const cur = data?.base_currency ?? ''
+  const wht = data ? `${curSym}${formatEur(data.total_withholding_eur)}` : ''
+  const provenanceNote =
+    data?.source === 'ibkr'
+      ? `Net of ${wht} withholding tax actually deducted, from IBKR cash transactions${cur ? ` · ${cur}` : ''}`
+      : data?.source === 'mixed'
+        ? `Estimated gross via Yahoo Finance before ${data.ibkr_from}; IBKR actuals net of ${wht} withholding from there on${cur ? ` · ${cur}` : ''}`
+        : `Estimated gross dividends via Yahoo Finance — withholding taxes, ADR fees, and minor FX differences not reflected`
 
   return (
     <Card>
@@ -165,10 +184,14 @@ export function DividendSummary() {
                         ))}
                         <td className="px-0.5 py-0.5 border-l">
                           {row.yearTotal > 0 ? (
+                            // Scaled against the other year totals, not the monthly
+                            // max — a year always exceeds its own biggest month, so
+                            // this column was uniformly the darkest step and carried
+                            // no information.
                             <div
                               className={cn(
                                 'rounded px-1.5 py-1 text-center text-xs font-medium',
-                                getAmountColor(row.yearTotal, maxMonthlyAmount)
+                                getAmountColor(row.yearTotal, maxYearTotal)
                               )}
                               title={`Total ${row.year}: ${curSym}${formatEur(row.yearTotal)}`}
                             >
@@ -183,9 +206,7 @@ export function DividendSummary() {
                   </tbody>
                 </table>
               </div>
-              <p className="text-xs text-muted-foreground mt-3 italic">
-                Estimated gross dividends via Yahoo Finance — withholding taxes, ADR fees, and minor FX differences not reflected
-              </p>
+              <p className="text-xs text-muted-foreground mt-3 italic">{provenanceNote}</p>
             </>
           )}
         </CardContent>

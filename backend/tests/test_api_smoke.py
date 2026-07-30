@@ -251,6 +251,12 @@ def test_the_shapes_that_broke_production_serialize(client):
 
     summary = client.get("/api/dividends/summary").json()
     assert all(abs(m["amount_eur"]) > 0 for m in summary["monthly"])
+    # The card's footnote reads off these, and /summary has no response_model to
+    # declare them — so a rename in the service would silently blank the note.
+    assert summary["source"] in {"ibkr", "mixed", "yfinance_estimate"}
+    assert summary["total_eur"] == summary["total_net_eur"]  # back-compat key is NET
+    assert summary["total_gross_eur"] >= summary["total_net_eur"]
+    assert "total_withholding_eur" in summary and "ibkr_from" in summary
 
     # A payer bought recently, with per-share history but nothing received yet,
     # must still be forecast — and must say the amount is a gross estimate.
