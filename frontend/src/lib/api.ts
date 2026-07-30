@@ -502,8 +502,12 @@ export interface TaxReport {
   holdings_as_of: string;
   realized_totals: { proceeds: number; cost_basis: number; gain_loss: number };
   holdings_snapshot: TaxHoldingRow[];
-  holdings_snapshot_total: number;
+  /** null when the snapshot could not be built — a missing base, not a zero one. */
+  holdings_snapshot_total: number | null;
+  holdings_snapshot_error?: boolean;
   holdings_snapshot_note: string;
+  /** Omitted rows, FX failures, a fallback taking over — badged in the UI and CSV. */
+  warnings?: string[];
 }
 
 class ApiClient {

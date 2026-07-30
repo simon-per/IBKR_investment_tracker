@@ -438,3 +438,113 @@ async def test_the_boundary_year_keeps_pre_ibkr_estimates_and_labels_mixed():
     finally:
         await session.close()
         await engine.dispose()
+
+
+# ── The report must not report numbers it cannot justify ────────────────
+#
+# Two swallowed failures used to produce plausible figures in a filing aid:
+# _to_eur returned the *unconverted* foreign amount when FX failed (a TWD sale
+# reads ~35x high, still badged realized_source='trades'), and a bare
+# `except Exception: pass` turned any holdings-snapshot failure into a
+# Steuerwert of 0.00 served with the note still claiming it was valued at that
+# date's closes.
+
+
+async def _twd_session():
+    """A TWD security with one TWD SELL, and no exchange_rates table at all."""
+    engine, session = await _make_session()
+    session.add(Security(
+        id=2, isin="TW0002330008", symbol="2330", description="TSMC",
+        currency="TWD", conid=200, asset_category="STK", exchange="TWSE",
+    ))
+    await session.flush()
+    await TradeRepository(session).upsert({
+        "ib_key": "TX-TWD", "conid": "200", "security_id": 2, "symbol": "2330",
+        "trade_date": date(2026, 3, 10), "buy_sell": "SELL", "quantity": Decimal("-12"),
+        "price": Decimal("1000"), "proceeds": Decimal("12000"), "commission": Decimal("-10"),
+        "currency": "TWD", "realized_pnl": Decimal("1500"), "asset_category": "STK",
+    })
+    return engine, session
+
+
+@pytest.mark.asyncio
+async def test_an_unconvertible_sale_is_omitted_and_reported_not_mis_scaled():
+    engine, session = await _twd_session()
+    try:
+        report = await TaxService(session).get_tax_report(2026)
+
+        # 12,000 TWD is ~340 EUR. Reporting 12000 would be the old behaviour.
+        assert report["realized_totals"]["proceeds"] != 12000
+        assert not any(r["symbol"] == "2330" for r in report["realized_gains"])
+        assert report["warnings"], "an omitted sale must be reported, not silent"
+        assert "TWD" in " ".join(report["warnings"])
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_convertible_sale_alongside_an_unconvertible_one_still_counts():
+    engine, session = await _twd_session()
+    try:
+        # An EUR sale in the same year: it must survive its TWD neighbour.
+        await TradeRepository(session).upsert({
+            "ib_key": "TX-EUR", "conid": "100", "security_id": 1, "symbol": "AAA",
+            "trade_date": date(2026, 4, 1), "buy_sell": "SELL", "quantity": Decimal("-2"),
+            "price": Decimal("50"), "proceeds": Decimal("100"), "commission": Decimal("-1"),
+            "currency": "EUR", "realized_pnl": Decimal("10"), "asset_category": "STK",
+        })
+
+        report = await TaxService(session).get_tax_report(2026)
+
+        assert [r["symbol"] for r in report["realized_gains"]] == ["AAA"]
+        assert report["realized_totals"]["proceeds"] == 100.0
+        assert report["realized_source"] == "trades"
+        assert "understate" in " ".join(report["warnings"])
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_holdings_snapshot_is_flagged_not_reported_as_zero(monkeypatch):
+    engine, session = await _make_session()
+    try:
+        from app.services.portfolio_service import PortfolioService
+
+        async def _boom(self, base_fx, as_of):
+            raise RuntimeError("price currency cache blew up")
+
+        monkeypatch.setattr(PortfolioService, "holdings_snapshot_as_of", _boom)
+
+        report = await TaxService(session).get_tax_report(2025)
+
+        assert report["holdings_snapshot_error"] is True
+        # None, not 0.00 — a zero here reads as a computed wealth-tax base.
+        assert report["holdings_snapshot_total"] is None
+        assert report["holdings_snapshot"] == []
+        assert "not zero" in " ".join(report["warnings"])
+        # And the note must stop claiming a valuation that never happened.
+        assert "valued at that date's closing prices" not in report["holdings_snapshot_note"]
+
+        csv_text = TaxService(session).to_csv(report)
+        assert "WARNINGS" in csv_text
+        assert "This is not zero." in csv_text
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_report_carries_no_warnings_and_a_real_total():
+    engine, session = await _make_session()
+    try:
+        report = await TaxService(session).get_tax_report(2025)
+
+        assert report["warnings"] == []
+        assert report["holdings_snapshot_error"] is False
+        assert report["holdings_snapshot_total"] is not None
+        assert "valued at that date's closing prices" in report["holdings_snapshot_note"]
+    finally:
+        await session.close()
+        await engine.dispose()

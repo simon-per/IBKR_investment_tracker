@@ -98,6 +98,18 @@ export function TaxTab() {
         </Card>
       ) : data ? (
         <>
+          {/* A warning rides on a *successful* report — an omitted row or a
+              missing wealth-tax base is invisible unless it is rendered. */}
+          {data.warnings && data.warnings.length > 0 && (
+            <Card className="border-amber-300 dark:border-amber-900/60">
+              <CardContent className="space-y-1.5 py-4 text-sm text-amber-800 dark:text-amber-200">
+                {data.warnings.map((warning, i) => (
+                  <p key={i}>{warning}</p>
+                ))}
+              </CardContent>
+            </Card>
+          )}
+
           {/* --- Dividend income + withholding (DA-1) --- */}
           <Card>
             <CardHeader>
@@ -325,7 +337,15 @@ export function TaxTab() {
               </div>
             </CardHeader>
             <CardContent>
-              {data.holdings_snapshot.length === 0 ? (
+              {data.holdings_snapshot_error ? (
+                // A failure and an empty portfolio are different answers, and the
+                // wealth-tax base is the last figure that should read as 0.00
+                // because something upstream raised.
+                <p className="py-4 text-center text-sm text-red-600 dark:text-red-400">
+                  The snapshot could not be built, so no wealth-tax base is reported for{' '}
+                  {data.holdings_as_of}. This is not zero.
+                </p>
+              ) : data.holdings_snapshot.length === 0 ? (
                 <p className="py-4 text-center text-sm text-muted-foreground">No holdings to show.</p>
               ) : (
                 <div className="overflow-x-auto">
@@ -355,7 +375,11 @@ export function TaxTab() {
                         <td className="px-2 py-2" colSpan={2}>
                           Total
                         </td>
-                        <td className="px-2 py-2 text-right tabular-nums">{money(data.holdings_snapshot_total)}</td>
+                        <td className="px-2 py-2 text-right tabular-nums">
+                          {data.holdings_snapshot_total != null
+                            ? money(data.holdings_snapshot_total)
+                            : '—'}
+                        </td>
                         <td className="px-2 py-2" />
                       </tr>
                     </tfoot>

@@ -12,9 +12,10 @@ All monetary values are projected into the configured base currency.
 """
 import csv
 import io
+import logging
 from datetime import date
 from decimal import Decimal
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,13 +27,27 @@ from app.services.currency_service import CurrencyService
 from app.services.dividend_service import DividendService
 from app.services.portfolio_service import PortfolioService
 
+logger = logging.getLogger(__name__)
+
 
 class TaxService:
     def __init__(self, db: AsyncSession):
         self.db = db
         self.currency_service = CurrencyService(db)
 
-    async def _to_eur(self, amount: Decimal, currency: str, on_date: date) -> Decimal:
+    async def _to_eur(
+        self, amount: Decimal, currency: str, on_date: date
+    ) -> Optional[Decimal]:
+        """
+        Convert to EUR, or return None when no rate can be resolved.
+
+        It used to return the *unconverted* amount on failure, which reports a
+        foreign figure as base currency — a TWD sale would read ~35x high in a
+        filing aid still badged realized_source='trades', the badge that means
+        authoritative. Every other FX consumer skips the row with a warning
+        instead (sync_helper, portfolio_service, benchmark_service); this one
+        silently produced a number, and logged nothing at all.
+        """
         if not amount:
             return Decimal("0")
         if (currency or "EUR") == "EUR":
@@ -41,8 +56,12 @@ class TaxService:
             return await self.currency_service.convert_to_eur(
                 amount=amount, from_currency=currency, target_date=on_date
             )
-        except Exception:
-            return amount
+        except Exception as e:
+            logger.warning(
+                f"No {currency}->EUR rate for {on_date} ({e}); "
+                f"skipping the row rather than reporting {currency} as EUR"
+            )
+            return None
 
     async def get_tax_report(self, year: int) -> Dict:
         start = date(year, 1, 1)
@@ -148,11 +167,20 @@ class TaxService:
 
         realized_gains: List[Dict] = []
         r_proceeds = r_cost = r_gain = Decimal("0")
+        warnings: List[str] = []
+        trades_skipped = 0
+        skipped_currencies = set()
         for t, sec in trade_rows:
             if (t.buy_sell or "").upper() != "SELL":
                 continue
             proceeds_e = await self._to_eur(t.proceeds or Decimal("0"), t.currency, t.trade_date)
             gain_e = await self._to_eur(t.realized_pnl or Decimal("0"), t.currency, t.trade_date)
+            if proceeds_e is None or gain_e is None:
+                # Reporting the raw foreign amount would be worse than omitting
+                # it: the figure looks plausible and the badge says authoritative.
+                trades_skipped += 1
+                skipped_currencies.add(t.currency or "?")
+                continue
             cost_e = proceeds_e - gain_e
             proceeds = base_fx.convert(proceeds_e, t.trade_date)
             gain = base_fx.convert(gain_e, t.trade_date)
@@ -192,6 +220,25 @@ class TaxService:
                     "gain_loss": round(float(gain), 2),
                 })
 
+        if trades_skipped:
+            currencies = ", ".join(sorted(skipped_currencies))
+            if realized_source == "trades":
+                warnings.append(
+                    f"{trades_skipped} SELL trade(s) omitted from realized gains: no "
+                    f"{currencies} exchange rate for the trade date. The realized "
+                    f"totals below understate the year."
+                )
+            else:
+                # Every SELL was unconvertible, so the closed-lot approximation
+                # took over. It reads cost_basis_eur, which was converted at
+                # ingest, so it needs no trade-date rate — a genuinely independent
+                # derivation rather than a hole, but the badge must still say so.
+                warnings.append(
+                    f"All {trades_skipped} SELL trade(s) were unconvertible (no "
+                    f"{currencies} rate for the trade date), so realized gains fall "
+                    f"back to the closed-lot approximation."
+                )
+
         # --- Year-end holdings (wealth-tax base / Steuerwert) ---
         # Switzerland values wealth at 31 December, so a past year must be reconstructed
         # at that date rather than reported as today's positions. For the current year
@@ -200,6 +247,7 @@ class TaxService:
         as_of = end if end < today else today
         holdings: List[Dict] = []
         holdings_total = Decimal("0")
+        holdings_failed = False
         try:
             for row in await portfolio.holdings_snapshot_as_of(base_fx, as_of):
                 mv = row["market_value"]
@@ -210,8 +258,19 @@ class TaxService:
                     "market_value": round(float(mv), 2),
                     "cost_basis": round(float(row["cost_basis"]), 2),
                 })
-        except Exception:
-            pass
+        except Exception as e:
+            # A bare `pass` here served a Steuerwert of 0.00 as HTTP 200 with the
+            # note below still claiming the holdings were valued at that date's
+            # closes — nothing separated "no holdings" from "the snapshot raised",
+            # and the exception never reached the logs either.
+            logger.error(f"Holdings snapshot for {as_of} failed: {e}", exc_info=True)
+            holdings_failed = True
+            holdings = []
+            holdings_total = Decimal("0")
+            warnings.append(
+                f"The {as_of.isoformat()} holdings snapshot could not be built, so the "
+                f"wealth-tax base is unavailable — it is not zero."
+            )
 
         # The label reflects what actually contributed inside the year window:
         # "mixed" is the boundary year, where estimates cover the weeks before the
@@ -247,13 +306,20 @@ class TaxService:
                 "gain_loss": round(float(r_gain), 2),
             },
             "holdings_snapshot": holdings,
-            "holdings_snapshot_total": round(float(holdings_total), 2),
+            # None, not 0.00: a failed snapshot has no total, and a zero would be
+            # read as a computed wealth-tax base.
+            "holdings_snapshot_total": None if holdings_failed else round(float(holdings_total), 2),
+            "holdings_snapshot_error": holdings_failed,
             "holdings_as_of": as_of.isoformat(),
             "holdings_snapshot_note": (
+                f"The {as_of.isoformat()} holdings snapshot could not be built; no "
+                f"wealth-tax base is reported for this year."
+                if holdings_failed else
                 f"Holdings as at {as_of.isoformat()}, valued at that date's closing prices"
                 + ("." if as_of == end else " (current year — 31 December has not occurred yet).")
                 + " Positions whose price could not be resolved near that date are omitted."
             ),
+            "warnings": warnings,
         }
 
     def to_csv(self, report: Dict) -> str:
@@ -263,6 +329,14 @@ class TaxService:
 
         w.writerow([f"Tax report {report['year']} — all amounts in {cur}"])
         w.writerow([])
+
+        # The honesty flags are badged in the CSV as well as the UI, and a figure
+        # that is missing rather than zero has to say so where it is read.
+        if report.get("warnings"):
+            w.writerow(["WARNINGS"])
+            for warning in report["warnings"]:
+                w.writerow([warning])
+            w.writerow([])
 
         w.writerow([f"Dividend income (source: {report['dividend_source']})"])
         if report.get("dividend_source") == "mixed" and report.get("dividend_ibkr_from"):
@@ -298,9 +372,12 @@ class TaxService:
         w.writerow([])
 
         w.writerow([f"Holdings snapshot (wealth-tax base) as at {report.get('holdings_as_of', '')}"])
-        w.writerow(["Symbol", "Quantity", f"Market value ({cur})", f"Cost basis ({cur})"])
-        for h in report["holdings_snapshot"]:
-            w.writerow([h["symbol"], h["quantity"], h["market_value"], h["cost_basis"]])
-        w.writerow(["TOTAL", "", report["holdings_snapshot_total"], ""])
+        if report.get("holdings_snapshot_error"):
+            w.writerow(["Unavailable — the snapshot could not be built. This is not zero."])
+        else:
+            w.writerow(["Symbol", "Quantity", f"Market value ({cur})", f"Cost basis ({cur})"])
+            for h in report["holdings_snapshot"]:
+                w.writerow([h["symbol"], h["quantity"], h["market_value"], h["cost_basis"]])
+            w.writerow(["TOTAL", "", report["holdings_snapshot_total"], ""])
 
         return buf.getvalue()

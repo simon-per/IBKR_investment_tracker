@@ -296,3 +296,12 @@ def test_the_shapes_that_broke_production_serialize(client):
     aapl = next(r for r in attr["attributions"] if r["symbol"] == "AAPL")
     assert aapl["disposal_proceeds_eur"] > 0
     assert aapl["pnl_contribution_eur"] > -100
+
+    # The tax report's honesty fields survive the HTTP layer. holdings_snapshot_total
+    # is nullable now — a failed snapshot is a missing wealth-tax base, not a zero
+    # one — so the route must not coerce None to 0.0 or drop the flag.
+    tax = client.get(f"/api/tax/report?year={TODAY.year}").json()
+    assert tax["holdings_snapshot_error"] is False
+    assert tax["holdings_snapshot_total"] is not None
+    assert tax["warnings"] == []
+    assert tax["realized_source"] in {"trades", "closed_lot_estimate"}
