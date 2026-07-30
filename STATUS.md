@@ -51,20 +51,30 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 
 ## Just landed (2026-07-30) — needs a live look after the next deploy
 
-Five fixes from a fresh audit, all committed with tests that fail against the old code. Suite went
-313 → 331 backend. The behaviour changes are documented in `CLAUDE.md`; what to eyeball on prod:
+Two batches today. The earlier five (Yahoo gating, `openDateTime` off ibflex, SELL-beats-heuristic,
+tax-report honesty, dividend card net) are **deployed and verified on prod**. The second batch is the
+SBI dividend bug and its root cause; suite 313 → 357. What to eyeball:
 
-1. **`GET /api/portfolio/benchmark` is gated at the fetch.** Ticking a *new* benchmark in the picker
-   still has to warm from Yahoo, so check one unused key (e.g. Nikkei 225) actually populates. If it
-   returns empty, the per-ticker 300s attempt memo is refusing — wait it out and retry, don't debug.
-2. **Tax report may now show a warnings banner and `—` for Steuerwert.** Both are correct behaviour
-   for a failure; the account's data should produce neither. A banner appearing means look at the logs.
-3. **The Dividend Income card on Performance should now read "net" and match the Dividends tab.**
-   Expect `mixed` provenance (estimates before the ledger, actuals after), not `ibkr`.
-4. **Reconciliation now lets a real SELL outrank the cost-conserved heuristic.** No visible change
-   expected — this account has no sub-1% trim on record — but a future small trim will now close a lot.
-5. **Tax-lot open dates come from ibflex.** Identical output for this all-STK account; the regression
-   check is that `min(taxlots.open_date)` and the ALL-range chart are unchanged after the next sync.
+1. **SBI's forecast is deliberately empty.** The two poisoned estimate rows were purged on prod
+   (`manual_dividend_purge`, 2026-07-30). Income was unchanged to the cent — portfolio net 66.87 before
+   and after — and the forecast went 5 payouts / 12.17 → 0. **That emptiness is correct**, not a
+   regression: one IBKR payment cannot establish a cadence. It fills in when a second real payment
+   arrives, or when a genuine `SBI.TO` dividend series is fetched. Don't "fix" it.
+2. **A `DIVIDENDS PREDATE MAPPING` warning may appear** in market-data sync warnings for any other
+   security in the same shape. That is the new detector working; purge and let it refetch.
+3. **The dividends table has two new markers** — `n=2` on a thin forecast inference and `†` on a
+   partial-year trailing yield. Both are expected on recently-bought holdings.
+4. **A migration runs on the next deploy** (`o8d5f2a9b3c4`, `p9e6a3b0c4d5`): the dividend unique key
+   becomes source-aware, `ticker_mappings` gains timestamps, and `taxlots.close_date` gets an index.
+   Verified against a data-carrying copy, and auto-deploy backs up the DB first — but this is the one
+   change worth confirming came up clean.
+
+## The 2026-07-30 08:00 full_sync was lost
+
+Pushing at 06:00 UTC deployed straight into the 08:00 Berlin slot, and `/api/scheduler/history` has no
+`full_sync` row for that day. Today's 730-day price refresh and yfinance dividend sync did not run, and
+both IBKR slots failed `1001`. Tomorrow's 08:00 recovers it. This is the documented trap firing exactly
+as described — see *Worth doing next* for the two fixes that would stop it.
 
 ## Worth doing next
 
@@ -104,10 +114,17 @@ Rough priority. None of these are started.
 7. **A horizontal-scroll affordance on the wide tables.** The dividends position table has ten
    columns and scrolls inside its own container at narrow widths, with nothing hinting that it can.
    Scope is wider than it looks: `WatchlistTab` is 18 columns.
-8. **`MarketPriceRepository.bulk_create` is a per-row SELECT + flush + refresh** (`:147`) despite the
-   `UniqueConstraint('security_id','date')` that makes SQLite `ON CONFLICT DO UPDATE` available —
-   a split-purge refill is ~1,500 statements while holding the sync gate.
-9. **Fold `PRE_OWNERSHIP_HISTORY_YEARS` pruning into a scheduled job.** `prune_empty_dividends.py`
+8. **Give auto-deploy a sync-slot guard, and put the script in the repo.** `/root/auto-deploy.sh`
+   deploys on any `*/10` tick where origin/main is ahead, with no awareness of the schedule — that is
+   what cost today's `full_sync`. Skip when within ~10 min of a Berlin slot and let the next tick take
+   it; a deploy is never urgent, a lost 08:00 costs a day of price history. The script also lives
+   **only on the VPS**, unversioned and unreviewed, despite governing every deploy.
+9. **Persist the scheduler's job store.** The real fix behind the above: APScheduler runs in-process
+   with an in-memory store, so any restart drops whatever slot it overlapped. A `SQLAlchemyJobStore`
+   with `coalesce=True` and a `misfire_grace_time` would run the missed job on startup instead of
+   losing it. CLAUDE.md's "don't push near a slot" is a human workaround for a missing feature, and it
+   has now failed once in practice.
+10. **Fold `PRE_OWNERSHIP_HISTORY_YEARS` pruning into a scheduled job.** `prune_empty_dividends.py`
    is a manual CLI; the ingest window now prevents new junk, so this is cleanup-only and low value.
 
 Also noted, not yet items: `Dashboard.tsx:84` hardcodes the ALL-range start at `2024-05-28` while
@@ -141,15 +158,18 @@ detail; this exists so the next session knows what just moved without reading it
 *Just landed* above, which is actionable (what to eyeball on prod) and gets deleted once verified:
 these lines are permanent, so don't "tidy up" the overlap by deleting the wrong one.
 
-- **2026-07-30** — five audit fixes: Yahoo gating on the benchmark GET + fundamentals sync,
-  `openDateTime` read off ibflex instead of an XML position index, a real SELL outranking the
-  cost-conserved heuristic, tax-report honesty flags, the dividend card relabelled net. Suite 313 → 331.
+- **2026-07-30** — two batches: five audit fixes (Yahoo gating, `openDateTime` off ibflex, SELL beats
+  the cost-conserved heuristic, tax-report honesty, dividend card net), then the SBI dividend bug —
+  poisoned estimates purged, mapping changes now retire the rows they produced, source-aware dividend
+  key, provenance detector, batched price/lot writes. Suite 313 → 357. Lost the 08:00 full_sync to a
+  deploy.
 - **2026-07-29** — correctness sweep (16 fixes) plus dividend growth (MoM/YoY) and the DividendsTab
   rebuild; scheduler gated behind `SCHEDULER_ENABLED`; STATUS.md split out of CLAUDE.md.
 - **2026-07-28** — external cash ledger live on prod (deposits ingested, transfers excluded) and the
   money-in splice; Dividends tab + breakdown endpoint; Flex token redacted from stored and served errors.
 - **2026-07-27** — SBI mapping repair: reject a Yahoo ticker quoting a different currency than the
   security, second FX provider fallback for currencies the ECB set lacks, `manage_mappings` CLI for
-  the last table still edited by hand.
+  the last table still edited by hand. (Prices were purged here; the dividend rows were not — that
+  half surfaced on 07-30.)
 - **2026-07-26** — third Flex token lockout, self-inflicted: stop re-requesting after `Code=1001` and
   poll the same reference instead; offline XML ingest added as the escape hatch.

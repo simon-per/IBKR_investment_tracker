@@ -472,11 +472,18 @@ class DividendService:
         # Cadence must come from ONE dated series. The same dividend is recorded
         # twice — yfinance under its ex-date, IBKR under its pay date — and the
         # two sit weeks apart, which halves the apparent gap: ASML's quarterly
-        # schedule read as 74 days (5 payouts a year instead of 4) and SBI's
-        # monthly as 28 (13 instead of 12). Deduplication cannot separate them,
-        # because Mastercard's ex-to-pay lag of 29 days is longer than a monthly
-        # payer's whole cycle. yfinance carries the complete, regular ex-date
-        # series, so where it exists it alone defines the schedule.
+        # schedule read as 74 days, 5 payouts a year instead of 4. Deduplication
+        # cannot separate them, because Mastercard's ex-to-pay lag of 29 days is
+        # longer than a monthly payer's whole cycle. yfinance carries the complete,
+        # regular ex-date series, so where it exists it alone defines the schedule.
+        #
+        # But note the cost of that rule: the chosen series is trusted absolutely,
+        # including the IBKR rows it then discards. When SBI's two estimate rows
+        # turned out to have come from the wrong ticker, they alone projected a
+        # monthly schedule for a company that does not pay one, and the real
+        # payment was skipped. Hence forecast_samples on the response and the
+        # provenance check in SchedulerService — the rule stays, but a thin or
+        # suspect inference now says so instead of looking like any other.
         per_share_rows = defaultdict(list)
         for p in raw_payments:
             if p.amount_per_share is not None:

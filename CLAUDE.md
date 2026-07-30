@@ -256,7 +256,7 @@ Tests: `tests/test_flex_xml_sanitizer.py`, `tests/test_flex_ingestion_e2e.py`.
 - **app_settings** — `base_currency`, `last_sync_to_date`. Plus fundamentals + earnings tables.
 - **sync_runs** — one row per sync attempt (`sync_type` ∈ `ibkr` | `ibkr_sync` | `full_sync` |
   `market_data_only` | `ibkr_manual_xml` | `manual_prices` | `manual_mapping` | `manual_cash_flow` |
-  `manual_dividend_prune`,
+  `manual_dividend_prune` | `manual_dividend_purge`,
   `status`, `message`,
   `details`, `warnings`). Timestamps are
   serialized UTC-aware via `utc_iso()` — a bare naive `isoformat()` is parsed as *local* by the browser,
@@ -464,6 +464,42 @@ the columns directly.** Existing junk is removable with `app/cli/prune_empty_div
 (deletes only rows the readers already ignore; never a row still awaiting computation). Run on prod
 2026-07-29 (`manual_dividend_prune`): 1350 zero rows removed, real payments remain.
 
+### A wrong mapping poisons dividends too, and only prices were ever purged
+
+`dividend_payments` rows tagged `yfinance_estimate` are keyed to whatever Yahoo ticker resolved when they
+were written. Correcting a mapping does not retire them, and until 2026-07-30 nothing could:
+`manage_mappings disable --purge-prices` cleared `market_prices` only, `DividendRepository` had no delete
+method at all, and `prune_empty_dividends` deletes only rows carrying **no** income — so a poisoned row
+with a plausible positive amount was unreachable by every tool.
+
+That is the second half of the SBI failure. `SBI@TSE` is **SERABI GOLD PLC** (CAD, Toronto). The mapping
+was corrected to `SBI.TO` and the prices purged and refetched on 2026-07-27; its two dividend rows,
+computed 06-24 and 07-25 under the bare-ticker US listing, survived. Because cadence comes from whichever
+series carries `amount_per_share` — and skips the IBKR rows when one exists — **those two rows alone
+projected five monthly payouts for a company that does not pay monthly, while its one real payment was
+discarded.** Realized income stayed correct throughout, since the era splice drops estimates after
+`ibkr_from`; the damage was confined to the forecast, which is why it survived a month unnoticed.
+
+Three things close it:
+
+- **`app/cli/purge_dividend_estimates.py`** — deletes a security's estimates, never an `ibkr` row (those
+  carry real withholding and no mapping can invalidate them). `--dry-run`, ambiguous symbols refused,
+  records `manual_dividend_purge`. Run on prod 2026-07-30: 2 rows, income unchanged to the cent, forecast
+  went 5 payouts → 0. **Nothing projected is the correct outcome** until a genuine series exists.
+- **`disable --purge-prices` now purges estimates too**, and `set` warns when a ticker change makes
+  existing estimates suspect. `list` flags `DIVIDENDS PREDATE MAPPING`.
+- **`find_dividends_predating_their_mapping()`** runs after every market-data sync, warning when a held
+  security's estimates were computed before its mapping's `updated_at`. That comparison is why
+  `ticker_mappings` gained `created_at`/`updated_at` — it had **no timestamps at all**, which is what made
+  "did this data come from the current ticker?" unanswerable for months.
+
+The identity is `(security_id, source, ex_date)`, not `(security_id, ex_date)`: the column holds an
+ex-date for yfinance rows and the **pay** date for IBKR ones, and one shared slot let them overwrite each
+other whenever a payer's lag landed on another record's date — producing a single row with IBKR's gross
+and the estimate's per-share. Mastercard's 29-day lag already exceeds a monthly cycle. The downgrade in
+`o8d5f2a9b3c4` refuses (before any DDL) when cross-source same-day rows exist, because re-narrowing a key
+over data the wider one allowed is lossy.
+
 ### The forecast — four rules that were each a bug first
 
 **Size from `amount_per_share`, not from income received.** The payout schedule belongs to the company,
@@ -473,15 +509,23 @@ non-payer, and **only 15 of 36 held securities could be forecast** — TSMC, Sam
 
 **Infer cadence from ONE dated series.** The same dividend is stored twice — yfinance under its ex-date,
 IBKR under its pay date, weeks apart — which halves the apparent gap: ASML's quarterly schedule read as
-74 days (5 payouts a year) and SBI's monthly as 28 (13 a year). Deduplication cannot fix it, because
-Mastercard's ex-to-pay lag of 29 days exceeds a monthly payer's whole cycle. Where yfinance rows exist
-(`amount_per_share is not null`, ≥2 of them) they alone define the schedule; IBKR rows still supply the
-net amounts.
+74 days, 5 payouts a year instead of 4. Deduplication cannot fix it, because Mastercard's ex-to-pay lag
+of 29 days exceeds a monthly payer's whole cycle. Where yfinance rows exist (`amount_per_share is not
+null`, ≥2 of them) they alone define the schedule; IBKR rows still supply the net amounts.
 
-**Step by the calendar.** Dividends pay on a day of the month, so a fixed day-step drifts — 31 days gave
-SBI 11 payouts a year instead of 12, and 91 days walked a quarterly payer from the 15th to the 14th to
-the 13th. A gap near a calendar period snaps to it (`CALENDAR_PERIODS`), keeping the schedule's own day
-and clamping at month end; anything else keeps day-stepping.
+**The cost of that rule, and the guards added 2026-07-30:** the chosen series is trusted absolutely,
+*including over the IBKR rows it then discards*. So two bad estimate rows can define a schedule outright
+— which is exactly what SBI did (see *A wrong mapping poisons dividends too* below). The rule stays,
+because the alternative resurrects the double-count; what changed is that a thin or suspect inference now
+declares itself. `forecast_samples` and `forecast_cadence_days` ride on each breakdown row (badged at
+n≤2), and `find_dividends_predating_their_mapping()` warns when the rows came from an older ticker.
+**Earlier revisions of this file cited "SBI's monthly read as 28 days" as an example here. That was the
+poisoned data, not a real schedule — don't reinstate it.**
+
+**Step by the calendar.** Dividends pay on a day of the month, so a fixed day-step drifts — 31 days gives
+a monthly payer 11 payouts a year instead of 12, and 91 days walked a quarterly payer from the 15th to
+the 14th to the 13th. A gap near a calendar period snaps to it (`CALENDAR_PERIODS`), keeping the
+schedule's own day and clamping at month end; anything else keeps day-stepping.
 
 **Judge staleness from *now*, not from the horizon.** The stopped-payer guard compares against `as_of`,
 because the distance to a future horizon is a property of the question. Otherwise asking about 2027 made
@@ -834,7 +878,7 @@ raiser for that whole module, so an accidental network reach fails loudly; `/api
 is excluded because it lazy-fetches Yahoo on a cache miss, and POST routes are excluded because they
 start real syncs. **Add a case here when an endpoint's response shape changes.**
 
-Tests (331 backend + 45 frontend, all offline — no IBKR, Yahoo or FX-provider calls):
+Tests (357 backend + 45 frontend, all offline — no IBKR, Yahoo or FX-provider calls):
 ```bash
 cd backend && ./venv/Scripts/python.exe -m pytest tests/ -q
 cd frontend && npx tsc -b && npm run test && npm run build
@@ -897,8 +941,10 @@ docker exec backend-portfolio-backend-1 python -m app.cli.manage_mappings disabl
   the security exists is allowed on purpose: that's how you pin one ahead of the statement.
 - **`disable`** sets `is_active=False` rather than deleting (`get_mapping()` already filters on it), so
   the row stops being consulted while the record of what was tried survives. **`--purge-prices`** is the
-  whole recovery in one step: drop the prices the bad mapping produced and let a scheduled job refill
-  them — incremental caching fetches only missing dates, so it costs **no ad-hoc Yahoo call**.
+  whole recovery in one step: drop the prices **and the yfinance dividend estimates** the bad mapping
+  produced, and let a scheduled job refill them — incremental caching fetches only missing dates, so
+  it costs **no ad-hoc Yahoo call**. IBKR dividend rows are never touched. It purged prices only
+  until 2026-07-30, which is how SBI's poisoned estimates outlived its mapping fix.
 - `--dry-run` on both mutating commands; every edit records a `sync_runs` row (`manual_mapping`),
   because a mapping change being invisible is why SBI went unnoticed for months.
 
@@ -960,6 +1006,8 @@ Tests: `tests/test_currency_fallback.py`.
 | "Money added" is blank or `—` | Expected before `deposits_from`: no IBKR deposit ledger exists for the pre-transfer years. Not a bug — Deployed covers that era |
 | Realized gains look low + a `warnings[]` entry names a currency | No FX rate for that trade date, so the sale was **omitted** rather than mis-scaled. Check `WARM_CURRENCIES` covers it |
 | Steuerwert reads `—` instead of a number | `holdings_snapshot_error`: the snapshot raised. Check the logs — this is deliberately *not* 0.00 |
+| A dividend forecast looks invented | Check `forecast_samples` on the breakdown row — n≤2 is a guess. Then `manage_mappings list` for `DIVIDENDS PREDATE MAPPING`, and purge with `purge_dividend_estimates` |
+| A trailing yield looks far too low | `trailing_yield_partial`: the position wasn't held a full year, so partial income is over a full position value. Not a bug, and deliberately not annualized |
 | A position's value is far off IBKR's | Suspect the `ticker_mappings` row before the price feed: run `manage_mappings list` and look for a currency disagreement, then compare `market_prices.close_price` against IBKR's `market_price` in the *same* currency |
 | App total ≠ IBKR total | Compare against `gross_position_value`, **not** net liquidation (which adds cash); and intraday the app holds the last *close* while IBKR quotes live |
 | Site "down" in the browser | Often TIM home DNS, not the server — verify with `Test-NetConnection`, not `nslookup` |
