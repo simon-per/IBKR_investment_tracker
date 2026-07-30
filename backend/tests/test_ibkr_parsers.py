@@ -123,3 +123,75 @@ async def test_extract_cash_transactions_keeps_only_dividend_types():
 @pytest.mark.asyncio
 async def test_extract_cash_transactions_absent_section_returns_empty():
     assert await _svc().extract_cash_transactions(_flex(SimpleNamespace())) == []
+
+
+# ── extract_taxlots: openDateTime comes off the parsed row ──────────────
+#
+# It used to be scraped from the raw XML into a separate list and matched back by
+# position index. That list kept only STK rows carrying the attribute while the
+# loop enumerated *every* OpenPosition, so one non-STK row — or one lot without
+# the attribute — shifted every index after it. The conid check turned the
+# mismatch into a silent fallback to reportDate rather than realigning, stamping
+# every later lot with the statement date. ibflex 0.15 parses the field itself:
+#   parse_element_attr(Types.OpenPosition, 'openDateTime', '20251013;112102')
+#     -> datetime(2025, 10, 13, 11, 21, 2)
+
+_OPEN_POSITIONS_XML = """<FlexQueryResponse queryName="Portfolio" type="AF">
+<FlexStatements count="1">
+<FlexStatement accountId="U1" fromDate="2026-01-01" toDate="2026-07-24"
+ period="YearToDate" whenGenerated="2026-07-24;120000">
+ <OpenPositions>
+  <OpenPosition assetCategory="STK" symbol="AAA" conid="1001" isin="US0000000001"
+   description="A CORP" currency="EUR" listingExchange="NASDAQ" position="10"
+   costBasisPrice="100" costBasisMoney="1000" openDateTime="20240115;093000"
+   levelOfDetail="LOT" reportDate="2026-07-24" />
+  <OpenPosition assetCategory="BOND" symbol="BND" conid="2002"
+   description="A BOND" currency="EUR" position="5"
+   costBasisPrice="98" costBasisMoney="490" openDateTime="20250601;093000"
+   levelOfDetail="LOT" reportDate="2026-07-24" />
+  <OpenPosition assetCategory="STK" symbol="CCC" conid="3003" isin="US0000000003"
+   description="C CORP" currency="EUR" listingExchange="NASDAQ" position="7"
+   costBasisPrice="50" costBasisMoney="350" openDateTime="20260302;140000"
+   levelOfDetail="LOT" reportDate="2026-07-24" />
+ </OpenPositions>
+</FlexStatement>
+</FlexStatements>
+</FlexQueryResponse>
+"""
+
+
+@pytest.mark.asyncio
+async def test_a_non_stk_row_does_not_shift_later_lots_open_dates():
+    svc = _svc()
+    flex_data = svc.parse_flex_xml(_OPEN_POSITIONS_XML.encode())
+
+    taxlots = await svc.extract_taxlots(flex_data)
+
+    by_conid = {t["conid"]: t for t in taxlots}
+    assert set(by_conid) == {"1001", "3003"}          # the bond is filtered out
+    assert by_conid["1001"]["open_date"] == date(2024, 1, 15)
+    # The row after the bond is the one the index shift used to break: it read
+    # reportDate (2026-07-24), the day the sync noticed it, not the purchase.
+    assert by_conid["3003"]["open_date"] == date(2026, 3, 2)
+
+
+@pytest.mark.asyncio
+async def test_a_lot_without_an_open_date_falls_back_to_report_date():
+    xml = _OPEN_POSITIONS_XML.replace(' openDateTime="20260302;140000"', "")
+    svc = _svc()
+
+    taxlots = await svc.extract_taxlots(svc.parse_flex_xml(xml.encode()))
+
+    by_conid = {t["conid"]: t for t in taxlots}
+    assert by_conid["3003"]["open_date"] == date(2026, 7, 24)   # reportDate
+    assert by_conid["1001"]["open_date"] == date(2024, 1, 15)   # unaffected
+
+
+@pytest.mark.asyncio
+async def test_open_date_time_is_narrowed_to_a_date():
+    """The attribute parses to a datetime; taxlots.open_date is a Date column."""
+    svc = _svc()
+    flex_data = svc.parse_flex_xml(_OPEN_POSITIONS_XML.encode())
+
+    for lot in await svc.extract_taxlots(flex_data):
+        assert type(lot["open_date"]) is date

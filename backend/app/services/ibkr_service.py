@@ -353,46 +353,6 @@ class IBKRService:
             logger.warning(f"Flex XML sanitizer failed ({e}); parsing the original XML unchanged")
             return xml_content, []
 
-    def _extract_open_date_times(self, xml_content: bytes) -> List[Dict]:
-        """
-        Manually extract openDateTime values from XML since ibflex 0.15 doesn't parse them.
-
-        Returns a list of dicts with position data including openDateTime.
-        We'll match by index since ibflex preserves order.
-        """
-        positions = []
-
-        try:
-            root = ET.fromstring(xml_content)
-            # Find all OpenPosition elements - order is preserved
-            for open_pos in root.findall('.//OpenPosition'):
-                conid = open_pos.get('conid')
-                open_dt_str = open_pos.get('openDateTime')
-                quantity = open_pos.get('position')
-                cost_basis_money = open_pos.get('costBasisMoney')
-                asset_category = open_pos.get('assetCategory')
-
-                # Only process STK (stocks)
-                if asset_category == 'STK' and conid and open_dt_str:
-                    try:
-                        # Handle both formats: "20251013" and "20251013;112102"
-                        if ';' in open_dt_str:
-                            open_dt_str = open_dt_str.split(';')[0]  # Take only date part
-                        open_dt = datetime.strptime(open_dt_str, '%Y%m%d').date()
-                        positions.append({
-                            'conid': conid,
-                            'quantity': quantity,
-                            'cost_basis_money': cost_basis_money,
-                            'open_date': open_dt
-                        })
-                    except ValueError:
-                        logger.warning(f"Could not parse openDateTime '{open_dt_str}' for conid {conid}")
-        except Exception as e:
-            logger.warning(f"Error extracting openDateTime from XML: {e}")
-
-        logger.info(f"Extracted {len(positions)} openDateTime values from XML")
-        return positions
-
     async def fetch_flex_data(self, retry_delays: Optional[List[int]] = None) -> Dict:
         """
         Fetch data from IBKR Flex Query API.
@@ -497,9 +457,6 @@ class IBKRService:
         # entire sync.
         fixed_response, flex_warnings = self._sanitize_flex_xml(fixed_response)
 
-        # Extract openDateTime values before ibflex parsing (since ibflex 0.15 doesn't support it)
-        open_date_times = self._extract_open_date_times(fixed_response)
-
         # Parse the XML response
         try:
             response_obj = parser.parse(fixed_response)
@@ -535,7 +492,6 @@ class IBKRService:
             'account_id': statement.accountId if hasattr(statement, 'accountId') else None,
             'from_date': statement.fromDate if hasattr(statement, 'fromDate') else None,
             'to_date': statement.toDate if hasattr(statement, 'toDate') else None,
-            'open_date_times': open_date_times,  # Include manually extracted openDateTime values
             'flex_warnings': flex_warnings,  # Schema drift the sanitizer worked around
         }
 
@@ -616,15 +572,11 @@ class IBKRService:
             List of tax lot dictionaries with purchase details
         """
         statement = flex_data['statement']
-        open_date_list = flex_data.get('open_date_times', [])  # Get manually extracted dates (list)
         taxlots = []
 
         # Extract from OpenPositions
         if hasattr(statement, 'OpenPositions') and statement.OpenPositions:
-            positions_list = list(statement.OpenPositions)
-
-            # Match by index - ibflex preserves order from XML
-            for idx, position in enumerate(positions_list):
+            for position in statement.OpenPositions:
                 # Only process stocks - assetCategory is an enum (AssetClass.STOCK)
                 if not hasattr(position, 'assetCategory') or position.assetCategory != AssetClass.STOCK:
                     continue
@@ -640,23 +592,26 @@ class IBKRService:
                 # Get symbol for logging
                 symbol = position.symbol if hasattr(position, 'symbol') else 'UNKNOWN'
 
-                # Look up openDateTime from manually extracted list by index
-                open_date = None
-                if idx < len(open_date_list):
-                    extracted = open_date_list[idx]
-                    # Verify conid matches (safety check)
-                    if extracted['conid'] == str(conid):
-                        open_date = extracted['open_date']
-                        logger.debug(f"Matched openDateTime for {symbol} (index {idx}): {open_date}")
-                    else:
-                        logger.warning(f"Index mismatch at {idx}: expected conid {conid}, got {extracted['conid']}")
+                # openDateTime comes off the parsed row. This used to be scraped
+                # from the raw XML into a separate list and matched back by
+                # position index — but that list kept only STK rows carrying the
+                # attribute, while the loop enumerated *every* OpenPosition, so a
+                # single bond/option row or one lot without the attribute shifted
+                # every index after it. The conid check caught the mismatch and
+                # fell back to reportDate rather than realigning, which silently
+                # stamped every later lot with the statement date: the wrong FX
+                # date on cost_basis_eur, deployment collapsed into one month,
+                # and XIRR booking every purchase on the same day.
+                open_date = getattr(position, 'openDateTime', None)
+                if isinstance(open_date, datetime):
+                    open_date = open_date.date()
 
-                if not open_date:
-                    # Fallback to reportDate if openDateTime not found
+                if not isinstance(open_date, date):
+                    # Fallback to reportDate if openDateTime isn't present
                     report_date = position.reportDate if hasattr(position, 'reportDate') and position.reportDate else None
-                    if report_date:
-                        open_date = report_date if isinstance(report_date, date) else date.today()
-                        logger.warning(f"No openDateTime for {symbol} (index {idx}), using reportDate: {open_date}")
+                    if isinstance(report_date, date):
+                        open_date = report_date
+                        logger.warning(f"No openDateTime for {symbol}, using reportDate: {open_date}")
                     else:
                         open_date = date.today()
                         logger.warning(f"No openDateTime or reportDate for {symbol} (conid: {conid}), using today's date")
