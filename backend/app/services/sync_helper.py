@@ -661,35 +661,16 @@ async def reconcile_taxlots(
 
         conid = security_id_to_conid.get(security_id)
 
-        # (1) Deterministic corporate-action reclassification. If a split-like
-        # action (split/reverse-split/spinoff/symbol change) occurred for this
-        # security in the window since the last sync, the share-count change is
-        # NOT a sale — refresh the open lots and record no closure.
-        if conid and corp_action_repo is not None and last_sync_date is not None:
-            actions = await corp_action_repo.get_by_conid_in_range(conid, last_sync_date, report_to_date)
-            if any((a.action_type or "") in SPLIT_LIKE_ACTIONS for a in actions):
-                types = ",".join(sorted({a.action_type for a in actions if a.action_type}))
-                logger.info(
-                    f"security_id={security_id}: qty dropped {sold_qty} but a split-like "
-                    f"corporate action ({types}) occurred — reclassifying, not a sale"
-                )
-                continue
-
-        # (2) Window-free fallback heuristic: a reverse split / consolidation
-        # conserves total cost basis (fewer shares, higher price, same money);
-        # a real sale reduces it. If cost basis is (near) conserved, don't record a sale.
-        snapshot_cost = sum((lot["cost_basis"] for lot in snap_lots), Decimal("0"))
-        inc_cost = incoming_cost.get(security_id, Decimal("0"))
-        if snapshot_cost > 0 and inc_cost >= snapshot_cost * COST_CONSERVED_RATIO:
-            logger.info(
-                f"security_id={security_id}: qty dropped {sold_qty} but cost basis "
-                f"conserved ({inc_cost}/{snapshot_cost}) — split/consolidation, not a sale"
-            )
-            continue
-
-        # (3) It's a real sale. Prefer the actual SELL trade's date + a 'trade'
-        # provenance tag when trade data is available for the window; otherwise
-        # fall back to the report date and mark the closure 'heuristic'.
+        # (1) An actual SELL execution settles it: IBKR reported the disposal
+        # itself, so neither inference below gets a say. This lookup used to run
+        # *third*, supplying only a date and a provenance tag after the branches
+        # beneath had already decided — so a trim of <=1% of cost basis took the
+        # cost-conserved path and recorded no closure at all, with the real SELL
+        # sitting in `trades` for that very window. A 200-share position at
+        # 20,000 sold down by 2 shares leaves 19,800 incoming, and
+        # 19800 >= 20000 * 0.99. The disposal then never reached calculate_xirr()'s
+        # +proceeds inflow, the attribution's disposal term, that day's
+        # external_flow_eur, or the tax report's closed_lot_estimate path.
         close_source = "heuristic"
         effective_close_date = close_date
         if conid and trade_repo is not None and last_sync_date is not None:
@@ -698,6 +679,35 @@ async def reconcile_taxlots(
             if sell_dates:
                 close_source = "trade"
                 effective_close_date = max(sell_dates)
+
+        # With no SELL on record the drop has to be explained by inference, in
+        # the documented order: corporate action first, cost conservation last.
+        if close_source != "trade":
+            # (2) Deterministic corporate-action reclassification. If a split-like
+            # action (split/reverse-split/spinoff/symbol change) occurred for this
+            # security in the window since the last sync, the share-count change is
+            # NOT a sale — refresh the open lots and record no closure.
+            if conid and corp_action_repo is not None and last_sync_date is not None:
+                actions = await corp_action_repo.get_by_conid_in_range(conid, last_sync_date, report_to_date)
+                if any((a.action_type or "") in SPLIT_LIKE_ACTIONS for a in actions):
+                    types = ",".join(sorted({a.action_type for a in actions if a.action_type}))
+                    logger.info(
+                        f"security_id={security_id}: qty dropped {sold_qty} but a split-like "
+                        f"corporate action ({types}) occurred — reclassifying, not a sale"
+                    )
+                    continue
+
+            # (3) Window-free fallback heuristic: a reverse split / consolidation
+            # conserves total cost basis (fewer shares, higher price, same money);
+            # a real sale reduces it. If cost basis is (near) conserved, don't record a sale.
+            snapshot_cost = sum((lot["cost_basis"] for lot in snap_lots), Decimal("0"))
+            inc_cost = incoming_cost.get(security_id, Decimal("0"))
+            if snapshot_cost > 0 and inc_cost >= snapshot_cost * COST_CONSERVED_RATIO:
+                logger.info(
+                    f"security_id={security_id}: qty dropped {sold_qty} but cost basis "
+                    f"conserved ({inc_cost}/{snapshot_cost}) — split/consolidation, not a sale"
+                )
+                continue
 
         if not effective_close_date:
             # No date to stamp the closure with — skip creating closed lots.

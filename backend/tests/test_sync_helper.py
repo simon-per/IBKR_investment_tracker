@@ -442,3 +442,87 @@ async def test_genuine_sale_still_closes_when_cost_drops():
     finally:
         await session.close()
         await engine.dispose()
+
+@pytest.mark.asyncio
+async def test_a_small_sale_with_a_real_trade_beats_the_cost_conserved_heuristic():
+    """
+    The cost-conservation heuristic is a *fallback*, and it used to run ahead of
+    the SELL-trade lookup. A trim of <=1% of cost basis therefore looked like a
+    consolidation and recorded no closure at all, even with IBKR's own SELL
+    execution sitting in `trades` for that window — losing the disposal from
+    XIRR's proceeds inflow, the attribution's disposal term and the tax report.
+    """
+    engine, session, repo, trade_repo, corp_repo = await _make_repos_with_txns()
+    try:
+        await _seed_open_lot(repo, 1, date(2025, 11, 6), 200, 100.00)  # cost 20,000
+        await trade_repo.upsert({
+            "ib_key": "TX-TRIM", "conid": "100", "security_id": 1, "symbol": "AAA",
+            "trade_date": date(2026, 6, 12), "buy_sell": "SELL", "quantity": Decimal("-2"),
+            "price": Decimal("100"), "proceeds": Decimal("200"), "commission": Decimal("-1"),
+            "currency": "USD", "realized_pnl": Decimal("5"), "asset_category": "STK",
+        })
+        # 198 @ 100 = 19,800, which is exactly 99% of 20,000 -> inside the band.
+        incoming = [_incoming("100", date(2025, 11, 6), 198, 100.00)]
+
+        result = await reconcile_taxlots(
+            repo, FakeCurrencyService(),
+            conid_to_security_id={"100": 1},
+            taxlots_data=incoming,
+            report_to_date=date(2026, 6, 30),
+            trade_repo=trade_repo,
+            corp_action_repo=corp_repo,
+            last_sync_date=date(2026, 6, 1),
+        )
+
+        assert result["lots_closed_full"] + result["lots_closed_partial"] == 1
+        closed = await repo.get_by_security_id(1, is_open=False)
+        assert len(closed) == 1
+        assert closed[0].quantity == Decimal("2")
+        assert closed[0].close_date == date(2026, 6, 12)   # the real trade date
+        assert closed[0].close_source == "trade"
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cost_conservation_still_suppresses_a_sale_with_no_sell_on_record():
+    """
+    The reorder must not make the heuristic unreachable: with the trade repo
+    wired but holding no SELL for the window, a conserved cost basis is still a
+    consolidation and must record no closure.
+    """
+    engine, session, repo, trade_repo, corp_repo = await _make_repos_with_txns()
+    try:
+        await _seed_open_lot(repo, 1, date(2025, 11, 6), 200, 100.00)  # cost 20,000
+        # A BUY in the window, and a SELL of a *different* security: neither counts.
+        await trade_repo.upsert({
+            "ib_key": "TX-BUY", "conid": "100", "security_id": 1, "symbol": "AAA",
+            "trade_date": date(2026, 6, 12), "buy_sell": "BUY", "quantity": Decimal("1"),
+            "price": Decimal("100"), "proceeds": Decimal("-100"), "commission": Decimal("-1"),
+            "currency": "USD", "realized_pnl": Decimal("0"), "asset_category": "STK",
+        })
+        await trade_repo.upsert({
+            "ib_key": "TX-OTHER", "conid": "999", "security_id": None, "symbol": "ZZZ",
+            "trade_date": date(2026, 6, 12), "buy_sell": "SELL", "quantity": Decimal("-9"),
+            "price": Decimal("10"), "proceeds": Decimal("90"), "commission": Decimal("-1"),
+            "currency": "USD", "realized_pnl": Decimal("0"), "asset_category": "STK",
+        })
+        incoming = [_incoming("100", date(2025, 11, 6), 198, 100.00)]
+
+        result = await reconcile_taxlots(
+            repo, FakeCurrencyService(),
+            conid_to_security_id={"100": 1},
+            taxlots_data=incoming,
+            report_to_date=date(2026, 6, 30),
+            trade_repo=trade_repo,
+            corp_action_repo=corp_repo,
+            last_sync_date=date(2026, 6, 1),
+        )
+
+        assert result["lots_closed_full"] == 0
+        assert result["lots_closed_partial"] == 0
+        assert len(await repo.get_by_security_id(1, is_open=False)) == 0
+    finally:
+        await session.close()
+        await engine.dispose()
