@@ -370,7 +370,10 @@ class MarketDataService:
                     prices.append({
                         'date': price_date,
                         'close_price': Decimal(str(close_price)),
-                        'currency': price_currency
+                        'currency': price_currency,
+                        # Each fetcher tags its own rows; the caller used to hardcode
+                        # 'yahoo_finance' for both providers.
+                        'source': 'yahoo_finance',
                     })
 
             return prices, False
@@ -405,6 +408,19 @@ class MarketDataService:
         """
         if not settings.alpha_vantage_api_key or settings.alpha_vantage_api_key == "your_api_key_here":
             return []  # Skip if no API key
+
+        # This endpoint serves US listings and quotes them in USD, and the response
+        # carries no currency to read back — unlike Yahoo, where the reported
+        # currency is available and is what the row is tagged with. So a non-USD
+        # security cannot be priced here honestly: stamping its own currency onto a
+        # USD quote is exactly how SBI was carried 61% high for months. Refuse
+        # rather than adopt, the same way a mismatched Yahoo ticker is refused.
+        if (security.currency or "").upper() != "USD":
+            logger.warning(
+                f"Skipping Alpha Vantage for {security.symbol}: it quotes USD and this "
+                f"security is {security.currency}, which cannot be verified from the response"
+            )
+            return []
 
         params = {
             "function": "TIME_SERIES_DAILY",
@@ -443,7 +459,9 @@ class MarketDataService:
                     prices.append({
                         'date': price_date,
                         'close_price': Decimal(str(close_price)),
-                        'currency': security.currency
+                        # Safe only because of the USD guard above.
+                        'currency': security.currency,
+                        'source': 'alpha_vantage',
                     })
 
                 return prices
@@ -531,7 +549,12 @@ class MarketDataService:
                     'date': price_info['date'],
                     'close_price': price_info['close_price'],
                     'currency': price_info['currency'],
-                    'source': 'yahoo_finance'  # or 'alpha_vantage' if from fallback
+                    # The fetcher says where the row came from. This used to be the
+                    # literal 'yahoo_finance' for both providers, with a comment
+                    # conceding it was wrong when the Alpha Vantage fallback fired —
+                    # so a fallback price claimed a provenance it did not have, in
+                    # the one column every pricing diagnosis reads first.
+                    'source': price_info.get('source', 'unknown'),
                 })
 
         # Bulk insert

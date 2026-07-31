@@ -102,6 +102,31 @@ async def test_twse_resolves_to_taiwan_yahoo_suffix():
 # --- the currency guard on auto-discovery ------------------------------------------
 
 
+async def _no_sleep(*_args, **_kwargs):
+    """The service sleeps 3-6s between securities to be polite to Yahoo."""
+    return None
+
+
+class _FakeDb:
+    async def commit(self):
+        return None
+
+
+class _FakePriceRepo:
+    """Just the two methods `fetch_and_cache_prices` reaches for."""
+
+    def __init__(self, missing):
+        self._missing = missing
+        self.written = []
+
+    async def get_missing_dates(self, _security_id, _start, _end):
+        return list(self._missing)
+
+    async def bulk_create(self, rows):
+        self.written.extend(rows)
+        return len(rows)
+
+
 def _install_fake_yahoo(monkeypatch, responses):
     """Route yf.Ticker(...).history() through `responses`: {ticker: (close, currency)}."""
     monkeypatch.setattr(mds.random, "uniform", lambda *_: 0)
@@ -181,3 +206,125 @@ async def test_variation_in_the_right_currency_is_still_adopted(monkeypatch):
 
     assert prices[0]["currency"] == "CAD"
     assert [s["yahoo_ticker"] for s in service.ticker_mapping_repo.saved] == ["SBI"]
+
+
+# --- provenance: which provider actually supplied a row -------------------------------
+#
+# `fetch_and_cache_prices` hardcoded `'source': 'yahoo_finance'` for BOTH providers,
+# with a comment conceding it was wrong when the Alpha Vantage fallback fired. So a
+# fallback price claimed a provenance it did not have, in the one column every pricing
+# diagnosis reads first — `market_prices.source` is how the SBI repair was traced, how
+# an imported window is told from a fetched one, and what `manage_mappings` reports.
+
+
+@pytest.mark.asyncio
+async def test_a_yahoo_row_says_it_came_from_yahoo(monkeypatch):
+    _install_fake_yahoo(monkeypatch, {"SBI.TO": (4.79, "CAD")})
+    service = make_service()
+
+    prices, _ = await service._try_fetch_yahoo(
+        "SBI.TO", make_security(), date(2026, 7, 24), date(2026, 7, 24)
+    )
+
+    assert prices[0]["source"] == "yahoo_finance"
+
+
+@pytest.mark.asyncio
+async def test_alpha_vantage_refuses_a_security_it_cannot_quote_honestly(monkeypatch):
+    """
+    The endpoint serves US listings in USD and its response carries no currency to
+    read back — unlike Yahoo, where the reported currency is what the row is tagged
+    with. Stamping a non-USD security's own currency onto a USD quote is exactly how
+    SBI was carried 61% high, so the fallback refuses instead.
+    """
+    monkeypatch.setattr(mds.settings, "alpha_vantage_api_key", "test-key")
+    service = make_service()
+
+    # Would otherwise be a network call; reaching it at all is the failure.
+    def _explode(*_args, **_kwargs):
+        raise AssertionError("Alpha Vantage must not be called for a non-USD security")
+
+    monkeypatch.setattr(mds.httpx, "AsyncClient", _explode)
+
+    assert await service.fetch_prices_from_alpha_vantage(make_security(currency="CAD")) == []
+
+
+@pytest.mark.asyncio
+async def test_alpha_vantage_is_skipped_without_a_key(monkeypatch):
+    monkeypatch.setattr(mds.settings, "alpha_vantage_api_key", "")
+    service = make_service()
+    security = make_security(symbol="AMZN", exchange="NASDAQ", currency="USD")
+    assert await service.fetch_prices_from_alpha_vantage(security) == []
+
+
+def test_a_price_row_never_defaults_to_a_provider_it_did_not_come_from():
+    """
+    The column defaulted to `alpha_vantage` — the *fallback* provider — so a row
+    inserted without an explicit source claimed the one place it almost certainly
+    did not come from.
+    """
+    from app.models.market_price import MarketPrice
+
+    default = MarketPrice.__table__.c.source.default
+    assert default is not None
+    assert default.arg not in {"alpha_vantage", "yahoo_finance"}
+
+
+@pytest.mark.asyncio
+async def test_a_fallback_price_is_cached_as_alpha_vantage_not_yahoo(monkeypatch):
+    """
+    The caller-side half, and the one that actually catches the bug: the three tests
+    above pass unchanged against the original code, because they only exercise the
+    fetchers. `fetch_and_cache_prices` is where the literal `'yahoo_finance'` was
+    written for every row regardless of who supplied it.
+    """
+    # Yahoo returns nothing for every ticker, so the fallback is reached.
+    _install_fake_yahoo(monkeypatch, {})
+    monkeypatch.setattr(mds.settings, "alpha_vantage_api_key", "test-key")
+    monkeypatch.setattr(mds.asyncio, "sleep", _no_sleep)
+
+    day = date(2026, 7, 24)
+    security = SimpleNamespace(id=1, symbol="AMZN", exchange="NASDAQ", currency="USD")
+
+    async def _fake_alpha_vantage(_self, sec, outputsize="compact"):
+        return [{
+            'date': day,
+            'close_price': Decimal("231.00"),
+            'currency': sec.currency,
+            'source': 'alpha_vantage',
+        }]
+
+    monkeypatch.setattr(
+        mds.MarketDataService, "fetch_prices_from_alpha_vantage", _fake_alpha_vantage
+    )
+
+    service = make_service()
+    service.db = _FakeDb()
+    service.market_price_repo = _FakePriceRepo([day])
+
+    cached = await service.fetch_and_cache_prices(security, day, day)
+
+    assert cached == 1
+    row = service.market_price_repo.written[0]
+    assert row['source'] == 'alpha_vantage', (
+        "a fallback price claimed Yahoo's provenance — the column every pricing "
+        "diagnosis reads first"
+    )
+    assert row['currency'] == 'USD'
+
+
+@pytest.mark.asyncio
+async def test_a_yahoo_price_is_still_cached_as_yahoo(monkeypatch):
+    """The other side of the same branch, so the fix cannot mislabel the primary."""
+    _install_fake_yahoo(monkeypatch, {"AMZN": (231.00, "USD")})
+    monkeypatch.setattr(mds.asyncio, "sleep", _no_sleep)
+
+    day = date(2026, 7, 24)
+    security = SimpleNamespace(id=1, symbol="AMZN", exchange="NASDAQ", currency="USD")
+
+    service = make_service()
+    service.db = _FakeDb()
+    service.market_price_repo = _FakePriceRepo([day])
+
+    assert await service.fetch_and_cache_prices(security, day, day) == 1
+    assert service.market_price_repo.written[0]['source'] == 'yahoo_finance'

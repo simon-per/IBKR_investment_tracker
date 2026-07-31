@@ -24,7 +24,11 @@ class MarketPrice(Base):
     date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
     close_price: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)  # Daily closing price
     currency: Mapped[str] = mapped_column(String(3), nullable=False)  # Price currency
-    source: Mapped[str] = mapped_column(String(50), default="alpha_vantage", nullable=False)
+    # 'yahoo_finance' | 'alpha_vantage' | 'ibkr' | 'manual'. Defaulted to the
+    # *fallback* provider until 2026-08-01, so a row inserted without an explicit
+    # source claimed to come from the one place it almost certainly did not.
+    # Python-side default only, so correcting it needs no migration.
+    source: Mapped[str] = mapped_column(String(50), default="unknown", nullable=False)
     created_at: Mapped[datetime] = mapped_column(default=func.now(), nullable=False)
 
     # Relationships
