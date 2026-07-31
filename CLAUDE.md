@@ -134,6 +134,34 @@ commit that corrected it.
 
 ---
 
+## The dominant failure mode: two implementations of one job, drifting
+
+More bugs here have come from duplicated logic diverging than from any other cause, and the
+divergences are quiet — both copies keep working, they just stop agreeing, and the number nobody
+recomputes by hand is the one that is wrong. The known instances:
+
+| what | how it diverged |
+|---|---|
+| `ttm_growth_from_quarterly` | the watchlist copy had a 5–7-quarter tier the fundamentals copy lacked, and they measured different things (`shape[1]` vs a row's non-NaN length) |
+| `realized_rows_from_closed_lots` | the portfolio totals and the tax report disagreed until it was shared |
+| `_calculate_daily_value` / `_calculate_timeline_swept` | must stay numerically identical; pinned by `tests/test_timeline_equivalence.py` |
+| `_to_eur` | the tax copy was fixed to return `None` on FX failure; the **dividend copy kept storing the unconverted foreign amount**, on the ingest path, for another day |
+| `_get_yahoo_ticker` | three services delegated to `MarketDataService`; **allocation had its own**, with no suffix table, no ARCA/BATS, and `None` for every non-US listing |
+| PEG fallbacks | the watchlist tried forward-EPS growth before the 5-year CAGR; **fundamentals had no forward-EPS tier at all** |
+| `_safe_float` | the watchlist rounded to 4dp, fundamentals did not — the same P/E read differently on two screens |
+| `sync_stale_*` | fundamentals unioned "missing" with "stale"; **analyst ratings took only "stale"**, so a new security could never be rated |
+
+**The lens that finds them**, and which found the last four: walk the AST for function names defined in
+more than one module, ignore trivial bodies, and read each cluster. Router-to-service pairs and
+per-entity repository CRUD are noise; a *service* helper appearing twice is not.
+
+**When you find one, extract rather than sync the copies** — that is what `ttm_growth.py`,
+`peg_ratio.py` and `safe_numbers.py` are — and write the test against the **family** ("every service
+resolving a ticker agrees with the price path") rather than the instance, so the next service to roll
+its own is caught the same way.
+
+---
+
 ## Tech stack
 
 **Backend** — FastAPI (async), SQLAlchemy 2.0 + aiosqlite (WAL), Alembic, APScheduler,

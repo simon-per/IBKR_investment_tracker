@@ -258,6 +258,11 @@ this section can be deleted once the commits are pushed without losing them.
   above rows reading *Not currently held*. Caught by `e2e/errors`, which now covers it.
 - **`e2e/a11y.mjs` claimed "backend optional"** and never could have been: three of its checks need one,
   so run as documented it reported 11/14 with every failure a phantom.
+- **The sibling sweep found three non-delegating duplicates and all three had diverged** — `_to_eur`,
+  `_get_yahoo_ticker`, `_safe_float`. The last was the mildest: the watchlist rounded to 4dp and
+  fundamentals did not, so the same P/E read differently on two screens. Now `safe_numbers.py`, unified
+  on 4dp. **CLAUDE.md gained *The dominant failure mode*** — the eight known instances, the AST lens
+  that finds them, and the rule to extract rather than sync, testing the *family* not the instance.
 - **Allocation resolved Yahoo tickers differently from the price path.** `AllocationService` had its
   own `_get_yahoo_ticker` — mappings, the bare symbol for NASDAQ/NYSE/AMEX, then **None** — ignoring
   `EXCHANGE_SUFFIXES`, omitting ARCA and BATS, and unable to tell Tokyo from Toronto on TSE. It matters
@@ -497,7 +502,7 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
 - **2026-07-31 (overnight, unpushed)** — autonomous loop: three frontend features (risk row, target
   allocation & drift, currency exposure) and fourteen bugs (49 sites reading the clock in local time; SOXQ
   missing from the ETF look-through; the rebalance panel building a plan out of an outage; `e2e/a11y`'s
-  "backend optional" claim). Suites 462 → 616 backend, 91 → 268 frontend; all `e2e` scripts green bar
+  "backend optional" claim). Suites 462 → 646 backend, 91 → 268 frontend; all `e2e` scripts green bar
   `ledger`. Durable rules promoted into CLAUDE.md. **Nothing deployed** — see *Unpushed*.
 - **2026-07-31** — enterprise-readiness pass: shared TTM growth,
   locale-independent chart dates, inception read from the data, keyboard/ARIA across the tab strip and
