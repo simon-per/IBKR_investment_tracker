@@ -50,7 +50,7 @@ async def get_allocation_status(db: AsyncSession = Depends(get_db)):
     """
     Get status of allocation data (how many securities have data, staleness, etc.)
     """
-    from sqlalchemy import select, func
+    from sqlalchemy import select, func, or_
     from app.models.security import Security
     from datetime import timedelta
 
@@ -58,9 +58,19 @@ async def get_allocation_status(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(func.count(Security.id)))
     total_securities = result.scalar()
 
-    result = await db.execute(
-        select(func.count(Security.id)).where(Security.allocation_last_updated.isnot(None))
+    # Counted by whether allocation data is actually present, not by whether the
+    # timestamp is set. The timestamp records the last *attempt* — it has to, or a
+    # security Yahoo has no data for is re-fetched on every sync forever — so keying
+    # the banner on it would report a security as covered the moment we gave up on
+    # it. An ETF legitimately has no sector (it has many), so it counts as covered
+    # once its asset type is known.
+    has_allocation = or_(
+        Security.sector.isnot(None),
+        Security.country.isnot(None),
+        Security.asset_type == 'ETF',
     )
+
+    result = await db.execute(select(func.count(Security.id)).where(has_allocation))
     securities_with_data = result.scalar()
 
     # Count stale data (>7 days old)

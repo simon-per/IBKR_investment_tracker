@@ -157,6 +157,21 @@ class AllocationService:
                 security.allocation_last_updated = utcnow()
                 updated_count += 1
             else:
+                # Stamp the *attempt*, not just the success. Selection above takes
+                # every security whose timestamp is null or older than the cutoff, so
+                # leaving it null on failure meant a security Yahoo has no `.info`
+                # for was re-fetched on every sync forever — a 1-3s wait, a request
+                # against an IP-based rate limit, and a 2-4s inter-security delay,
+                # for a result already known. That is the same unbounded-retry shape
+                # `HOLIDAY_GRACE_DAYS` closed for market prices and
+                # `UPSTREAM_RETRY_COOLDOWN_SECONDS` closed for benchmarks.
+                #
+                # `sector`/`country`/`asset_type` are deliberately left untouched, so
+                # the timestamp never implies data that was not fetched — see
+                # `securities_without_data` in routers/allocation.py, which counts
+                # missing *data* rather than a missing timestamp for exactly that
+                # reason.
+                security.allocation_last_updated = utcnow()
                 error_count += 1
 
             # Security delay between different securities (2-4 seconds)
