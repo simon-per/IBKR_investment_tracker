@@ -57,7 +57,10 @@ import { RefreshCw, Download, Clock } from 'lucide-react'
 
 export function Dashboard() {
   const queryClient = useQueryClient()
-  const { baseCurrency, supportedCurrencies, setBaseCurrency, isUpdating: currencyUpdating, updateError: currencyError } = useBaseCurrency()
+  const {
+    baseCurrency, supportedCurrencies, setBaseCurrency,
+    isUpdating: currencyUpdating, updateError: currencyError, currencyIsAssumed,
+  } = useBaseCurrency()
   const curSym = useCurrencySymbol()
   const [selectedRange, setSelectedRange] = useState<TimeRange>('1Y')
   const [selectedBenchmarks, setSelectedBenchmarks] = useState<string[]>(() => {
@@ -377,6 +380,15 @@ export function Dashboard() {
               {currencyError && (
                 <span className="max-w-[12rem] text-xs leading-tight text-red-600 dark:text-red-400" role="alert">
                   {currencyError}
+                </span>
+              )}
+              {/* Without this the app labels every figure `€` on a failed settings
+                  fetch while the numbers behind them are whatever the account
+                  actually uses — and `staleTime: Infinity` makes that stick for the
+                  session rather than blink. */}
+              {currencyIsAssumed && !currencyError && (
+                <span className="max-w-[12rem] text-xs leading-tight text-amber-700 dark:text-amber-400" role="alert">
+                  Couldn't read your display currency — showing {baseCurrency}, which may not be it.
                 </span>
               )}
               <ThemeToggle />
