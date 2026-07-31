@@ -118,8 +118,8 @@ are a property of the build that no unit test can observe: 4 chunks at first pai
 seven deferred ones; each tab fetching its own chunk on click, all 200; every panel mounting; zero
 CSP violations.
 
-**Verified against a production DB snapshot and in a real browser** (Playwright, out-of-tree), not
-just through the test client. That is worth stating because it found three defects the whole green
+**Verified against a production DB snapshot and in a real browser** (Playwright — now committed as
+`e2e/`), not just through the test client. That is worth stating because it found three defects the whole green
 suite did not:
 
 - **Trades were converted wrong.** `trades.proceeds`, `trades.realized_pnl` and
@@ -161,6 +161,20 @@ What landed, and why each was worth doing:
   transfer audit CLAUDE.md prescribes is a UI action rather than an ssh command.
 - **A deploy landing in a Berlin slot no longer loses that sync** — persistent APScheduler job store,
   which is *Worth doing next* item 9 from yesterday.
+- **The browser checks are in the repo** as `e2e/`, a package deliberately separate from `frontend/`:
+  `deploy.sh` runs `npm ci` inside `frontend/` on every `--no-cache` rebuild and Playwright's
+  postinstall pulls ~150 MB of Chromium, which would tax a deploy that runs every 10 minutes. Nothing
+  in the deploy path touches `e2e/`. Six scripts with a table of preconditions in its README —
+  `a11y` (14 checks), `sweep` (16), `csp` (4), `chunks` (33), plus `errors` (backend deliberately
+  down) and `ledger` (needs a prod snapshot). Screenshots are gitignored: real account data, public
+  repo.
+
+  Committing them surfaced one flaw. **`csp.mjs` used to run against the dev server, where it could
+  not have been meaningful:** Vite injects an inline `<script type="module">` for react-refresh and
+  `script-src 'self'` blocks it, so the app never boots and the script reports a violation that
+  cannot exist in production. It now targets `vite preview`. The *conclusion* was never wrong — the
+  CSP had already been verified against the real build (see *Watch after the first deploy*), and
+  re-running it there passes 4/4 — but the reusable script was measuring Vite's HMR transport.
 
 ## Watch after the first deploy
 
@@ -176,7 +190,7 @@ What landed, and why each was worth doing:
 
 ## Worth doing next
 
-Rough priority. Item 1 is written but not installed; the rest are not started.
+Rough priority. Item 1 is written but not installed; item 2 is not started.
 
 1. **Install the guarded auto-deploy script — WRITTEN, NOT INSTALLED.** `ops/auto-deploy.sh` is in
    the repo (it previously existed only as `/root/auto-deploy.sh`, unversioned and unreviewed despite
@@ -190,18 +204,7 @@ Rough priority. Item 1 is written but not installed; the rest are not started.
    Verify afterwards by watching `/root/auto-deploy.log` for a `SKIP: within 10min` line near a slot.
    The persistent job store now recovers a missed slot within 30 minutes anyway, so this is belt to
    that braces rather than the only defence.
-2. **Commit the visual-regression harness.** The Playwright checks that found the three ledger
-   defects above live *outside* the repo (`%TEMP%/claude/uiharness`), so they are not reproducible
-   from a clean checkout — and they earned their keep, so this has gone from nice-to-have to the
-   obvious next investment. It cannot simply become a `frontend` devDependency: `deploy.sh` runs
-   `npm ci` on a `--no-cache` rebuild and Playwright's postinstall pulls ~150 MB of Chromium, which
-   would tax every 10-minute deploy. Needs a separate package or a skipped-download flag.
-   (`@testing-library/react` + `jsdom` *did* go in on 2026-07-31 — a few MB, which is affordable.)
-   The checks worth keeping: the tab/collapsible/sort keyboard sweep, the eight-tab console-error
-   sweep, the backend-stopped pass that asserts no surface falls back to an empty-data message, and
-   `lazychunks.mjs` (below) which is the only thing that verifies the code-split end to end — chunk
-   boundaries are a build-output property, so no unit test can see them.
-3. **Fold `PRE_OWNERSHIP_HISTORY_YEARS` pruning into a scheduled job.** `prune_empty_dividends.py`
+2. **Fold `PRE_OWNERSHIP_HISTORY_YEARS` pruning into a scheduled job.** `prune_empty_dividends.py`
    is a manual CLI; the ingest window now prevents new junk, so this is cleanup-only and low value.
 
 ## Local development traps

@@ -143,7 +143,17 @@ Because a lazy chunk can 404 after a redeploy (content-hashed names, page held o
 deploy), every lazy panel is wrapped in `ui/LazyTabPanel.tsx` — a *scoped* boundary. Without it that
 rejection reaches `App.tsx`'s app-level boundary and blanks the whole dashboard, which is worse than
 the eager import it replaced. Chunk boundaries are a build-output property no unit test can see, so
-the end-to-end check is `lazychunks.mjs` in the out-of-tree Playwright harness.
+the end-to-end check is `e2e/lazychunks.mjs`.
+
+**`e2e/` is the browser-check package**, deliberately separate from `frontend/`: `deploy.sh` runs
+`npm ci` inside `frontend/` on every `--no-cache` rebuild and Playwright's postinstall pulls ~150 MB
+of Chromium, which a 10-minute deploy cadence cannot absorb. Nothing in the deploy path touches it.
+It covers what the unit suites structurally cannot see — keyboard/ARIA on the assembled page, the
+production CSP, chunk boundaries, and the backend-down pass asserting no surface falls back to an
+empty-data message. Read `e2e/README.md` first: **the preconditions differ per script**, and two of
+them (`csp`, `chunks`) must run against `vite preview` rather than the dev server, because the dev
+server emits an inline react-refresh script that `script-src 'self'` correctly blocks and does not
+produce chunk boundaries at all.
 
 ---
 

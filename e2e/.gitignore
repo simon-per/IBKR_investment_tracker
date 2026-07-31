@@ -1,0 +1,7 @@
+node_modules/
+package-lock.json
+
+# Screenshots are real account data and this repo is public. The scripts write them
+# next to themselves, so this must stay.
+*.png
+*.jpg

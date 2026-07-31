@@ -1,0 +1,17 @@
+{
+  "name": "ibkr-portfolio-e2e",
+  "private": true,
+  "type": "module",
+  "description": "Browser checks for the portfolio UI. Deliberately a separate package from frontend/ — see README.md.",
+  "scripts": {
+    "a11y": "node a11y.mjs",
+    "sweep": "node sweep.mjs",
+    "errors": "node errors.mjs",
+    "csp": "node csp.mjs",
+    "chunks": "node lazychunks.mjs",
+    "ledger": "node ledger.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.62.1"
+  }
+}
