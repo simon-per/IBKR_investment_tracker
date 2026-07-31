@@ -3,7 +3,7 @@ Portfolio Schemas
 Pydantic models for portfolio API responses.
 """
 from pydantic import BaseModel, Field
-from typing import Dict, List, Optional
+from typing import Dict, List, Literal, Optional
 from datetime import date
 
 
@@ -275,9 +275,28 @@ class DividendMonthlyItem(BaseModel):
     amount_eur: float
 
 class DividendSummaryResponse(BaseModel):
-    monthly: List[DividendMonthlyItem]
+    """
+    The Performance tab's *Dividend Income* card.
+
+    **Every key the service returns must be declared here.** A `response_model` filters
+    the response down to its declared fields, so an omission does not fail loudly — it
+    silently blanks whatever read the missing key. Five of these were undeclared while
+    the route had no `response_model` at all; attaching one without completing the model
+    first would have removed the provenance footnote (`source`, `ibkr_from`,
+    `total_withholding_eur`) that exists to stop net income being read as pre-tax.
+    """
+    monthly: List[DividendMonthlyItem]      # NET per month, era-spliced
     ytd_eur: float
-    total_eur: float
+    total_eur: float                        # NET (back-compat key for total_net_eur)
+    total_net_eur: float
+    total_gross_eur: float
+    total_withholding_eur: float
+    # Three-way like the tax report's flag, not a boolean: once the IBKR ledger starts,
+    # the card still carries the estimated months before `ibkr_from`, so a flat "ibkr"
+    # would claim real withholding for a period that has none.
+    source: Literal["ibkr", "mixed", "yfinance_estimate"] = "yfinance_estimate"
+    ibkr_from: Optional[str] = None
+    base_currency: str = "EUR"
     last_updated: Optional[str] = None
     sync_in_progress: bool = False
 

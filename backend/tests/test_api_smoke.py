@@ -256,8 +256,10 @@ def test_the_shapes_that_broke_production_serialize(client):
 
     summary = client.get("/api/dividends/summary").json()
     assert all(abs(m["amount_eur"]) > 0 for m in summary["monthly"])
-    # The card's footnote reads off these, and /summary has no response_model to
-    # declare them — so a rename in the service would silently blank the note.
+    # The card's footnote reads off these. /summary now has a response_model, which
+    # cuts both ways: it documents the contract, but it also *filters* — so a key the
+    # service returns and the model omits vanishes silently. test_dividend_summary_
+    # contract.py pins the two sets equal; these assertions pin the values.
     assert summary["source"] in {"ibkr", "mixed", "yfinance_estimate"}
     assert summary["total_eur"] == summary["total_net_eur"]  # back-compat key is NET
     assert summary["total_gross_eur"] >= summary["total_net_eur"]

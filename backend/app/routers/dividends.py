@@ -6,7 +6,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal, get_db
-from app.schemas.portfolio import DividendBreakdownResponse
+from app.schemas.portfolio import DividendBreakdownResponse, DividendSummaryResponse
 from app.services.dividend_service import DividendService
 from app.single_flight import SYNC_PIPELINE, SyncBusy, single_flight
 
@@ -68,7 +68,7 @@ def _is_summary_stale(summary: dict) -> bool:
         return True
 
 
-@router.get("/summary")
+@router.get("/summary", response_model=DividendSummaryResponse)
 async def get_dividend_summary(
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
