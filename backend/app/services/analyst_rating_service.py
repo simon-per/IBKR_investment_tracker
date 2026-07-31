@@ -4,7 +4,6 @@ Fetches analyst recommendations from Yahoo Finance using yfinance library.
 Updates ratings twice weekly to avoid excessive API calls.
 """
 from typing import List, Dict, Optional
-from datetime import datetime, timedelta
 import logging
 import yfinance as yf
 import random
@@ -17,6 +16,69 @@ from app.models.security import Security
 from app.models.analyst_rating import AnalystRating
 
 logger = logging.getLogger(__name__)
+
+#: yfinance labels the current month's recommendation snapshot ``0m``, with
+#: ``-1m``/``-2m``/``-3m`` behind it.
+CURRENT_PERIOD = '0m'
+
+
+def select_current_period(recommendations):
+    """
+    The current-month row, chosen by its ``period`` label rather than by position.
+
+    This used to be ``recommendations.iloc[0]`` under a comment asserting row 0 *is*
+    ``0m``. That is provider ordering taken on trust, and it is the same shape as
+    the `openDateTime` bug CLAUDE.md tells you not to reintroduce: data matched back
+    by index position instead of by the field that identifies it. If yfinance ever
+    reorders the frame, positional access silently reports a three-month-old
+    consensus as current — a plausible number, so nothing looks wrong.
+
+    Falls back to the first row when there is no ``period`` column at all, since a
+    frame shaped differently is still better read than discarded; but a frame that
+    *has* the column and lacks ``0m`` yields None rather than a stale row.
+    """
+    if recommendations is None or getattr(recommendations, 'empty', True):
+        return None
+
+    if 'period' not in getattr(recommendations, 'columns', []):
+        logger.debug("recommendations frame has no 'period' column; using the first row")
+        return recommendations.iloc[0]
+
+    current = recommendations[recommendations['period'] == CURRENT_PERIOD]
+    if current.empty:
+        logger.info(
+            f"recommendations frame has no '{CURRENT_PERIOD}' row "
+            f"(periods: {list(recommendations['period'])}); reporting nothing rather "
+            f"than an older period as current"
+        )
+        return None
+    return current.iloc[0]
+
+
+def _count(row, column: str) -> int:
+    """
+    One analyst-count cell as an int, treating anything unusable as zero.
+
+    `int()` on a NaN raises, and the caller wraps the whole extraction in a broad
+    ``except`` — so a single unparseable column used to discard all five counts and
+    the security's rating with them. Zero is the right reading here specifically
+    because these are *counts within a distribution*: no analysts in a bucket is a
+    genuine zero, and `AnalystRating.consensus` already answers "No Rating" when all
+    five sum to zero, so an empty frame cannot masquerade as a real consensus.
+    """
+    try:
+        value = row.get(column, 0)
+    except Exception:
+        return 0
+    if value is None:
+        return 0
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0
+    if number != number or number in (float('inf'), float('-inf')):  # NaN / Inf
+        return 0
+    return int(number)
 
 
 class AnalystRatingService:
@@ -70,16 +132,18 @@ class AnalystRatingService:
                 logger.info(f"No analyst ratings available for {security.symbol}")
                 return None
 
-            # Get the most recent period (0m = current month)
-            latest = recommendations.iloc[0]
+            latest = select_current_period(recommendations)
+            if latest is None:
+                logger.info(f"No current-period analyst ratings for {security.symbol}")
+                return None
 
             rating_data = {
                 'security_id': security.id,
-                'strong_buy': int(latest.get('strongBuy', 0)),
-                'buy': int(latest.get('buy', 0)),
-                'hold': int(latest.get('hold', 0)),
-                'sell': int(latest.get('sell', 0)),
-                'strong_sell': int(latest.get('strongSell', 0)),
+                'strong_buy': _count(latest, 'strongBuy'),
+                'buy': _count(latest, 'buy'),
+                'hold': _count(latest, 'hold'),
+                'sell': _count(latest, 'sell'),
+                'strong_sell': _count(latest, 'strongSell'),
             }
 
             total = sum([rating_data['strong_buy'], rating_data['buy'],
