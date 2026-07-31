@@ -251,6 +251,35 @@ Two decisions there that should not be quietly reverted:
   down days at all. Same rule the tax report's `holdings_snapshot_total` and `_to_eur` learned the
   hard way.
 
+**The clock was being read in local time, everywhere.** 49 sites of `datetime.now()` — naive *local*
+time — while every stored timestamp is naive UTC (`func.now()` is UTC on SQLite, and `utc_iso()`
+stamps UTC onto a value it assumes already is). It was correct in production **only because
+`python:3.11-slim` sets no `TZ`**, so the container's local clock happens to be UTC: an undeclared
+dependency on the base image that nothing would have noticed breaking. Off the container it is wrong
+three ways at once — cache cutoffs expire an offset early (fundamentals, allocation, analyst ratings,
+dividend freshness), ages read an offset too old (including `find_stale_ibkr_sync` and
+`manage_mappings list`), and `utc_iso(datetime.now())` labels local time as UTC so the browser
+converts a second time. That last one is the "two clocks on one line" failure `utc_iso` exists to
+prevent, reintroduced through its own argument, and it is why **a local run shows a sync timestamped
+in the future** — worth knowing before diagnosing one.
+
+`app/clock.py` is the single replacement (`utcnow()`, deliberately **naive** UTC: these values are
+compared against naive columns, where an aware value raises `TypeError` rather than degrading).
+`tests/test_clock_convention.py` walks the source tree so the old call cannot come back, and asserts
+against real UTC rather than local time — the assertion that passes vacuously on the container and
+catches the bug everywhere else. Backend suite 462 → 467.
+
+Two stale docstrings in `scheduler_service.py` went with it: `_ibkr_only_sync_locked` still said
+"13:00 and 20:00", the class docstring still said "Runs 3 times daily" and listed three of five jobs,
+and both still called the Flex Query Year-to-Date. Not cosmetic in that file — every token lockout
+came from reasoning wrongly about when to ask IBKR.
+
+Four things were checked and are **not** bugs, recorded so nobody re-chases them: `ActivityTab`'s
+`amount_base ?? 0` (unreachable — `BaseFx.convert` never returns `None`), `DividendKpiCards`'
+`prev_net_eur ?? 0` (over-permissive TS type; the backend always emits a float),
+`PortfolioValuePoint.external_flow_eur`'s `0.0` model default (the service supplies it on every row),
+and the first timeline row's flow (already fixed by the pre-window seeding loop).
+
 ## Worth doing next
 
 Rough priority. The auto-deploy install moved to *Needs a human* — it is the last deploy step.
