@@ -14,6 +14,11 @@ env/
 .venv/
 *.egg-info/
 .pytest_cache/
+# `pytest --cov` is the documented way to find untested logic here, so its
+# artifacts appear whenever anyone follows that advice.
+.coverage
+.coverage.*
+htmlcov/
 
 # Database (contains personal financial data)
 # NOTE: this repo is public, so these patterns must also catch backup and WAL
