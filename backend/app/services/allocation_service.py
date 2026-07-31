@@ -16,6 +16,16 @@ from app.etf_mappings import get_etf_allocation, is_known_etf
 
 logger = logging.getLogger(__name__)
 
+#: How old allocation data may get before a sync refreshes it.
+#:
+#: Shared with `routers/allocation.py`, which reports how many securities are stale,
+#: because the two are one decision seen from both ends: this value picks what the
+#: sync touches, and that endpoint tells the user what needs touching. Written
+#: inline in both places until 2026-08-01, where nothing would have caught them
+#: drifting — the tab would simply have described a different set than the sync
+#: refreshed.
+ALLOCATION_STALE_DAYS = 7
+
 
 class AllocationService:
     """Service for managing allocation data (sector, country, etc.)"""
@@ -115,7 +125,7 @@ class AllocationService:
     async def sync_allocation_data(self, force_refresh: bool = False) -> Dict:
         """
         Sync allocation data for all securities.
-        Only fetches data that's older than 7 days unless force_refresh=True.
+        Only fetches data older than ALLOCATION_STALE_DAYS unless force_refresh=True.
         """
         logger.info("Syncing allocation data for securities")
 
@@ -124,7 +134,7 @@ class AllocationService:
         securities = list(result.scalars().all())
 
         # Filter securities that need updates
-        cutoff_date = utcnow() - timedelta(days=7)
+        cutoff_date = utcnow() - timedelta(days=ALLOCATION_STALE_DAYS)
         securities_to_update = []
 
         for security in securities:

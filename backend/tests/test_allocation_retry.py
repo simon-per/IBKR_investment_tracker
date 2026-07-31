@@ -179,3 +179,30 @@ async def test_the_status_count_follows_the_data_not_the_timestamp(db, monkeypat
     # than none. Only the untraceable one is genuinely uncovered.
     assert status['securities_with_data'] == 2
     assert status['securities_without_data'] == 1
+
+
+def test_the_sync_and_the_status_endpoint_share_one_staleness_threshold():
+    """
+    One decision seen from both ends: the constant picks what the sync refreshes,
+    and `/api/allocation/status` reports what needs refreshing. Both wrote
+    `timedelta(days=7)` inline until 2026-08-01, so nothing would have caught them
+    drifting — the tab would simply have described a different set than the sync
+    touched.
+
+    Structural, because the two live in different modules and the coupling is the
+    point rather than either value.
+    """
+    import inspect
+
+    from app.routers import allocation as allocation_router
+    from app.services import allocation_service as allocation_svc
+
+    assert allocation_svc.ALLOCATION_STALE_DAYS == 7
+
+    for module in (allocation_router, allocation_svc):
+        src = inspect.getsource(module)
+        assert "timedelta(days=7)" not in src, (
+            f"{module.__name__} hardcodes the staleness window again instead of "
+            f"using ALLOCATION_STALE_DAYS"
+        )
+        assert "ALLOCATION_STALE_DAYS" in src

@@ -6,7 +6,7 @@ from app.clock import utcnow
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.services.allocation_service import AllocationService
+from app.services.allocation_service import ALLOCATION_STALE_DAYS, AllocationService
 from app.single_flight import SYNC_PIPELINE, SyncBusy, single_flight
 
 
@@ -74,7 +74,8 @@ async def get_allocation_status(db: AsyncSession = Depends(get_db)):
     securities_with_data = result.scalar()
 
     # Count stale data (>7 days old)
-    cutoff_date = utcnow() - timedelta(days=7)
+    # The same threshold the sync selects on — see ALLOCATION_STALE_DAYS.
+    cutoff_date = utcnow() - timedelta(days=ALLOCATION_STALE_DAYS)
     result = await db.execute(
         select(func.count(Security.id)).where(
             Security.allocation_last_updated < cutoff_date
