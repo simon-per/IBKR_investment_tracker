@@ -324,9 +324,18 @@ three of this session's bugs. **That lens is now exhausted**: every `lib/` modul
 still untested is the large tab components, whose logic lives in the `lib/` modules they call and is
 additionally exercised by `e2e/sweep`.
 
-Suites **backend 523 / frontend 268**, `tsc -b` and `npm run build` clean. `e2e/`: `chunks` 33/33,
-`csp` 4/4, `a11y` 17/17, `errors` 15/15, `sweep` 16/16 — everything except `ledger`, which needs a
-production snapshot. **Nothing is deployed**: all of the above is verified locally only.
+**Verified in one consolidated pass at the end of the session**, not just incrementally: backend
+**550**, frontend **268**, `tsc -b` and `npm run build` clean, and every runnable browser script back to
+back — `a11y` 17/17, `sweep` 16/16, `errors` 15/15, `chunks` 33/33, `csp` 4/4. Only `ledger` was not
+run; it needs a production snapshot, which is real account data. **Nothing is deployed** — all of this
+is local. Every local server was started with `SCHEDULER_ENABLED=false` confirmed in `.env` *and* in
+`/health`, and stopped afterwards; no provider was contacted at any point.
+
+`tests/test_api_contract_drift.py` now fails when a TS interface reads a field the backend stopped
+sending — a generalisation of the dividend contract test to all 25 name-matched model/interface pairs,
+with no hand-maintained list. It found **no drift** on the current tree, so it ships as a guard rather
+than a fix. Frontend-only fields fail (the silent `undefined`); backend-only ones are printed and
+allowed, since the wire may legitimately carry more than any screen renders.
 
 Coverage-led hunting found two of the bugs (`pytest --cov`, backend ~70%). The last flagged gap,
 `taxlot_repository` (58%), turned out to be **dead code rather than untested code**: four methods with no
@@ -423,7 +432,7 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
 - **2026-07-31 (overnight, unpushed)** — autonomous loop: three frontend features (risk row, target
   allocation & drift, currency exposure) and seven bugs (49 sites reading the clock in local time; SOXQ
   missing from the ETF look-through; the rebalance panel building a plan out of an outage; `e2e/a11y`'s
-  "backend optional" claim). Suites 462 → 523 backend, 91 → 268 frontend; all `e2e` scripts green bar
+  "backend optional" claim). Suites 462 → 550 backend, 91 → 268 frontend; all `e2e` scripts green bar
   `ledger`. Durable rules promoted into CLAUDE.md. **Nothing deployed** — see *Unpushed*.
 - **2026-07-31** — enterprise-readiness pass: shared TTM growth,
   locale-independent chart dates, inception read from the data, keyboard/ARIA across the tab strip and
