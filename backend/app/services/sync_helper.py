@@ -101,7 +101,7 @@ async def ingest_flex_statement(db, flex_data: Dict) -> Dict:
 
     # Real dividend income (gross/withholding/net) from <CashTransactions>. Flex-only.
     cash_txns = await ibkr_service.extract_cash_transactions(flex_data)
-    await DividendService(db).sync_dividends_from_cash_transactions(
+    dividend_result = await DividendService(db).sync_dividends_from_cash_transactions(
         cash_txns, conid_to_security_id
     )
 
@@ -163,6 +163,9 @@ async def ingest_flex_statement(db, flex_data: Dict) -> Dict:
             f"TRANSFER (matched a position transfer's cash leg) — excluded from money added"
         )
     warnings.extend(invalidated["notes"])
+    # A dividend skipped for want of an FX rate rides on a *successful* sync, so it is
+    # structurally invisible unless hoisted here.
+    warnings.extend(dividend_result.get("warnings") or [])
     warnings.extend(flex_data.get('flex_warnings') or [])
 
     return {

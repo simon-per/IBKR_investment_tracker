@@ -252,8 +252,25 @@ class DividendService:
         logger.info(f"Dividend computation complete: computed={computed}, errors={errors}")
         return {'computed': computed, 'errors': errors, 'message': f'Computed {computed} dividend payments'}
 
-    async def _to_eur(self, amount: Decimal, currency: str, on_date: date) -> Decimal:
-        """Convert an amount to EUR on a date, tolerating unsupported currencies."""
+    async def _to_eur(self, amount: Decimal, currency: str, on_date: date) -> Optional[Decimal]:
+        """
+        Convert to EUR, or return None when no rate can be resolved.
+
+        It used to `return amount  # fallback: store unconverted`, which writes a
+        foreign figure into a column named `_eur` — and unlike the identical defect
+        fixed in `TaxService._to_eur` on 2026-07-30, this one is on the **ingest**
+        path, so the wrong number is *persisted* and then read by the Dividends tab,
+        the forecast, and the tax report's DA-1 income. A TWD payment would sit in
+        `gross_amount_eur` roughly 35x high with nothing marking it.
+
+        That fix listed the consumers already skipping correctly — sync_helper,
+        portfolio_service, benchmark_service — and missed this sibling, which was
+        doing exactly what the tax report used to do.
+
+        Skipping the row matches how every other ingest handles an unconvertible
+        currency: `reconcile_taxlots` skips the lot into `taxlots_skipped`, and
+        cash-flow ingest skips one row rather than failing the sync.
+        """
         if not amount:
             return Decimal("0")
         if (currency or "EUR") == "EUR":
@@ -263,8 +280,11 @@ class DividendService:
                 amount=amount, from_currency=currency, target_date=on_date
             )
         except Exception as e:
-            logger.warning(f"Dividend FX conversion failed for {currency} on {on_date}: {e}")
-            return amount  # fallback: store unconverted
+            logger.warning(
+                f"No {currency}->EUR rate for {on_date} ({e}); skipping the dividend "
+                f"rather than storing {currency} as EUR"
+            )
+            return None
 
     async def sync_dividends_from_cash_transactions(
         self, cash_txns: List[Dict], conid_to_security_id: Dict[str, int]
@@ -296,6 +316,7 @@ class DividendService:
                 g["wht"] += ct["amount"]  # IBKR reports withholding as a negative amount
 
         saved = 0
+        skipped_currencies: Dict[str, int] = {}
         now = utcnow()
         for (security_id, pay_date), g in grouped.items():
             gross = g["gross"]
@@ -307,6 +328,13 @@ class DividendService:
 
             gross_eur = await self._to_eur(gross, currency, pay_date)
             wht_eur = await self._to_eur(withholding, currency, pay_date)
+            if gross_eur is None or wht_eur is None:
+                # No rate for this date. Storing the foreign figure in a column named
+                # `_eur` is what this used to do; a missing dividend is recoverable
+                # (the statement is re-ingested idempotently once the rate exists),
+                # a silently inflated one is not.
+                skipped_currencies[currency] = skipped_currencies.get(currency, 0) + 1
+                continue
             net_eur = gross_eur - wht_eur
 
             await self.repo.upsert_payment({
@@ -325,7 +353,26 @@ class DividendService:
             saved += 1
 
         logger.info(f"Recorded {saved} IBKR dividend payment(s) from cash transactions")
-        return {"ibkr_dividends": saved, "message": f"Recorded {saved} IBKR dividend payments"}
+
+        warnings: List[str] = []
+        if skipped_currencies:
+            detail = ", ".join(f"{n} in {cur}" for cur, n in sorted(skipped_currencies.items()))
+            # Rides on a successful sync, so it is invisible unless surfaced —
+            # sync_helper hoists it into the run's warnings[].
+            warnings.append(
+                f"Skipped {sum(skipped_currencies.values())} IBKR dividend(s) with no "
+                f"FX rate for their pay date ({detail}). Income is understated until a "
+                f"rate exists; re-ingesting the statement is idempotent and will pick "
+                f"them up."
+            )
+            logger.warning(warnings[-1])
+
+        return {
+            "ibkr_dividends": saved,
+            "dividends_skipped": sum(skipped_currencies.values()),
+            "warnings": warnings,
+            "message": f"Recorded {saved} IBKR dividend payments",
+        }
 
     async def _latest_fx_to_eur(self, currencies, as_of: date) -> Dict[str, Decimal]:
         """
