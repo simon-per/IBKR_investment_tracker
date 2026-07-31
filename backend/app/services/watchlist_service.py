@@ -5,12 +5,12 @@ import logging
 import yfinance as yf
 import random
 import asyncio
-import math
 import numpy as np
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.repositories.watchlist_repository import WatchlistRepository
 from app.services.peg_ratio import peg_from_growth
+from app.services.safe_numbers import safe_float, safe_int
 from app.services.ttm_growth import ttm_growth_from_quarterly
 
 logger = logging.getLogger(__name__)
@@ -25,27 +25,14 @@ class WatchlistService:
         self.db = db
         self.repo = WatchlistRepository(db)
 
+    # Shared so the two endpoints cannot disagree in the fifth decimal place —
+    # `_safe_float` had already drifted between these services. See
+    # app/services/safe_numbers.py.
     def _safe_float(self, value) -> Optional[float]:
-        if value is None:
-            return None
-        try:
-            f = float(value)
-            if math.isnan(f) or math.isinf(f):
-                return None
-            return round(f, 4)
-        except (ValueError, TypeError):
-            return None
+        return safe_float(value)
 
     def _safe_int(self, value) -> Optional[int]:
-        if value is None:
-            return None
-        try:
-            f = float(value)
-            if math.isnan(f) or math.isinf(f):
-                return None
-            return int(f)
-        except (ValueError, TypeError):
-            return None
+        return safe_int(value)
 
     def _compute_rsi(self, closes: np.ndarray, period: int = 14) -> Optional[float]:
         """Compute RSI using Wilder's smoothing method."""

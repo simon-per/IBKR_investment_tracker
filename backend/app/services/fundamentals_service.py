@@ -5,12 +5,12 @@ import logging
 import yfinance as yf
 import random
 import asyncio
-import math
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.repositories.fundamentals_repository import FundamentalsRepository
 from app.services.peg_ratio import peg_from_growth
+from app.services.safe_numbers import safe_float, safe_int
 from app.services.ttm_growth import ttm_growth_from_quarterly
 from app.models.security import Security
 
@@ -30,29 +30,14 @@ class FundamentalsService:
             market_service = MarketDataService(self.db)
         return await market_service._get_yahoo_ticker(security)
 
+    # Shared so the two endpoints cannot disagree in the fifth decimal place —
+    # `_safe_float` had already drifted between these services. See
+    # app/services/safe_numbers.py.
     def _safe_float(self, value) -> Optional[float]:
-        """Safely convert a value to float, returning None for NaN/Inf/None."""
-        if value is None:
-            return None
-        try:
-            f = float(value)
-            if math.isnan(f) or math.isinf(f):
-                return None
-            return f
-        except (ValueError, TypeError):
-            return None
+        return safe_float(value)
 
     def _safe_int(self, value) -> Optional[int]:
-        """Safely convert a value to int, returning None for invalid values."""
-        if value is None:
-            return None
-        try:
-            f = float(value)
-            if math.isnan(f) or math.isinf(f):
-                return None
-            return int(f)
-        except (ValueError, TypeError):
-            return None
+        return safe_int(value)
 
     async def _fetch_yahoo_data(self, yahoo_ticker: str) -> tuple:
         """Fetch .info, .earnings_dates, .quarterly_financials, .growth_estimates, and .revenue_estimate in a thread."""
