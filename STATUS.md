@@ -297,7 +297,7 @@ such a pair by design and the date self-heals.
 
 ### State
 
-Suites **backend 646 / frontend 268**, `tsc -b` and `npm run build` clean. `e2e/`: `a11y` 17/17,
+Suites **backend 647 / frontend 268**, `tsc -b` and `npm run build` clean. `e2e/`: `a11y` 17/17,
 `sweep` 16/16, `errors` 15/15, `chunks` 33/33, `csp` 4/4 — everything except `ledger`, which needs a
 production snapshot. Re-verified end to end after the final commit, not just incrementally.
 
@@ -390,7 +390,7 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
 - **2026-07-31 → 08-01 (overnight, unpushed)** — autonomous loop, ~22 iterations: three frontend
   features (risk row, target allocation & drift, currency exposure) and fourteen bugs, the largest being
   49 sites reading the clock in local time and an unconvertible dividend persisted as EUR. Suites
-  462 → 646 backend, 91 → 268 frontend; every `e2e` script green bar `ledger`. Durable rules promoted
+  462 → 647 backend, 91 → 268 frontend; every `e2e` script green bar `ledger`. Durable rules promoted
   into CLAUDE.md, including *The dominant failure mode*. **Nothing deployed** — see *Unpushed*.
 - **2026-07-31** — enterprise-readiness pass: shared TTM growth,
   locale-independent chart dates, inception read from the data, keyboard/ARIA across the tab strip and
