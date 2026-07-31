@@ -1,10 +1,11 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, lazy } from 'react'
 import { useQuery, useQueries, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import type { BenchmarkDataset } from './PortfolioValueChart'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { LazyTabPanel } from '@/components/ui/LazyTabPanel'
 import { PortfolioValueChart } from './PortfolioValueChart'
 import { PortfolioSummaryCards } from './PortfolioSummaryCards'
 import { PerformanceMetricsCards } from './PerformanceMetricsCards'
@@ -14,13 +15,26 @@ import { PerformanceAttribution } from './PerformanceAttribution'
 import { MonthlyReturnsHeatmap } from './MonthlyReturnsHeatmap'
 import { MonthlyDeploymentCard } from './MonthlyDeploymentCard'
 import { DividendSummary } from './DividendSummary'
-import { ActivityTab } from './ActivityTab'
-import { AllocationTab } from './AllocationTab'
-import { ForecastTab } from './ForecastTab'
-import { FundamentalsTab } from './FundamentalsTab'
-import { WatchlistTab } from './WatchlistTab'
-import { TaxTab } from './TaxTab'
-import { DividendsTab } from './DividendsTab'
+/**
+ * The seven non-default tabs load on demand; the Performance tab does not.
+ *
+ * The build was one 891 kB chunk and Vite warned on it every time. Recharts is most of
+ * that weight, but splitting *it* out wins little — `PortfolioValueChart`,
+ * `PerformanceAttribution` and `MonthlyDeploymentCard` all sit on the default
+ * Performance tab, so the charting library is needed at first paint regardless. What is
+ * genuinely deferrable is the other seven panels' own code, which nobody has asked for
+ * when the page loads.
+ *
+ * Safe because `TabsContent` returns null while inactive, so a lazy panel is not
+ * mounted (and therefore not fetched) until its tab is actually selected.
+ */
+const ActivityTab = lazy(() => import('./ActivityTab').then(m => ({ default: m.ActivityTab })))
+const AllocationTab = lazy(() => import('./AllocationTab').then(m => ({ default: m.AllocationTab })))
+const ForecastTab = lazy(() => import('./ForecastTab').then(m => ({ default: m.ForecastTab })))
+const FundamentalsTab = lazy(() => import('./FundamentalsTab').then(m => ({ default: m.FundamentalsTab })))
+const WatchlistTab = lazy(() => import('./WatchlistTab').then(m => ({ default: m.WatchlistTab })))
+const TaxTab = lazy(() => import('./TaxTab').then(m => ({ default: m.TaxTab })))
+const DividendsTab = lazy(() => import('./DividendsTab').then(m => ({ default: m.DividendsTab })))
 import { ThemeToggle } from './ThemeToggle'
 import { AdminKeyButton } from './AdminKeyButton'
 import { BenchmarkPicker, BENCHMARK_COLORS } from './BenchmarkPicker'
@@ -507,37 +521,37 @@ export function Dashboard() {
 
           {/* Activity Tab — the transaction ledger */}
           <TabsContent value="activity">
-            <ActivityTab />
+            <LazyTabPanel label="Activity"><ActivityTab /></LazyTabPanel>
           </TabsContent>
 
           {/* Allocation Tab */}
           <TabsContent value="allocation">
-            <AllocationTab />
+            <LazyTabPanel label="Allocation"><AllocationTab /></LazyTabPanel>
           </TabsContent>
 
           {/* Dividends Tab */}
           <TabsContent value="dividends">
-            <DividendsTab />
+            <LazyTabPanel label="Dividends"><DividendsTab /></LazyTabPanel>
           </TabsContent>
 
           {/* Fundamentals Tab */}
           <TabsContent value="fundamentals">
-            <FundamentalsTab />
+            <LazyTabPanel label="Fundamentals"><FundamentalsTab /></LazyTabPanel>
           </TabsContent>
 
           {/* Watchlist Tab */}
           <TabsContent value="watchlist">
-            <WatchlistTab />
+            <LazyTabPanel label="Watchlist"><WatchlistTab /></LazyTabPanel>
           </TabsContent>
 
           {/* Forecast Tab */}
           <TabsContent value="forecast">
-            <ForecastTab />
+            <LazyTabPanel label="Forecast"><ForecastTab /></LazyTabPanel>
           </TabsContent>
 
           {/* Tax Tab */}
           <TabsContent value="tax">
-            <TaxTab />
+            <LazyTabPanel label="Tax"><TaxTab /></LazyTabPanel>
           </TabsContent>
         </Tabs>
       </div>
