@@ -1,11 +1,12 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
 import { useFormatCurrency } from '@/lib/CurrencyContext'
-import { RefreshCw, Plus, Trash2, ArrowDown, ArrowUp, Pencil } from 'lucide-react'
+import { SortableTh } from '@/components/ui/SortableTh'
+import { RefreshCw, Plus, Trash2, Pencil } from 'lucide-react'
 
 
 type SortColumn =
@@ -97,6 +98,17 @@ export function WatchlistTab() {
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc')
   const [headerTooltip, setHeaderTooltip] = useState<TooltipState | null>(null)
 
+  // Escape dismisses the header tooltip without moving focus off the column, which is
+  // what a keyboard user needs when the definition covers the row beneath it.
+  useEffect(() => {
+    if (!headerTooltip) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setHeaderTooltip(null)
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [headerTooltip])
+
   const { data: items, isLoading } = useQuery({
     queryKey: ['watchlist'],
     queryFn: () => api.getWatchlist(),
@@ -175,30 +187,42 @@ export function WatchlistTab() {
     })
   }, [items, sortColumn, sortDirection])
 
+  /**
+   * The tooltips these headers carry are the **only** place PEG, RSI and TTM growth are
+   * defined anywhere in the app, and they were `onMouseEnter`-only — unreachable
+   * without a pointer. They now open on focus too, so tabbing across the header row
+   * surfaces each definition, and Escape dismisses one without moving focus.
+   */
   const SortHeader = ({
     column, label, className,
     tooltip,
   }: {
     column: SortColumn; label: string; className?: string
     tooltip?: { description: string; formula?: string }
-  }) => (
-    <th
-      className={`px-3 py-2 text-left text-xs font-medium text-muted-foreground cursor-pointer hover:text-foreground select-none ${className || ''}`}
-      onClick={() => handleSort(column)}
-      onMouseEnter={tooltip ? (e) => {
-        const rect = e.currentTarget.getBoundingClientRect()
-        setHeaderTooltip({ label, ...tooltip, x: rect.left + rect.width / 2, y: rect.bottom })
-      } : undefined}
-      onMouseLeave={tooltip ? () => setHeaderTooltip(null) : undefined}
-    >
-      <span className="inline-flex items-center gap-1">
-        {label}
-        {sortColumn === column && (
-          sortDirection === 'asc' ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />
-        )}
-      </span>
-    </th>
-  )
+  }) => {
+    const show = (el: HTMLElement) => {
+      if (!tooltip) return
+      const rect = el.getBoundingClientRect()
+      setHeaderTooltip({ label, ...tooltip, x: rect.left + rect.width / 2, y: rect.bottom })
+    }
+    const hide = tooltip ? () => setHeaderTooltip(null) : undefined
+
+    return (
+      <SortableTh
+        column={column}
+        label={label}
+        activeColumn={sortColumn}
+        direction={sortDirection}
+        onSort={handleSort}
+        className={`px-3 py-2 text-xs text-muted-foreground ${className || ''}`}
+        iconClassName="h-3 w-3"
+        onMouseEnter={tooltip ? e => show(e.currentTarget) : undefined}
+        onMouseLeave={hide}
+        onFocus={tooltip ? e => show(e.currentTarget) : undefined}
+        onBlur={hide}
+      />
+    )
+  }
 
   return (
     <div className="space-y-6">
@@ -523,9 +547,12 @@ export function WatchlistTab() {
         </Card>
       )}
 
-      {/* Fixed-position header tooltip — renders outside overflow container */}
+      {/* Fixed-position header tooltip — renders outside overflow container.
+          role="status" so the definition is announced when focus opens it; without
+          that, a keyboard user reaches the header and the tooltip appears silently. */}
       {headerTooltip && (
         <div
+          role="status"
           className="fixed z-[9999] w-60 pointer-events-none"
           style={{ left: headerTooltip.x, top: headerTooltip.y + 6, transform: 'translateX(-50%)' }}
         >

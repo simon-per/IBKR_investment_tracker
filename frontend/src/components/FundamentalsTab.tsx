@@ -4,7 +4,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Button } from '@/components/ui/button'
 import { api } from '@/lib/api'
 import type { FundamentalMetrics, EarningsCalendarItem, EarningsHistoryItem } from '@/lib/api'
-import { RefreshCw, ArrowUpDown, ChevronUp, ChevronDown } from 'lucide-react'
+import { SortableTh } from '@/components/ui/SortableTh'
+import { RefreshCw } from 'lucide-react'
 
 type SortKey = 'symbol' | 'trailing_pe' | 'forward_pe' | 'peg_ratio' | 'price_to_sales' |
   'revenue_growth' | 'earnings_growth' | 'fwd_revenue_growth' | 'fwd_eps_growth' | 'profit_margins' | 'market_cap'
@@ -89,21 +90,20 @@ function SortHeader({
   onSort: (key: SortKey) => void
   title?: string
 }) {
+  // Was onClick on the <th> itself: no tabIndex, no key handler, so none of these
+  // columns could be sorted without a mouse, and nothing announced the sort state.
   return (
-    <th
-      className="text-right py-2 px-2 font-medium cursor-pointer select-none hover:text-foreground transition-colors whitespace-nowrap"
-      onClick={() => onSort(sortKey)}
+    <SortableTh
+      column={sortKey}
+      label={label}
+      activeColumn={currentSort}
+      direction={currentDir}
+      onSort={onSort}
+      align="right"
       title={title}
-    >
-      <span className="inline-flex items-center gap-1">
-        {label}
-        {currentSort === sortKey ? (
-          currentDir === 'asc' ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />
-        ) : (
-          <ArrowUpDown className="h-3 w-3 opacity-30" />
-        )}
-      </span>
-    </th>
+      className="py-2 px-2 whitespace-nowrap"
+      iconClassName="h-3 w-3"
+    />
   )
 }
 
@@ -158,19 +158,15 @@ function MetricsTable({ data }: { data: FundamentalMetrics[] }) {
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b text-muted-foreground">
-              <th
-                className="text-left py-2 px-2 font-medium cursor-pointer select-none hover:text-foreground transition-colors"
-                onClick={() => handleSort('symbol')}
-              >
-                <span className="inline-flex items-center gap-1">
-                  Symbol
-                  {sortKey === 'symbol' ? (
-                    sortDir === 'asc' ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />
-                  ) : (
-                    <ArrowUpDown className="h-3 w-3 opacity-30" />
-                  )}
-                </span>
-              </th>
+              <SortableTh
+                column="symbol"
+                label="Symbol"
+                activeColumn={sortKey}
+                direction={sortDir}
+                onSort={handleSort}
+                className="py-2 px-2"
+                iconClassName="h-3 w-3"
+              />
               <SortHeader label="P/E" sortKey="trailing_pe" currentSort={sortKey} currentDir={sortDir} onSort={handleSort} />
               <SortHeader label="Fwd P/E" sortKey="forward_pe" currentSort={sortKey} currentDir={sortDir} onSort={handleSort} />
               <SortHeader label="PEG" sortKey="peg_ratio" currentSort={sortKey} currentDir={sortDir} onSort={handleSort} title="P/E divided by forward EPS growth rate (analyst consensus next-12M estimate). Below 1 = potentially undervalued." />

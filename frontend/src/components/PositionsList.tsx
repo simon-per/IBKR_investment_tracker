@@ -3,7 +3,7 @@ import type { Position } from '@/lib/api'
 import { formatPercent } from '@/lib/utils'
 import { useFormatCurrency } from '@/lib/CurrencyContext'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react'
+import { SortableTh } from '@/components/ui/SortableTh'
 
 interface PositionsListProps {
   positions: Position[]
@@ -175,32 +175,21 @@ export function PositionsList({ positions, isLoading, isError }: PositionsListPr
     )
   }
 
-  const SortableHeader = ({ column, label, align = 'left' }: { column: SortColumn; label: string; align?: 'left' | 'right' }) => {
-    const isActive = sortColumn === column
-    const alignClass = align === 'right' ? 'justify-end' : 'justify-start'
-
-    return (
-      <th className={`pb-3 font-medium ${align === 'right' ? 'text-right' : ''}`}>
-        <button
-          onClick={() => handleSort(column)}
-          className={`flex items-center gap-1 ${alignClass} w-full hover:text-foreground transition-colors ${
-            isActive ? 'text-foreground' : ''
-          }`}
-        >
-          <span>{label}</span>
-          {isActive ? (
-            sortDirection === 'asc' ? (
-              <ArrowUp className="h-4 w-4" />
-            ) : (
-              <ArrowDown className="h-4 w-4" />
-            )
-          ) : (
-            <ArrowUpDown className="h-4 w-4 opacity-30" />
-          )}
-        </button>
-      </th>
-    )
-  }
+  // This table's own pattern, now shared with Fundamentals and Watchlist (which each
+  // put onClick straight on the <th> and so could not be sorted from a keyboard).
+  const SortableHeader = ({ column, label, align = 'left' }: {
+    column: SortColumn; label: string; align?: 'left' | 'right' | 'center'
+  }) => (
+    <SortableTh
+      column={column}
+      label={label}
+      activeColumn={sortColumn}
+      direction={sortDirection}
+      onSort={handleSort}
+      align={align}
+      className="pb-3"
+    />
+  )
 
   return (
     <Card>
@@ -214,25 +203,7 @@ export function PositionsList({ positions, isLoading, isError }: PositionsListPr
               <tr className="border-b border-border text-left text-sm text-muted-foreground">
                 <SortableHeader column="symbol" label="Symbol" />
                 <SortableHeader column="description" label="Description" />
-                <th className="pb-3 font-medium text-center">
-                  <button
-                    onClick={() => handleSort('rating')}
-                    className={`flex items-center gap-1 justify-center w-full hover:text-foreground transition-colors ${
-                      sortColumn === 'rating' ? 'text-foreground' : ''
-                    }`}
-                  >
-                    <span>Rating</span>
-                    {sortColumn === 'rating' ? (
-                      sortDirection === 'asc' ? (
-                        <ArrowUp className="h-4 w-4" />
-                      ) : (
-                        <ArrowDown className="h-4 w-4" />
-                      )
-                    ) : (
-                      <ArrowUpDown className="h-4 w-4 opacity-30" />
-                    )}
-                  </button>
-                </th>
+                <SortableHeader column="rating" label="Rating" align="center" />
                 <SortableHeader column="quantity" label="Quantity" align="right" />
                 <SortableHeader column="cost_basis_eur" label="Cost Basis" align="right" />
                 <SortableHeader column="market_value_eur" label="Market Value" align="right" />
