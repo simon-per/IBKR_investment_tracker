@@ -258,6 +258,13 @@ this section can be deleted once the commits are pushed without losing them.
   above rows reading *Not currently held*. Caught by `e2e/errors`, which now covers it.
 - **`e2e/a11y.mjs` claimed "backend optional"** and never could have been: three of its checks need one,
   so run as documented it reported 11/14 with every failure a phantom.
+- **Analyst ratings were read out of yfinance by row position.** `recommendations.iloc[0]`, under a
+  comment asserting row 0 *is* the current month — provider ordering taken on trust, and the same shape
+  as the `openDateTime` defect CLAUDE.md says not to reintroduce. A three-month-old consensus reported
+  as current is a plausible number, so nothing would look wrong. Now keyed on `period == '0m'`, and a
+  frame that has the column but no current row reports **nothing** rather than an older period. Also
+  `int()` on a NaN raised inside a broad `except`, so one unparseable column discarded all five counts
+  and the security's rating with them.
 - **The two endpoints reporting PEG disagreed about how to compute it.** `FundamentalsService` and
   `WatchlistService` both fall back when Yahoo gives no `pegRatio`, and their orders had drifted: the
   watchlist tries forward-EPS growth (its own comment calls that tier *"preferred"*) before the analyst
@@ -455,9 +462,9 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
 "tidy up" the overlap by deleting the wrong one.
 
 - **2026-07-31 (overnight, unpushed)** — autonomous loop: three frontend features (risk row, target
-  allocation & drift, currency exposure) and nine bugs (49 sites reading the clock in local time; SOXQ
+  allocation & drift, currency exposure) and ten bugs (49 sites reading the clock in local time; SOXQ
   missing from the ETF look-through; the rebalance panel building a plan out of an outage; `e2e/a11y`'s
-  "backend optional" claim). Suites 462 → 574 backend, 91 → 268 frontend; all `e2e` scripts green bar
+  "backend optional" claim). Suites 462 → 587 backend, 91 → 268 frontend; all `e2e` scripts green bar
   `ledger`. Durable rules promoted into CLAUDE.md. **Nothing deployed** — see *Unpushed*.
 - **2026-07-31** — enterprise-readiness pass: shared TTM growth,
   locale-independent chart dates, inception read from the data, keyboard/ARIA across the tab strip and
