@@ -306,6 +306,20 @@ Tests: `tests/test_flex_xml_sanitizer.py`, `tests/test_flex_ingestion_e2e.py`.
   `/api/scheduler/status` falls back to it; `/api/scheduler/history?limit=N` lists recent runs.
   Recording is best-effort — it must never fail a sync or mask the real error.
 
+**Every stored timestamp is a naive UTC datetime, and `app/clock.py` is the only way to make one.**
+The columns default to `func.now()`, which SQLite answers in UTC, and `utc_iso()` serializes by
+stamping UTC onto a value it *assumes* is already UTC. The stdlib's argument-less `now()` returns naive
+**local** time, so it was correct at ~49 call sites only because `python:3.11-slim` sets no `TZ` — an
+undeclared dependency on the base image that nothing would have noticed breaking. Off the container it
+was already wrong three ways at once: cache cutoffs (`now - timedelta(days=7)` against a naive-UTC
+column) expired an offset early, ages (`now - row.last_synced`) read an offset too old, and
+`utc_iso(datetime.now())` labelled local time as UTC so the browser converted it a second time — the
+"two clocks on one line" failure `utc_iso` exists to prevent, reintroduced through its own argument.
+`utcnow()` stays **naive** on purpose: these values are compared against naive columns, where an aware
+value raises `TypeError` rather than degrading. `tests/test_clock_convention.py` walks the source tree
+so the old call cannot return, and asserts against real UTC rather than local — the assertion that
+passes vacuously on the container and catches the bug everywhere else.
+
 Migrations: `cd backend && alembic upgrade head` (the container CMD runs this on every start).
 
 ---
@@ -1040,6 +1054,94 @@ pre-ownership history never surfaces. Tests: `tests/test_activity_service.py`, p
 
 ---
 
+## Client-side analytics — risk, targets, currency
+
+Three pure `frontend/src/lib/` modules with no endpoint of their own: they compute from series and
+positions the page has already fetched, which is why they add **no request and cannot reach Yahoo**.
+`portfolioKpis.ts` feeds the Performance tab's two card rows; `rebalance.ts` and
+`currencyExposure.ts` feed two panels on the Allocation tab.
+
+**One rule spans all three, and it was a real bug before it was a rule.** `undefined` data means
+*not loaded*; an empty array means *nothing held*. Collapsing them lets a panel build a confident
+answer out of an outage — the rebalance panel did exactly that, reporting *0 positions outside the
+band* above rows reading *Not currently held*, i.e. that nothing needed rebalancing and that held
+positions were not held. Unit tests could not see it because the shape needs a saved target;
+`e2e/errors.mjs` covers it now. Any new panel here takes `isError` and treats absent data as a
+stated failure.
+
+### Risk metrics (`portfolioKpis.ts`)
+
+Sharpe, Calmar and top-5 weight predate the rest. Volatility, Sortino, beta/correlation, drawdown
+detail and Herfindahl effective holdings were added because the tab reported return *per unit of
+risk* without ever reporting the risk, and because a top-5 weight cannot tell five equal positions
+from one dominant one.
+
+- **Beta is measured only over days when NEITHER series saw a flow.** The benchmark is a flow-matched
+  hypothetical carrying the portfolio's own cost-basis line but no `external_flow_eur`, so netting a
+  flow out of it means inferring one from the cost delta — the same asymmetry that fabricates a loss
+  on every sale date in `externalFlow`'s fallback. That would bias beta on exactly the days the
+  portfolio traded. Dropping the pair costs a few days a month and biases nothing. `sampleDays` rides
+  along so a thin window declares itself instead of showing a confident slope.
+- **Volatility and Sortino are `null`, not `0`**, below the minimum sample or with no downside at all.
+  A `0` meaning "unknown" being read later as a fact is the most repeated bug in this codebase.
+- **`dailyReturnSeries` exists because `dailyReturns` drops days with nothing to divide by**, so the
+  nth return is not the nth calendar point. Indexing the input by return position to name a
+  drawdown's peak picks the wrong day.
+- **The *current* drawdown leads and the worst one is the footnote.** Showing only the max reads as a
+  live warning long after the recovery.
+
+### Target allocation and drift (`rebalance.ts`)
+
+Targets live in **localStorage**, following `ForecastTab`'s precedent. Deliberately not a table plus
+an endpoint: `/api/` is proxied publicly and every write is auth-gated, so a route that stores
+portfolio intent is a larger surface than this earns. The cost — targets do not follow you to another
+browser — is stated in the panel. `readTargets()` drops a stored value that is not a usable percent
+rather than coercing it, because one NaN propagates into every drift on the page, and survives
+corrupt JSON rather than taking the tab down.
+
+Four rules, each a wrong number the other way:
+
+- **A missing target means unmanaged, never 0%.** Reading absence as zero advises liquidating every
+  holding whose target has not been set — all of them on first use. Clearing the input therefore
+  *removes* the target; `0` means "hold none of this", and those are different instructions.
+- **Targets are never renormalised to 100%.** The shortfall is reported instead. Scaling invents a
+  target nobody chose, and the invented one moves whenever an *unrelated* target is edited.
+- **An unpriced position has no weight rather than a zero weight.** The portfolio values a holding
+  with no cached price at 0.00, so naive drift advises buying its entire target when the position may
+  be the largest one held — the SBI shape. A *priced* holding genuinely worth zero is a real 0% and
+  stays advisable.
+- **Targets key on `security_id`, not symbol**, because identity is `isin + exchange` and ASML is two
+  securities.
+
+Two further refusals. An empty plan is **not** `balanced` — vacuous truth renders *nothing to do* on
+a portfolio nobody has configured. And `judgedCount` exists because counting only rows *outside* the
+band cannot tell an all-clear from an empty comparison: zero judged rows must say so, which is also
+wrong-with-a-healthy-backend when every target sits on an unpriced holding.
+
+### Currency exposure (`currencyExposure.ts`)
+
+`securities.currency` is the currency a listing **trades** in. For a direct holding that is also the
+economic exposure; for a fund it need not be, and here often is not — a EUR-listed S&P 500 tracker is
+quoted in EUR and carries USD risk. Folding it into the EUR bucket is confidently backwards on
+exactly the positions that prompt the question.
+
+**Nothing is re-attributed, and the ETF look-through table cannot fix it**: `app/etf_mappings.py` maps
+*regions*, and regions do not determine currency — "Europe" spans EUR/GBP/CHF/SEK, "Asia Pacific"
+spans JPY/AUD/HKD/TWD. Funds are counted where they trade, with their share of the book named on
+screen and the reason given, so the rows cannot be mistaken for an FX position. The fund set comes
+from the ETF bucket of the allocation response already on the page, since `Position` carries no asset
+type; matching is by symbol, so a stock sharing a held fund's ticker would be flagged — accepted,
+because the flag is a caveat rather than a figure.
+
+Unpriced positions are excluded and counted, as above, and `foreignQuotedPct` returns `null` rather
+than `0` when nothing is priced: no positions is an unknown exposure, not an unhedged-free one.
+
+Tests: `src/lib/portfolioKpis.test.ts`, `src/lib/rebalance.test.ts`,
+`src/lib/currencyExposure.test.ts`, plus jsdom tests beside each component and three checks in
+`e2e/errors.mjs`.
+
+---
+
 ## Deployment
 
 **Push to `main` → deployed automatically within 10 minutes.** `/root/auto-deploy.sh` on the VPS (root
@@ -1251,6 +1353,11 @@ Tests: `tests/test_currency_fallback.py`.
 | "Which build is live?" | `curl /health` — it reports `version`, `commit`, `scheduler_enabled` and `write_auth_enabled`. Same line in the app footer |
 | A 500 with no detail | By design. Grep the container log for its `request_id`, which is in the body and the `X-Request-ID` header |
 | A missed sync ran late after a restart | Expected: the persistent job store honours a misfire for 30 min. Older than that is dropped, and the next slot recovers |
+| A drift row reads `—` instead of advice | No target (unmanaged — blank is not 0%), or the position has no cached price so it has no weight to compare. Both deliberate; see *Client-side analytics* |
+| Drift says "no target could be compared" | Nothing had both a target and a weight. **Not** an all-clear — that wording exists because "0 outside the band" was one |
+| A drift or currency panel says it couldn't load positions | The positions query failed. The panel refuses to build a plan from absent data rather than reporting a portfolio of unheld rows |
+| Currency exposure looks wrong for an ETF | It is quote currency, not economic exposure, and deliberately not re-attributed — a EUR-listed S&P tracker is EUR-quoted with USD risk. The fund share is named on screen |
+| Beta is blank with a benchmark selected | Fewer than the 20 flow-free days a regression needs; the count so far is in the footnote. Flow days are excluded by design |
 
 ---
 

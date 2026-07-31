@@ -227,178 +227,80 @@ What landed, and why each was worth doing:
 
 ## Unpushed — waiting on a human
 
-An autonomous overnight loop is running (`/loop 10m`, started 2026-07-31 ~21:45) doing feature
-research → implementation → bug hunting. Its commits are **local and unpushed**, deliberately: a push
-auto-deploys inside 10 minutes and nobody is awake to watch it. `git log --oneline origin/main..main`
-is the list; the loop's own running notes are `.claude/overnight-log.md` (gitignored).
+An autonomous overnight loop ran on 2026-07-31 (`/loop 10m`): feature research → implementation → bug
+hunting. Its commits are **local and unpushed on purpose** — a push auto-deploys inside 10 minutes and
+nobody was awake to watch it. `git log --oneline origin/main..main` is the list; the loop's own running
+notes are `.claude/overnight-log.md` (gitignored).
 
-**Risk metrics on the Performance tab.** The app reported return *per unit of risk* — Sharpe, Calmar —
-without ever showing the risk, and a top-5 weight cannot tell five equal positions from one dominant
-one. A second card row now carries annualised volatility, Sortino, beta vs the primary selected
-benchmark, the **current** drawdown with the worst one as its footnote, and Herfindahl effective
-holdings. Frontend-only: beta reuses the benchmark series the chart already fetches, so it adds no
-request and cannot reach Yahoo. Frontend suite 91 → 133.
+**The durable rules from this work now live in CLAUDE.md**, under *Client-side analytics — risk,
+targets, currency* and the naive-UTC paragraph in *Database schema*. They are not repeated here, so
+this section can be deleted once the commits are pushed without losing them.
 
-Two decisions there that should not be quietly reverted:
+### Three features, all frontend-only, none able to reach a provider
 
-- **Beta is measured over flow-free days only.** The benchmark is a flow-matched hypothetical carrying
-  the portfolio's own cost-basis line but no `external_flow_eur`, so netting a flow out of it would
-  mean inferring one from the cost delta — the same asymmetry that fabricates a loss on every sale
-  date in `externalFlow`'s fallback, biasing beta on exactly the days the portfolio traded. The pair
-  is dropped instead, and `sampleDays` rides along so a thin window declares itself rather than
-  showing a confident-looking slope.
-- **Volatility and Sortino are `null`, not `0`, when unknown** — below the minimum sample, or with no
-  down days at all. Same rule the tax report's `holdings_snapshot_total` and `_to_eur` learned the
-  hard way.
+- **A risk row on the Performance tab** — volatility, Sortino, beta vs the primary benchmark, the
+  *current* drawdown with the worst as its footnote, Herfindahl effective holdings. Beta reuses the
+  benchmark series the chart already fetches, so it adds no request.
+- **Target allocation & drift** on the Allocation tab — editable target per position, tolerance band,
+  the signed trade that closes each gap, "adopt current weights". Targets in localStorage.
+- **Currency exposure** on the Allocation tab — the book by the currency each listing trades in, led by
+  the share quoted outside the base currency.
 
-**The clock was being read in local time, everywhere.** 49 sites of `datetime.now()` — naive *local*
-time — while every stored timestamp is naive UTC (`func.now()` is UTC on SQLite, and `utc_iso()`
-stamps UTC onto a value it assumes already is). It was correct in production **only because
-`python:3.11-slim` sets no `TZ`**, so the container's local clock happens to be UTC: an undeclared
-dependency on the base image that nothing would have noticed breaking. Off the container it is wrong
-three ways at once — cache cutoffs expire an offset early (fundamentals, allocation, analyst ratings,
-dividend freshness), ages read an offset too old (including `find_stale_ibkr_sync` and
-`manage_mappings list`), and `utc_iso(datetime.now())` labels local time as UTC so the browser
-converts a second time. That last one is the "two clocks on one line" failure `utc_iso` exists to
-prevent, reintroduced through its own argument, and it is why **a local run shows a sync timestamped
-in the future** — worth knowing before diagnosing one.
+### Four bugs found and fixed
 
-`app/clock.py` is the single replacement (`utcnow()`, deliberately **naive** UTC: these values are
-compared against naive columns, where an aware value raises `TypeError` rather than degrading).
-`tests/test_clock_convention.py` walks the source tree so the old call cannot come back, and asserts
-against real UTC rather than local time — the assertion that passes vacuously on the container and
-catches the bug everywhere else. Backend suite 462 → 467.
+- **The whole codebase read the clock in local time** — 49 sites of `datetime.now()` against a
+  naive-UTC convention, correct in production only because `python:3.11-slim` sets no `TZ`. Fixed via
+  `app/clock.py`; `tests/test_clock_convention.py` walks the tree so it cannot return.
+- **`SOXQ` had no ETF look-through entry**, so a holding bought 2026-07-27 was absent from the sector
+  *and* geographic treemaps and counted as a stock in the third. No sync could have fixed it — the
+  missing data is a mapping, not a fetch.
+- **The rebalance panel built a plan out of a backend outage**, reporting *0 positions outside the band*
+  above rows reading *Not currently held*. Caught by `e2e/errors`, which now covers it.
+- **`e2e/a11y.mjs` claimed "backend optional"** and never could have been: three of its checks need one,
+  so run as documented it reported 11/14 with every failure a phantom.
 
-Two stale docstrings in `scheduler_service.py` went with it: `_ibkr_only_sync_locked` still said
-"13:00 and 20:00", the class docstring still said "Runs 3 times daily" and listed three of five jobs,
-and both still called the Flex Query Year-to-Date. Not cosmetic in that file — every token lockout
-came from reasoning wrongly about when to ask IBKR.
+### Wants Simon's eye
 
-**Currency exposure on the Allocation tab.** `lib/currencyExposure.ts` +
-`components/CurrencyExposureCard.tsx`: the book grouped by the currency each listing trades in, led by
-the share quoted outside the base currency. `securities.currency` was ingested and surfaced nowhere.
+- **SOXQ's geographic split in `app/etf_mappings.py` is my estimate** (US 80 / Taiwan 10 / Netherlands 8
+  / Korea 2), skewed more US than SMH's because the PHLX SOX index only takes US-listed names. The
+  sector (100% Technology) is unambiguous for a pure semiconductor fund; the geography is approximate
+  like the rest of that file. Adjust if you want it tighter.
+- **Allocation targets are stored in localStorage, not the database.** Chosen because `/api/` is public
+  and auth-gated, so a route storing portfolio intent is a larger surface than the feature earns — but
+  it means targets do not follow you to another browser. Reversible: the lib is pure and takes a plain
+  map, so a table plus endpoint would only change where that map comes from.
 
-**The one thing not to "improve":** that column is the *quote* currency. For a direct holding it is also
-the economic exposure; for a fund it need not be, and here often is not — SXR8 is a EUR-listed S&P 500
-tracker, quoted in EUR and carrying USD risk. Folding it into the EUR bucket would be confidently
-backwards on exactly the positions that prompt the question. **Nothing is re-attributed, and the ETF
-look-through table cannot fix it**: that table maps *regions*, and regions do not determine currency
-("Europe" spans EUR/GBP/CHF/SEK; "Asia Pacific" spans JPY/AUD/HKD/TWD). Funds are counted where they
-trade, with their share of the book named on screen and the reason stated, so the rows cannot be mistaken
-for an FX position. The fund set comes from the ETF bucket of the allocation response already on the page
-(matched by symbol, since `Position` carries no asset type — a stock sharing a held fund's ticker would be
-flagged, which is accepted because the flag is a caveat, not a figure).
+### Verified and **not** bugs — recorded so nobody re-chases them
 
-It carries the rebalance panel's two rules from the start: unpriced positions excluded and counted, and
-`undefined` positions rendering an explicit failure rather than an exposure of zero. Frontend 181 → 214.
+`ActivityTab`'s `amount_base ?? 0` (unreachable — `BaseFx.convert` never returns `None`);
+`DividendKpiCards`' `prev_net_eur ?? 0` (over-permissive TS type; the backend always emits a float);
+`PortfolioValuePoint.external_flow_eur`'s `0.0` model default (the service supplies it on every row);
+the first timeline row's flow (already fixed by the pre-window seeding loop); the success-path
+`SyncRunRepository.record()` outside the `try` (identical in **all five** CLIs, so a deliberate pattern);
+`expire_on_commit=False` making post-commit attribute reads safe; `security.asset_type` and
+`security.asset_category` both being real columns; `_add_to_category` merging by symbol (which is what
+correctly combines a dual-listed ASML inside one category); and `lib/monthlyReturns.ts` already routing
+through `externalFlow`.
 
-**Target allocation & drift on the Allocation tab.** `lib/rebalance.ts` +
-`components/RebalanceCard.tsx`: an editable target weight per position, a tolerance band (default
-5 pp), the signed trade that closes each gap, and "adopt current weights". Targets live in
-**localStorage**, following `ForecastTab`'s precedent — chosen over a table plus endpoint because
-`/api/` is proxied publicly and every write is auth-gated, so a new mutating route is a larger surface
-than the feature earns. The trade-off (targets do not follow you to another browser) is stated in the
-panel. Frontend suite 133 → 171; all of it lands in the **lazy** AllocationTab chunk, so the eager
-bundle is unchanged.
+**`benchmark_service.calculate_benchmark_value_over_time()` was audited line by line and is correct** —
+it is the input to the new beta metric and re-reading 200 lines is expensive, so: close events exclude
+**on** the close date like everywhere else; pre-window events fold in on the first iteration without
+needing `portfolio_service`'s explicit seeding loop; share and cost events are appended *and skipped*
+together, so a zero value can never be emitted against a live cost basis; and `_apply_base_currency`
+converts all four money fields and recomputes the gain from the converted pair, so it is **not** the
+CAD/CHF half-conversion shape. One behaviour to know: when shares are held but the index price or FX
+rate is missing, that day is **omitted from the series** rather than zeroed — `betaAndCorrelation` skips
+such a pair by design, and the date stays in `missing_dates` so it self-heals.
 
-Four rules there are load-bearing and should not be "simplified":
+### State
 
-- **A missing target means unmanaged, not 0%.** Reading absence as zero advises liquidating every
-  holding whose target has not been set — which is all of them on first use.
-- **Targets are never renormalised to 100%.** The shortfall is reported instead. Scaling them invents
-  a target nobody chose, and the invented one moves whenever an *unrelated* target is edited.
-- **An unpriced position has no weight rather than a zero weight.** The portfolio values a holding
-  with no cached price at 0.00, so naive drift would advise buying its entire target when the position
-  may be the largest one held — the SBI shape. A priced holding genuinely worth zero is a different
-  case and stays advisable.
-- **Targets key on `security_id`, not symbol**, because identity is `isin + exchange` and ASML is two
-  securities.
+Suites **backend 523 / frontend 214**, `tsc -b` and `npm run build` clean. `e2e/`: `chunks` 33/33,
+`csp` 4/4, `a11y` 17/17, `errors` 14/14, `sweep` 16/16 — everything except `ledger`, which needs a
+production snapshot. **Nothing is deployed**: all of the above is verified locally only.
 
-Also: an empty plan is deliberately **not** "balanced" — vacuous truth would render *nothing to do* on
-a portfolio nobody has configured yet.
+Coverage-led hunting found two of the four bugs (`pytest --cov`, backend ~70%);
+`taxlot_repository` (58%) is the last flagged pure-computation gap.
 
-**`SOXQ` was missing from the ETF look-through table, and that hid it from two treemaps.**
-`is_known_etf` gates the whole sector/geography distribution in `get_portfolio_allocation`, so with no
-`app/etf_mappings.py` entry the position fell through to `security.asset_type` (column default
-`"Stock"`) and to `security.sector`/`security.country`, which Yahoo leaves empty for a fund. A holding
-bought 2026-07-27 appeared in **neither** the sector nor the geographic breakdown and was counted as a
-stock in the asset-type one. **No sync could have repaired it** — the missing data is a mapping, not a
-fetch — so the tab's "securities missing allocation data" warning could not lead anywhere. Every other
-ETF this account holds was already mapped; SOXQ was the only gap.
-
-Its percentages are approximate, as the whole file is, and **worth one look**: the sector (100%
-Technology) is unambiguous for a pure semiconductor fund, but the geographic split is an estimate
-skewed more US than SMH's because the PHLX SOX index is limited to US-listed names.
-
-`tests/test_etf_mappings.py` now guards the table, which nothing did — each row's sector and
-geographic weights must sum to 100, because they are multiplied by the position's own weight and a
-column summing to 90 silently scales that ETF's entire contribution to 0.9 with nothing looking wrong
-on screen. All eight pre-existing rows already passed.
-
-**The cash-flow CLI had no tests at all.** `manage_cash_flows.py` was the only one in the family
-without a file (mappings, price-import, prune and purge all have one) while guarding the highest-risk
-number in contributions. Now 18 tests, 0% → 97%, pinning the money-added boundary rather than the
-printing. **The CLI itself is correct** — no defect found. Backend suite 467 → 523.
-
-Coverage-led hunting is what found both of these; `pytest-cov` is already installed and the backend
-sits at ~70%. `taxlot_repository` (58%) is the last flagged pure-computation gap.
-
-**`e2e/a11y.mjs` said "backend optional" and never could have been.** Three of its checks need one:
-`aria-sort` headers only exist once Fundamentals and Watchlist have rows to sort, the footer assertion
-reads `/health`, and a refused connection fills the console so the zero-console-errors check fails too.
-Run as documented it reports 11/14 with **every failure a phantom** — which either sends you chasing an
-ARIA regression that isn't there or teaches you to ignore red. Fixed in the README table and in the
-script's own header, which repeated it. The checked-in `portfolio.db` is enough here; it needs
-positions, not realistic ones (unlike `ledger.mjs`).
-
-`a11y.mjs` now also covers the rebalance panel — its target and tolerance-band fields are the only
-editable inputs in the app, so an accessible name on each is its whole keyboard story. **17/17.**
-
-**The `e2e/` suite was run for the first time in a while:** `chunks` 33/33, `csp` 4/4, `a11y` 17/17,
-`errors` 14/14, `sweep` 16/16. Every chunk boundary survived this session's frontend work — `RiskMetricsCards` sits in
-the eager `index` chunk (correct: default tab) and `RebalanceCard` in the lazy `AllocationTab` one — and
-the Allocation tab mounts with both new panels under the production CSP with zero violations. **Every
-script now passes except `ledger`, which needs a production snapshot** — real account data, not worth
-pulling for this.
-
-**`e2e/errors` earned its keep immediately: the rebalance panel drew a whole plan out of a backend
-outage.** With targets saved in localStorage and the backend down it reported *0 position(s) outside the
-5 pp band* above rows reading *Not currently held* — that nothing needs rebalancing, and that held
-positions are not held. It escaped the existing eleven checks because they predate the panel and because
-**the shape is unreachable without a saved target**, which no check set up. The panel is the only surface
-whose state survives an outage, which is what lets it build a plan out of one.
-
-Two defects, both fixed: `undefined` positions were read as "none held" rather than "not loaded" (an
-empty array is still genuinely "none held"; `undefined` or a query error now renders **no table**, since
-building one from an empty list is what produced those rows), and *"0 outside the band"* was reported
-when **nothing could be judged** — `RebalancePlan` now carries `judgedCount`. The second was wrong with a
-healthy backend too: a portfolio whose every target sat on an unpriced holding read as balanced.
-`errors.mjs` gained three checks that seed a target first. Frontend suite 171 → 181.
-
-`RiskMetricsCards` returning `null` during an outage is **deliberate, not the same bug**: that is absence
-rather than an empty-data claim, the Performance tab already states the failure (8 panels do), and its
-sibling `PerformanceMetricsCards` has the identical `if (!metrics) return null`.
-
-**`benchmark_service.calculate_benchmark_value_over_time()` was audited and is correct** — it is the
-input to the new beta metric, and re-reading 200 lines is expensive, so: close events exclude **on**
-the close date like everywhere else; pre-window events fold in on the first iteration without needing
-`portfolio_service`'s explicit seeding loop; share and cost events are appended *and skipped* together,
-so a zero value can never be emitted against a live cost basis; and `_apply_base_currency` converts all
-four money fields and recomputes the gain from the converted pair, so it is **not** the CAD/CHF
-half-conversion shape. One behaviour worth knowing: when shares are held but the index price or FX rate
-is missing, that day is **omitted from the series** rather than zeroed — `betaAndCorrelation` skips such
-a pair by design, and the date stays in `missing_dates` so it self-heals.
-
-Four things were checked and are **not** bugs, recorded so nobody re-chases them: `ActivityTab`'s
-`amount_base ?? 0` (unreachable — `BaseFx.convert` never returns `None`), `DividendKpiCards`'
-`prev_net_eur ?? 0` (over-permissive TS type; the backend always emits a float),
-`PortfolioValuePoint.external_flow_eur`'s `0.0` model default (the service supplies it on every row),
-and the first timeline row's flow (already fixed by the pre-window seeding loop). Four more from the
-coverage pass: the success-path `SyncRunRepository.record()` sitting outside the `try` is the same in
-**all five** CLIs, so it is a deliberate pattern rather than a bug in one; `expire_on_commit=False`
-makes reading a row's attributes after `commit()` safe; `security.asset_type` and
-`security.asset_category` are both real columns (Stock/ETF vs STK/OPT); and `_add_to_category`
-merging by symbol is what correctly combines a dual-listed ASML's two rows inside one category.
 
 ## Worth doing next
 
@@ -482,6 +384,11 @@ detail; this exists so the next session knows what just moved without reading it
 confirmed) and gets deleted once nothing in it is outstanding: these lines are permanent, so don't
 "tidy up" the overlap by deleting the wrong one.
 
+- **2026-07-31 (overnight, unpushed)** — autonomous loop: three frontend features (risk row, target
+  allocation & drift, currency exposure) and four bugs (49 sites reading the clock in local time; SOXQ
+  missing from the ETF look-through; the rebalance panel building a plan out of an outage; `e2e/a11y`'s
+  "backend optional" claim). Suites 462 → 523 backend, 91 → 214 frontend; all `e2e` scripts green bar
+  `ledger`. Durable rules promoted into CLAUDE.md. **Nothing deployed** — see *Unpushed*.
 - **2026-07-31** — enterprise-readiness pass: shared TTM growth,
   locale-independent chart dates, inception read from the data, keyboard/ARIA across the tab strip and
   every collapsible and sortable header, four more explicit error states, optional write auth +
@@ -500,7 +407,3 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
   rebuild; scheduler gated behind `SCHEDULER_ENABLED`; STATUS.md split out of CLAUDE.md.
 - **2026-07-28** — external cash ledger live on prod (deposits ingested, transfers excluded) and the
   money-in splice; Dividends tab + breakdown endpoint; Flex token redacted from stored and served errors.
-- **2026-07-27** — SBI mapping repair: reject a Yahoo ticker quoting a different currency than the
-  security, second FX provider fallback for currencies the ECB set lacks, `manage_mappings` CLI for
-  the last table still edited by hand. (Prices were purged here; the dividend rows were not — that
-  half surfaced on 07-30.)
