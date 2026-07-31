@@ -120,7 +120,10 @@ records** — the log has what changed; STATUS.md has what is now true and what 
 
 **Backend** — FastAPI (async), SQLAlchemy 2.0 + aiosqlite (WAL), Alembic, APScheduler,
 `ibflex` **0.15** (pinned), `yfinance` >= 1.1.0, Frankfurter API for FX.
-**Frontend** — React 18 + TypeScript + Vite, TanStack Query, Recharts, Tailwind + shadcn/ui.
+**Frontend** — React 19 + TypeScript + Vite, TanStack Query, Recharts, Tailwind + shadcn/ui.
+Vitest runs in `node` by default; component tests opt into jsdom per file with a
+`// @vitest-environment jsdom` docblock, because the pure `lib/` tests are the large majority and
+paying jsdom's startup for all of them is the wrong default.
 
 ---
 
@@ -170,8 +173,9 @@ use — so reconciliation order, the empty-statement wipe guard and the idempote
 identically. It records a `sync_runs` row with `sync_type='ibkr_manual_xml'`. Touches no network at all
 (no Flex, no Yahoo). `--dry-run` reports counts without writing. Tests: `tests/test_manual_xml_ingest.py`.
 
-There is deliberately **no upload endpoint**: `/api/` is proxied publicly and unauthenticated, and a route
-that rewrites tax lots is a far larger surface than a CLI run over ssh.
+There is deliberately **no upload endpoint**: `/api/` is proxied publicly, and a route that rewrites tax
+lots is a far larger surface than a CLI run over ssh — write auth (below) narrows that surface but does
+not change the judgement.
 
 ### Offline price import — the escape hatch from a wrong or missing feed
 
@@ -753,8 +757,9 @@ The 13:00/20:00 IBKR-only jobs exist because a transient `Code=1001` at 08:00 us
 freshness. They deliberately **skip** market data and yfinance dividends — see rule 1. Pinned by
 `tests/test_scheduler_jobs.py`. Status: `GET /api/scheduler/status`.
 
-**One pipeline at a time (`app/single_flight.py`).** `/api/` is public and unauthenticated, and nothing
-stopped concurrent or rapid-fire triggers: APScheduler's `max_instances=1` only fences jobs *it*
+**One pipeline at a time (`app/single_flight.py`).** `/api/` is public — and was unauthenticated when
+this was written; `app/auth.py` (below) can now gate the writes, but throttling and authorization are
+different jobs and this one is still needed. Nothing stopped concurrent or rapid-fire triggers: APScheduler's `max_instances=1` only fences jobs *it*
 dispatches, and `POST /api/scheduler/trigger` ran `full_sync_job()` as a bare coroutine outside the job
 store entirely — so a stranger could overlap the 08:00 run or spam Flex requests toward a `1025`
 lockout. Everything that can reach IBKR or Yahoo shares the `sync-pipeline` gate; two pipelines racing
@@ -819,6 +824,76 @@ getting prices, and warning on them would be permanent noise.
 reads `result["warnings"]` and a job's own dict never had that key — so warnings were being buried in
 `details` and never rendered as warnings.
 
+**The job store is persistent, and two details make it actually work.** APScheduler runs in-process, so
+a `docker compose down` overlapping a Berlin slot used to drop that slot outright — which is what
+happened to the 2026-07-30 08:00 `full_sync`. A `SQLAlchemyJobStore` (`settings.scheduler_jobstore_url`,
+a **separate** sqlite file: the store is synchronous SQLAlchemy while the app is aiosqlite/WAL) plus
+`coalesce=True` and `MISFIRE_GRACE_SECONDS` (1800) runs the missed job on startup instead.
+
+- **The registered targets are module-level functions** (`full_sync_job_entry` and friends), not the
+  bound methods they were. A persistent store serializes each job, and pickling `self.full_sync_job`
+  drags the live `AsyncIOScheduler` in with it.
+- **`_add_or_keep()` exists because `add_job(replace_existing=True)` recomputes `next_run_time` from
+  now** — it would overwrite the missed timestamp on the way in and make the persistence pointless. An
+  identically-triggered job is left alone; comparing `str(trigger)` is what lets a genuine schedule
+  change still replace one. Both directions are pinned in `tests/test_scheduler_jobs.py`.
+
+Thirty minutes is chosen from both ends: long enough for a `build --no-cache` rebuild, short enough
+that a real outage doesn't dump four stale slots onto a cold container.
+
+**`/api/` protections that are not `single_flight`.** Three middlewares in `app/main.py`, innermost
+last, so a rejection from any of them still carries a correlation id:
+
+- **`app/auth.py`** gates every `POST/PUT/PATCH/DELETE` under `/api/` on `settings.api_admin_token`
+  (`X-API-Key`, or `Authorization: Bearer`, compared with `secrets.compare_digest`). It is
+  **middleware, not a per-route dependency**, deliberately: every router takes only `Depends(get_db)`,
+  so a dependency would have to be added to ~14 routes and remembered on every route added later —
+  keying on the HTTP method means a new `POST` is covered the moment it exists, and
+  `test_every_mutating_route_is_covered_without_being_annotated` walks the live route table to prove
+  it. **Empty token = disabled**, so shipping it could not 401 the running site; startup warns loudly
+  while it is off, the same treatment `SCHEDULER_ENABLED` gets. Reads stay open because the frontend
+  has no login and gating them would black out the UI.
+- **`app/rate_limit.py`** is a fixed-window per-client counter (`RATE_LIMIT_PER_MINUTE`, 0 disables).
+  `single_flight` fences the sync *pipelines*; nothing bounded the expensive anonymous reads. Keyed on
+  the first `X-Forwarded-For` entry, since nginx makes `request.client.host` always loopback — forging
+  it only splits the forger's own bucket. `/health` is exempt: the deploy script polls it.
+- **`app/observability.py`** stamps `X-Request-ID` (reusing a plausible inbound one so it correlates
+  across a proxy) and installs the handler for unhandled exceptions — the one path where `str(e)`
+  still reached the client unredacted. The body is a fixed string plus the id; the log line goes
+  through `redact_secrets`.
+
+`tests/conftest.py` neutralises the limiter's process-lifetime window state and the job-store path for
+the whole suite, or one module's traffic would 429 another's. Tests: `tests/test_api_hardening.py`.
+
+---
+
+## Activity ledger
+
+`GET /api/portfolio/activity` (+ `.csv`) → `ActivityService`, rendered by `ActivityTab.tsx`. It unions
+**trades, corporate actions, cash flows and dividends** into one chronological list with date-range,
+kind and symbol filters.
+
+It exists because all four tables were ingested, reconciled and depended on — the tax report reads
+`trades`, the contributions splice reads `cash_flows`, `reconcile_taxlots` reads `corporate_actions` —
+with **no read surface at all**. The sharpest consequence: the transfer audit this file prescribes
+before trusting any money-added figure was `manage_cash_flows list` over ssh. Every cash row now
+carries `counts_as_money_in`, badged *Transfer · not money in*.
+
+Four rules, each of which would be a bug the other way:
+
+- **Paging is applied to the merged list, not per table.** The four sources are separately ordered, so
+  a per-table limit would silently drop every dividend in a busy trading month.
+- **Dividends are dated by `pay_date` falling back to `ex_date`** — the same `coalesce`
+  `has_ibkr_dividends` uses. yfinance stores under the ex-date and IBKR under the pay date, and
+  Mastercard's 29-day lag exceeds a monthly cycle, so the column asked decides the window.
+- **Amounts convert at each row's own date** through the same `BaseFx` every other read endpoint uses.
+- **A field a kind cannot fill is `None`, never 0** — in JSON and in the CSV. A corporate action has no
+  price, and a `0.00` would assert one.
+
+Zero-value dividend rows are excluded on the same test the two dividend readers use, so yfinance's
+pre-ownership history never surfaces. Tests: `tests/test_activity_service.py`, plus cases in
+`tests/test_api_smoke.py`.
+
 ---
 
 ## Deployment
@@ -878,7 +953,7 @@ raiser for that whole module, so an accidental network reach fails loudly; `/api
 is excluded because it lazy-fetches Yahoo on a cache miss, and POST routes are excluded because they
 start real syncs. **Add a case here when an endpoint's response shape changes.**
 
-Tests (357 backend + 45 frontend, all offline — no IBKR, Yahoo or FX-provider calls):
+Tests (425 backend + 85 frontend, all offline — no IBKR, Yahoo or FX-provider calls):
 ```bash
 cd backend && ./venv/Scripts/python.exe -m pytest tests/ -q
 cd frontend && npx tsc -b && npm run test && npm run build
@@ -1012,6 +1087,11 @@ Tests: `tests/test_currency_fallback.py`.
 | App total ≠ IBKR total | Compare against `gross_position_value`, **not** net liquidation (which adds cash); and intraday the app holds the last *close* while IBKR quotes live |
 | Site "down" in the browser | Often TIM home DNS, not the server — verify with `Test-NetConnection`, not `nslookup` |
 | Deploy says health FAILED | Usually the premature check; re-curl `/health` after ~15s |
+| A write returns 401 | `API_ADMIN_TOKEN` is set and the browser has no key. Lock button in the header; the same value goes in `backend/.env` |
+| A request returns 429 with `Retry-After` | Either the sync cooldown (`single_flight`) or the per-IP limit (`RATE_LIMIT_PER_MINUTE`). The response body says which |
+| "Which build is live?" | `curl /health` — it reports `version`, `commit`, `scheduler_enabled` and `write_auth_enabled`. Same line in the app footer |
+| A 500 with no detail | By design. Grep the container log for its `request_id`, which is in the body and the `X-Request-ID` header |
+| A missed sync ran late after a restart | Expected: the persistent job store honours a misfire for 30 min. Older than that is dropped, and the next slot recovers |
 
 ---
 

@@ -1,6 +1,6 @@
 # Working state
 
-**Last updated: 2026-07-30**
+**Last updated: 2026-07-31**
 
 `CLAUDE.md` is the durable guide — architecture, invariants, and the rules that were each a bug
 first. **This file is the perishable half**: where the work actually stands, what is known-broken,
@@ -16,6 +16,16 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 
 ## Needs a human
 
+- **Nothing from 2026-07-31 has been pushed.** Eight commits sit on local `main` (see *Shipped
+  locally* below). Pushing auto-deploys within 10 minutes, so land it **outside** a Berlin sync slot
+  (08/13/15/20/22:00) — item 2 below removes that constraint but is not installed yet.
+- **Turn on the write API auth.** `app/auth.py` gates every `POST/PUT/PATCH/DELETE` under `/api/`,
+  but it is **inert until `API_ADMIN_TOKEN` is set** — deliberately, so shipping it could not 401 the
+  running site. Until then `/api/` is what it has always been: anyone who can reach the host can
+  change the base currency, edit the watchlist and start syncs that spend the IBKR and Yahoo budgets.
+  Generate a token (`python -c "import secrets; print(secrets.token_urlsafe(32))"`), put it in
+  `/root/IBKR_investment_tracker/backend/.env`, and paste the same value into the app's lock button
+  (header, beside Sync). The footer shows *write API unauthenticated* while it is off.
 - **Rotate the IBKR Flex token.** It travelled as a `t=` URL parameter into `sync_runs.message` and
   was served by the public `/api/scheduler/history` until the 2026-07-28 scrub. `app/redact.py` now
   redacts on write *and* on read, so it cannot recur — but redaction cannot un-leak what was already
@@ -23,7 +33,9 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 - **Backfill the 2025 tax year.** A YTD Flex Query cannot reach it, so 2025 correctly reports
   `dividend_source='yfinance_estimate'`. Needs a one-off period change on the query (or a browser
   download ingested via `app/cli/ingest_flex_xml.py`), then set it back to YTD. Ingestion is
-  idempotent, so this is safe to repeat.
+  idempotent, so this is safe to repeat. The UI no longer hardcodes 2024 as the earliest tax year —
+  both it and the chart's ALL range read `min(taxlots.open_date)` — so the backfilled year appears
+  on its own once ingested.
 
 ## Watching
 
@@ -54,101 +66,92 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
   pretty.
 - **Accumulating ETFs correctly show no dividends** — DBPG, EMIM, IWDA, SXR8, VWCE, XAIX, XNAS.
   Verified, not assumed. **Don't "fix" their absence.**
+- **Activity's Market Value delta and the chart's "Value change" are the same number**, shown twice
+  on purpose: the card answers "how much did the portfolio move" at a glance, the chart header pairs
+  it with Period Gain so the difference between the two is visible. Neither is a return.
+- **`/api/portfolio/activity` shows dividends net and estimates unqualified-but-badged.** A
+  `yfinance_estimate` row is a gross guess with no withholding and reads *Dividend · est.*; the era
+  splice that governs the Dividends tab does **not** apply here, because a ledger's job is to show
+  what is on record rather than to pick a source per period.
 
-## Shipped 2026-07-30 — deployed and verified
+## Shipped locally 2026-07-31 — NOT deployed
 
-Two batches: five audit fixes (Yahoo gating, `openDateTime` off ibflex, SELL-beats-heuristic,
-tax-report honesty, dividend card net), then the SBI dividend bug and its root cause. Suite 313 → 357.
-Deployed `82b6b4d` by hand at 19:49 UTC, health 200.
+Eight commits on local `main`, none pushed. Suites: backend 357 → 425, frontend 45 → 85, `tsc -b`
+and `npm run build` clean. Verified against a live uvicorn as well as through the test client —
+`/health`, the activity ledger and its CSV, the 400s on a bad `kind` and an over-wide window, write
+auth in all four states, the 429 with `Retry-After`, and a persistent-job-store restart preserving
+run times. What is **not** verified is the ledger against real trades and cash flows: the checked-in
+`portfolio.db` predates both, so only dividends came back locally. Unit tests cover those shapes; a
+prod snapshot would confirm them.
 
-Confirmed on prod after that deploy, so none of it needs re-checking:
+What landed, and why each was worth doing:
 
-- **Both migrations applied** (`alembic head: p9e6a3b0c4d5`). The `dividend_payments` table rebuild came
-  through clean: source-aware key present, old key gone, `ticker_mappings` timestamps added,
-  `ix_taxlots_close_date` created, and 172 dividends / 981 lots / 20 mappings all intact.
-- **SBI reads `payouts 1 | net 2.68 | forecast 0 | next None`.** Income unchanged to the cent
-  (portfolio net 66.87 either side of the purge); the phantom 5-payout / 12.17 forecast is gone.
-  **That emptiness is correct** — one IBKR payment cannot establish a cadence. Don't "fix" it.
-- The dividends table's two new markers are live: `n=2` on a thin forecast inference, `†` on a
-  partial-year trailing yield. Ten positions carry `†`, which is expected on recent buys.
+- **`_ttm_growth_from_quarterly` was duplicated and divergent**, so one security could report
+  different earnings growth on `/api/fundamentals/portfolio` than on `/api/watchlist`. Now
+  `app/services/ttm_growth.py`, with the 5–7-quarter tier the fundamentals copy lacked.
+- **Every chart date boundary went through `toISOString()` on a local date**, so YTD/MTD started a
+  day early in any positive-UTC-offset zone. `lib/dateRanges.ts` is local-calendar throughout.
+- **Inception is read from the data**, not hardcoded twice (`2024-05-28` for ALL, `2024` for the tax
+  year picker) — see *Needs a human*.
+- **Four cards and every sortable column in Fundamentals/Watchlist were mouse-only**, and the tab
+  strip had no ARIA at all. Shared `CollapsibleCardHeader` / `SortableTh`, full WAI-ARIA tabs, and
+  21 jsdom tests pinning it.
+- **Four more surfaces let a backend failure read as empty data.** That class is now closed.
+- **The write API had no authorization anywhere** — off by default, see *Needs a human*. Alongside:
+  a per-IP rate limit, `X-Request-ID` on every response with a redacting 500 handler, and `/health`
+  reporting version/commit/scheduler/auth, rendered in a new footer.
+- **An Activity tab.** `trades`, `corporate_actions`, `cash_flows` and `dividend_payments` were all
+  ingested and depended on with no read surface at all. Cash rows carry `counts_as_money_in`, so the
+  transfer audit CLAUDE.md prescribes is a UI action rather than an ssh command.
+- **A deploy landing in a Berlin slot no longer loses that sync** — persistent APScheduler job store,
+  which is *Worth doing next* item 9 from yesterday.
 
-Still to watch: **tomorrow's 08:00 `full_sync` is the first Yahoo dividend fetch through the corrected
-`SBI.TO` mapping.** A real series means SBI forecasts from genuine data; nothing means SBI stays empty,
-also correct. Either way, read that sync's `warnings[]` for `DIVIDENDS PREDATE MAPPING` on any *other*
-security in the same shape.
+## Watch after the first deploy
 
-## The 2026-07-30 08:00 full_sync was lost
-
-Pushing at 06:00 UTC deployed straight into the 08:00 Berlin slot, and `/api/scheduler/history` has no
-`full_sync` row for that day. Today's 730-day price refresh and yfinance dividend sync did not run, and
-both IBKR slots failed `1001`. Tomorrow's 08:00 recovers it — nothing to do.
-
-This is the documented trap firing exactly as described. `ops/auto-deploy.sh` now carries the guard that
-would have prevented it, but **the VPS still runs the unguarded copy**: see *Worth doing next* item 8 for
-the one-line install, and item 9 for the persistent job store that would make the guard unnecessary. The
-19:49 deploy above was timed by hand instead, which is the workaround, not the fix.
+- **The scheduler job store is new.** `backend/scheduler_jobs.db` is created on first start and
+  bind-mounted; `deploy.sh` touches it so Docker cannot make it a directory. Confirm
+  `/api/scheduler/status` still lists five jobs after the deploy, and that the container logs show
+  `kept, next run:` on the *second* restart rather than recomputing.
+- **The CSP is new.** It is strict on `script-src` and the bundle is entirely self-hosted, so nothing
+  should break — but a blocked resource shows up only in the browser console, not in any log we keep.
+- **`index.html` is now `no-cache`.** Deploys should take effect on reload without a hard refresh.
 
 ## Worth doing next
 
-Rough priority. Item 8 is written but not installed; the rest are not started.
+Rough priority. Item 1 is written but not installed; the rest are not started.
 
-1. **Growth chips for portfolio value and contributions**, in the same visual language as the
-   Dividends tab (`DeltaChip`, `lib/delta.ts`). Explicitly deferred when the dividends work was
-   scoped — the pattern now exists and is tested, so this is mostly wiring. Note it is a
-   *consolidation*, not pure wiring: `ContributionsStrip.tsx:108` already hand-rolls a competing chip
-   (`+7%` where `DeltaChip` renders `▲ +7.4%`), so that duplicate has to go at the same time.
-2. **Commit the visual-regression harness.** The Playwright screenshot loop that verified the
+1. **Install the guarded auto-deploy script — WRITTEN, NOT INSTALLED.** `ops/auto-deploy.sh` is in
+   the repo (it previously existed only as `/root/auto-deploy.sh`, unversioned and unreviewed despite
+   governing every deploy) and adds the sync-slot guard: it refuses to deploy within 10 minutes
+   either side of a Berlin slot and defers to the next tick. The boundary logic is tested across all
+   five slots, the quiet hours and the midnight wrap. **The VPS still runs the old copy** —
+   installing it changes deploy behaviour, so it needs a deliberate step:
+
+       scp ops/auto-deploy.sh root@<host>:/tmp/ && ssh root@<host> 'install -m 755 /tmp/auto-deploy.sh /root/auto-deploy.sh'
+
+   Verify afterwards by watching `/root/auto-deploy.log` for a `SKIP: within 10min` line near a slot.
+   The persistent job store now recovers a missed slot within 30 minutes anyway, so this is belt to
+   that braces rather than the only defence.
+2. **Verify the Activity ledger against real trades and cash flows.** Only its dividend rows were
+   seen live: the checked-in `portfolio.db` predates the other three tables. In particular confirm
+   the 22 in-kind transfer rows render as *Transfer · not money in*, since that badge is the audit
+   CLAUDE.md prescribes before trusting any money-added figure.
+3. **Commit the visual-regression harness.** The Playwright screenshot loop that verified the
    Dividends tab lives *outside* the repo, so it is not reproducible from a clean checkout. It cannot
    simply become a `frontend` devDependency: `deploy.sh` runs `npm ci` on a `--no-cache` rebuild and
    Playwright's postinstall pulls ~150 MB of Chromium, which would tax every 10-minute deploy. Needs
-   a separate package or a skipped-download flag.
-3. **Four collapsible cards cannot be opened without a mouse.** `MonthlyReturnsHeatmap.tsx:134`,
-   `MonthlyDeploymentCard.tsx:65`, `DividendSummary.tsx:107` and `PerformanceAttribution.tsx:54` put
-   `onClick` on `<CardHeader>` with no `tabIndex` / `role` / `onKeyDown` / `aria-expanded`, so Monthly
-   Returns, Monthly Deployment, Dividend Income and Performance Attribution are keyboard-unreachable.
-   Sortable `<th>`s in `FundamentalsTab.tsx:93` and `WatchlistTab.tsx:185` have the same problem, and
-   Watchlist's metric-definition tooltips are `onMouseEnter`-only — the only place PEG/RSI/TTM-growth
-   are defined. `PositionsList.tsx:178` already solves this properly with a real `<button>` inside the
-   `<th>`; lift and reuse it. `ui/tabs.tsx:31` has no `role="tablist"` / `aria-selected` either.
-4. **Four more surfaces let a backend failure look like empty data** — `ContributionsStrip.tsx:49`
-   (returns `null`, so the strip just vanishes), `MonthlyDeploymentCard.tsx:78`,
-   `DividendSummary.tsx:123`, and all four `FundamentalsTab` queries ("Click Sync Now"). Six other
-   components already fixed this class with explicit comments; this finishes the job. `TaxTab` got its
-   version on 2026-07-30, so the pattern to copy is right there.
-5. **YTD and MTD start a day early in any positive-UTC-offset timezone.** `Dashboard.tsx:58-76`:
-   `new Date(now.getFullYear(), 0, 1).toISOString()` is local midnight serialised as UTC, so Berlin
-   gets `2025-12-31` and New York gets `2026-01-01` for the same click. Same portfolio, different
-   numbers by locale. (A 31 Dec base is arguably the *right* YTD convention — the bug is that it is
-   accidental and locale-dependent, so pick one deliberately.)
-6. **`_ttm_growth_from_quarterly` is duplicated and divergent.** `watchlist_service.py:157` has a
-   5–7-quarter fallback tier that `fundamentals_service.py:85` lacks, so one security can report
-   different earnings growth on `/api/fundamentals/portfolio` and `/api/watchlist`.
-7. **A horizontal-scroll affordance on the wide tables.** The dividends position table has ten
-   columns and scrolls inside its own container at narrow widths, with nothing hinting that it can.
-   Scope is wider than it looks: `WatchlistTab` is 18 columns.
-8. **Install the guarded auto-deploy script — WRITTEN, NOT INSTALLED.** `ops/auto-deploy.sh` is now
-   in the repo (it previously existed only as `/root/auto-deploy.sh`, unversioned and unreviewed
-   despite governing every deploy) and adds the sync-slot guard: it refuses to deploy within 10
-   minutes either side of a Berlin slot and defers to the next tick, which is what would have saved
-   today's `full_sync`. The boundary logic is tested across all five slots, the quiet hours and the
-   midnight wrap. **The VPS still runs the old copy** — installing it changes deploy behaviour, so it
-   needs a deliberate step:
-
-       scp ops/auto-deploy.sh root@<host>:/tmp/ && ssh root@<host>          'install -m 755 /tmp/auto-deploy.sh /root/auto-deploy.sh'
-
-   Verify afterwards by watching `/root/auto-deploy.log` for a `SKIP: within 10min` line near a slot.
-9. **Persist the scheduler's job store.** The real fix behind the above: APScheduler runs in-process
-   with an in-memory store, so any restart drops whatever slot it overlapped. A `SQLAlchemyJobStore`
-   with `coalesce=True` and a `misfire_grace_time` would run the missed job on startup instead of
-   losing it. CLAUDE.md's "don't push near a slot" is a human workaround for a missing feature, and it
-   has now failed once in practice.
-10. **Fold `PRE_OWNERSHIP_HISTORY_YEARS` pruning into a scheduled job.** `prune_empty_dividends.py`
+   a separate package or a skipped-download flag. (`@testing-library/react` + `jsdom` *did* go in on
+   2026-07-31 — a few MB, which is affordable; Playwright is the one that is not.)
+4. **The bundle is 877 kB / 260 kB gzipped in one chunk**, and Vite warns on every build. Recharts is
+   most of it and only three tabs use it, so a `React.lazy` split per tab is the obvious first cut.
+   Not urgent on a desktop-first single-user app, but it is the largest remaining rough edge.
+5. **`/api/dividends/summary` still has no `response_model`.** Nothing but `tests/test_api_smoke.py`
+   stops a field rename silently blanking the Performance tab's provenance footnote.
+6. **Fold `PRE_OWNERSHIP_HISTORY_YEARS` pruning into a scheduled job.** `prune_empty_dividends.py`
    is a manual CLI; the ingest window now prevents new junk, so this is cleanup-only and low value.
 
-Also noted, not yet items: `Dashboard.tsx:84` hardcodes the ALL-range start at `2024-05-28` while
-`TaxTab.tsx:10` hardcodes `FIRST_TAX_YEAR = 2024` — transferred lots keep their **original**
-`open_date`, so check both against `min(taxlots.open_date)` before the 2025 backfill lands.
-`CLAUDE.md` says React 18; `package.json` pins `react@^19.2.0`.
+Also noted, not yet items: `CLAUDE.md` says React 18; `package.json` pins `react@^19.2.0`. And
+`CLAUDE.md`'s test counts (357 backend + 45 frontend) are now 425 + 85.
 
 ## Local development traps
 
@@ -167,7 +170,18 @@ Each of these cost real time at least once.
 - **The base currency is whatever the user last picked** (`/api/settings`, EUR/CHF/USD). Every money
   figure moves with it, so never compare a number across sessions without checking it.
 - **Don't push within ~10 minutes of a Berlin sync slot** (08/13/15/20/22:00). Auto-deploy rebuilds
-  in ~90 s with APScheduler in-process, so an overlapping deploy silently loses that sync.
+  in ~90 s, so an overlapping deploy used to lose that sync outright. The persistent job store now
+  recovers it on startup if the gap is under 30 minutes — but a slow `--no-cache` rebuild can exceed
+  that, so the habit still earns its keep.
+- **`curl 127.0.0.1:<vite port>` fails while the browser works.** Vite binds `localhost`, which
+  resolves to `::1` first on this machine, so the IPv4 literal gets connection-refused and looks like
+  a dead dev server. Use `http://localhost:<port>`.
+- **A test that starts a scheduler drops a `scheduler_jobs.db` wherever it runs.** `tests/conftest.py`
+  blanks `scheduler_jobstore_url` for the whole suite, so an in-memory store is the default; a test
+  that wants persistence points it at `tmp_path` itself.
+- **`sqlite:////tmp/x.db` in Git Bash lands in `C:\tmp`, not the shell's `/tmp`.** The SQLAlchemy URL
+  is read by Python, which does not apply the MSYS path translation, so a stray file goes somewhere
+  `ls /tmp` will not show it.
 
 ## Recent sessions (last 5)
 
@@ -177,6 +191,12 @@ detail; this exists so the next session knows what just moved without reading it
 confirmed) and gets deleted once nothing in it is outstanding: these lines are permanent, so don't
 "tidy up" the overlap by deleting the wrong one.
 
+- **2026-07-31** — enterprise-readiness pass, eight commits, **not pushed**: shared TTM growth,
+  locale-independent chart dates, inception read from the data, keyboard/ARIA across the tab strip and
+  every collapsible and sortable header, four more explicit error states, optional write auth +
+  per-IP rate limit + request ids + `/health` build identity, the Activity ledger over the four
+  unread tables, a persistent scheduler job store, delta-chip and scroll-affordance consolidation,
+  real product chrome. Suites 357 → 425 backend, 45 → 85 frontend.
 - **2026-07-30** — two batches: five audit fixes (Yahoo gating, `openDateTime` off ibflex, SELL beats
   the cost-conserved heuristic, tax-report honesty, dividend card net), then the SBI dividend bug —
   poisoned estimates purged on prod, mapping changes now retire the rows they produced, source-aware
@@ -190,5 +210,3 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
   security, second FX provider fallback for currencies the ECB set lacks, `manage_mappings` CLI for
   the last table still edited by hand. (Prices were purged here; the dividend rows were not — that
   half surfaced on 07-30.)
-- **2026-07-26** — third Flex token lockout, self-inflicted: stop re-requesting after `Code=1001` and
-  poll the same reference instead; offline XML ingest added as the escape hatch.
