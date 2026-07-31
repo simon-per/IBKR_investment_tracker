@@ -274,6 +274,24 @@ Two stale docstrings in `scheduler_service.py` went with it: `_ibkr_only_sync_lo
 and both still called the Flex Query Year-to-Date. Not cosmetic in that file — every token lockout
 came from reasoning wrongly about when to ask IBKR.
 
+**Currency exposure on the Allocation tab.** `lib/currencyExposure.ts` +
+`components/CurrencyExposureCard.tsx`: the book grouped by the currency each listing trades in, led by
+the share quoted outside the base currency. `securities.currency` was ingested and surfaced nowhere.
+
+**The one thing not to "improve":** that column is the *quote* currency. For a direct holding it is also
+the economic exposure; for a fund it need not be, and here often is not — SXR8 is a EUR-listed S&P 500
+tracker, quoted in EUR and carrying USD risk. Folding it into the EUR bucket would be confidently
+backwards on exactly the positions that prompt the question. **Nothing is re-attributed, and the ETF
+look-through table cannot fix it**: that table maps *regions*, and regions do not determine currency
+("Europe" spans EUR/GBP/CHF/SEK; "Asia Pacific" spans JPY/AUD/HKD/TWD). Funds are counted where they
+trade, with their share of the book named on screen and the reason stated, so the rows cannot be mistaken
+for an FX position. The fund set comes from the ETF bucket of the allocation response already on the page
+(matched by symbol, since `Position` carries no asset type — a stock sharing a held fund's ticker would be
+flagged, which is accepted because the flag is a caveat, not a figure).
+
+It carries the rebalance panel's two rules from the start: unpriced positions excluded and counted, and
+`undefined` positions rendering an explicit failure rather than an exposure of zero. Frontend 181 → 214.
+
 **Target allocation & drift on the Allocation tab.** `lib/rebalance.ts` +
 `components/RebalanceCard.tsx`: an editable target weight per position, a tolerance band (default
 5 pp), the signed trade that closes each gap, and "adopt current weights". Targets live in
@@ -337,10 +355,11 @@ positions, not realistic ones (unlike `ledger.mjs`).
 editable inputs in the app, so an accessible name on each is its whole keyboard story. **17/17.**
 
 **The `e2e/` suite was run for the first time in a while:** `chunks` 33/33, `csp` 4/4, `a11y` 17/17,
-`errors` 14/14. Every chunk boundary survived this session's frontend work — `RiskMetricsCards` sits in
+`errors` 14/14, `sweep` 16/16. Every chunk boundary survived this session's frontend work — `RiskMetricsCards` sits in
 the eager `index` chunk (correct: default tab) and `RebalanceCard` in the lazy `AllocationTab` one — and
-the Allocation tab mounts with the new panel under the production CSP with zero violations. **`sweep`
-(16 checks, needs backend + data) is the one script still unrun.**
+the Allocation tab mounts with both new panels under the production CSP with zero violations. **Every
+script now passes except `ledger`, which needs a production snapshot** — real account data, not worth
+pulling for this.
 
 **`e2e/errors` earned its keep immediately: the rebalance panel drew a whole plan out of a backend
 outage.** With targets saved in localStorage and the backend down it reported *0 position(s) outside the
@@ -426,6 +445,18 @@ Each of these cost real time at least once.
   `VITE_API_URL` at `localhost:8000`, so the browser calls the backend cross-origin and only the
   ports in `CORS_ORIGINS` work. Any other port fails every request with a CORS error and looks like
   a backend outage.
+- **Every position in the checked-in `portfolio.db` has `market_price: null` and a market value of
+  0.00.** So the currency-exposure card reports *no priced positions* and the rebalance panel shows 29
+  unpriced rows — both correct, and both easy to mistake for a broken feature. Anything that depends on
+  a valued portfolio can only be browser-verified against a production snapshot.
+- **uvicorn can die mid-Playwright-run with `OSError: [WinError 64] The specified network name is no
+  longer available`** — a Windows asyncio-proactor reaction to an abruptly closed connection, not a code
+  fault. The e2e script then reports `ERR_CONNECTION_REFUSED` and a shrunken panel, which reads exactly
+  like a regression in whatever you just wrote. **Confirm `/health` still answers before believing an
+  e2e failure.**
+- **A test helper with a default parameter swallows an explicitly-passed `undefined`**, so
+  `renderCard(undefined)` renders the default fixture and any "backend down" assertion silently tests the
+  loaded state instead. `CurrencyExposureCard.test.tsx` keeps a separate `renderUnloaded()` for this.
 - **A jsdom test that renders `ScrollableTable` needs a `ResizeObserver` stub**, and a component test
   that renders anything using `useBaseCurrency`/`useCurrencySymbol` needs a `QueryClientProvider`
   *above* `CurrencyProvider` — the provider reads the base currency through TanStack Query, so
