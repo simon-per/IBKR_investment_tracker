@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -8,6 +8,7 @@ import type { AllocationCategory } from '@/lib/api'
 import { useFormatCurrency } from '@/lib/CurrencyContext'
 import { RefreshCw, X } from 'lucide-react'
 import { RebalanceCard } from './RebalanceCard'
+import { CurrencyExposureCard } from './CurrencyExposureCard'
 
 // Semantic colors for sectors
 const SECTOR_COLORS: Record<string, string> = {
@@ -429,6 +430,19 @@ export function AllocationTab() {
 
   const needsSync = status && status.securities_without_data > 0
 
+  // The ETF bucket names the positions whose quote currency is not their economic
+  // exposure. Derived from the allocation response already on this page rather
+  // than a new field, since `Position` carries no asset type.
+  const fundSymbols = useMemo(
+    () =>
+      new Set(
+        Object.entries(allocation?.asset_type_allocation ?? {})
+          .filter(([name]) => name.toUpperCase() === 'ETF')
+          .flatMap(([, category]) => category.positions.map((p) => p.symbol)),
+      ),
+    [allocation],
+  )
+
   // Merge and normalize allocation data
   const sectorAllocation = allocation?.sector_allocation
     ? mergeAllocation(allocation.sector_allocation, SECTOR_MAPPING)
@@ -542,6 +556,13 @@ export function AllocationTab() {
           isLoading={isLoading}
         />
       </div>
+
+      <CurrencyExposureCard
+        positions={positions}
+        fundSymbols={fundSymbols}
+        isLoading={positionsLoading}
+        isError={positionsError}
+      />
 
       <RebalanceCard
         positions={positions}
