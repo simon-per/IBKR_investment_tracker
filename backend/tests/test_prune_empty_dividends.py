@@ -1,6 +1,12 @@
 """
 The prune CLI must delete only what the readers already treat as non-income, and
 must never touch a row that is merely uncomputed — those have no amounts *yet*.
+
+"The readers" now includes the forecast, which infers cadence from the RAW history, so
+prune is additionally bounded by the ingest window — see
+`test_prune_preserves_forecast_basis.py`. That is why this fixture carries a tax lot:
+it holds 10 shares on two ex-dates, which is not a state that can exist without one, and
+the cutoff is derived from `min(taxlots.open_date)`.
 """
 from datetime import date
 from decimal import Decimal
@@ -14,6 +20,7 @@ from app.database import Base
 import app.models  # noqa: F401
 from app.models.dividend_payment import DividendPayment
 from app.models.security import Security
+from app.models.taxlot import TaxLot
 from app.cli import prune_empty_dividends as cli
 
 
@@ -27,6 +34,13 @@ async def _make_db(monkeypatch):
     session = AsyncSession(engine, expire_on_commit=False)
     session.add(Security(id=1, isin="US0000000001", symbol="AAA", description="A",
                          currency="EUR", conid=100, asset_category="STK", exchange="XETRA"))
+    # The lot the two income rows below imply. Bought 2025-10-01, so the ingest window
+    # reaches back to 2022-10-01 and both pre-ownership rows sit well outside it.
+    session.add(TaxLot(
+        security_id=1, open_date=date(2025, 10, 1), quantity=Decimal("10"),
+        cost_basis=Decimal("1000"), cost_basis_eur=Decimal("1000"),
+        price_per_unit=Decimal("100"), currency="EUR", is_open=True,
+    ))
 
     rows = [
         # empty: computed, nothing earned (pre-ownership ex-dates)

@@ -92,7 +92,7 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 
 ## Shipped locally 2026-07-31 — NOT deployed
 
-Nothing pushed (`git log --oneline origin/main..main`). Suites: backend 357 → 446, frontend 45 → 91,
+Nothing pushed (`git log --oneline origin/main..main`). Suites: backend 357 → 451, frontend 45 → 91,
 `tsc -b` and `npm run build` clean.
 
 **The bundle is now code-split**, which changed the shape of a deploy for users. It was one 891 kB /
@@ -161,6 +161,17 @@ What landed, and why each was worth doing:
   transfer audit CLAUDE.md prescribes is a UI action rather than an ssh command.
 - **A deploy landing in a Berlin slot no longer loses that sync** — persistent APScheduler job store,
   which is *Worth doing next* item 9 from yesterday.
+- **`prune_empty_dividends` was deleting the forecast's cadence basis.** Found while assessing
+  whether to automate it — the answer turned out to be "fix it first". The CLI deleted any computed
+  row carrying no income, on the stated grounds that it "deletes only rows the readers already
+  ignore". That stopped being true when the forecast was changed to infer cadence from the **raw**
+  history: a pre-ownership yfinance row is income-free *and* load-bearing, and dropping it is what
+  the "only 15 of 36 payers project" bug looked like. Running the documented cleanup would have
+  quietly reverted that fix for every recently-bought payer. Prune is now bounded by the ingest
+  window it should always have mirrored — a row goes only if it is older than the history
+  `sync_dividend_data` deliberately retains — and a security with no lots is left alone entirely,
+  matching ingest's own refusal to guess a cutoff. The existing test fixture had masked it by
+  holding 10 shares with no tax lot, which cannot happen in real data.
 - **The browser checks are in the repo** as `e2e/`, a package deliberately separate from `frontend/`:
   `deploy.sh` runs `npm ci` inside `frontend/` on every `--no-cache` rebuild and Playwright's
   postinstall pulls ~150 MB of Chromium, which would tax a deploy that runs every 10 minutes. Nothing
@@ -204,8 +215,12 @@ Rough priority. Item 1 is written but not installed; item 2 is not started.
    Verify afterwards by watching `/root/auto-deploy.log` for a `SKIP: within 10min` line near a slot.
    The persistent job store now recovers a missed slot within 30 minutes anyway, so this is belt to
    that braces rather than the only defence.
-2. **Fold `PRE_OWNERSHIP_HISTORY_YEARS` pruning into a scheduled job.** `prune_empty_dividends.py`
-   is a manual CLI; the ingest window now prevents new junk, so this is cleanup-only and low value.
+2. **Fold `PRE_OWNERSHIP_HISTORY_YEARS` pruning into a scheduled job — reassess before building.**
+   `prune_empty_dividends.py` is a manual CLI and the ingest window already prevents new junk, so
+   there is very little left for a scheduled run to find. Investigating this on 2026-07-31 turned up
+   a **defect in the CLI rather than a case for automating it** (below), which is a fair warning
+   about automating a deleter over financial rows: the value is small and the downside is silent.
+   If it is built, it must reuse the CLI's predicate rather than re-deriving one.
 
 ## Local development traps
 
@@ -262,7 +277,7 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
   per-IP rate limit + request ids + `/health` build identity, the Activity ledger over the four
   unread tables, a persistent scheduler job store, delta-chip and scroll-affordance consolidation,
   real product chrome, a completed `/api/dividends/summary` contract, and a code-split bundle. Suites
-  357 → 446 backend, 45 → 91 frontend; verified against a prod snapshot and in a real browser, which
+  357 → 451 backend, 45 → 91 frontend; verified against a prod snapshot and in a real browser, which
   found three defects the green suite did not.
 - **2026-07-30** — two batches: five audit fixes (Yahoo gating, `openDateTime` off ibflex, SELL beats
   the cost-conserved heuristic, tax-report honesty, dividend card net), then the SBI dividend bug —

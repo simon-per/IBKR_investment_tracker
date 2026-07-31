@@ -500,16 +500,29 @@ the card once reported 439 months, and the reason relaxing one read-side filter 
 `/api/dividends/breakdown` outright. Both readers still filter via `DividendService._is_income()`
 (gross **or** net positive) and `_net_eur()` falls back to gross for rows predating the
 withholding-fields migration, which carry a NULL net — **use those two helpers rather than touching
-the columns directly.** Existing junk is removable with `app/cli/prune_empty_dividends.py --dry-run`
-(deletes only rows the readers already ignore; never a row still awaiting computation). Run on prod
-2026-07-29 (`manual_dividend_prune`): 1350 zero rows removed, real payments remain.
+the columns directly.** Existing junk is removable with `app/cli/prune_empty_dividends.py --dry-run`.
+Run on prod 2026-07-29 (`manual_dividend_prune`): 1350 zero rows removed, real payments remain.
+
+**"Carries no income" is not sufficient grounds to delete a row, and treating it as such was a bug
+(fixed 2026-07-31).** The forecast infers cadence from the **raw** history — see *Size from
+`amount_per_share`, not from income received* below — so a pre-ownership yfinance row is
+simultaneously income-free and load-bearing: it is exactly what lets a recently-bought payer project
+at all. The old predicate deleted precisely those, silently reverting the "20 payers project" fix
+toward the old 15, and the CLI's own docstring claimed it "deletes only rows the readers already
+ignore" — true when written, false once the forecast became a reader of them. Prune is now
+additionally bounded by **the ingest window it should always have mirrored**: a row goes only when it
+is older than `PRE_OWNERSHIP_HISTORY_YEARS` before the security's first lot, i.e. exactly what
+`sync_dividend_data` would no longer create. A security with **no lots** is left entirely alone,
+matching ingest's own refusal to guess a cutoff. Rows awaiting computation
+(`shares_held IS NULL`) are still never touched. Tests:
+`tests/test_prune_preserves_forecast_basis.py`.
 
 ### A wrong mapping poisons dividends too, and only prices were ever purged
 
 `dividend_payments` rows tagged `yfinance_estimate` are keyed to whatever Yahoo ticker resolved when they
 were written. Correcting a mapping does not retire them, and until 2026-07-30 nothing could:
 `manage_mappings disable --purge-prices` cleared `market_prices` only, `DividendRepository` had no delete
-method at all, and `prune_empty_dividends` deletes only rows carrying **no** income — so a poisoned row
+method at all, and `prune_empty_dividends` never deletes a row carrying income — so a poisoned row
 with a plausible positive amount was unreachable by every tool.
 
 That is the second half of the SBI failure. `SBI@TSE` is **SERABI GOLD PLC** (CAD, Toronto). The mapping
@@ -989,7 +1002,7 @@ raiser for that whole module, so an accidental network reach fails loudly; `/api
 is excluded because it lazy-fetches Yahoo on a cache miss, and POST routes are excluded because they
 start real syncs. **Add a case here when an endpoint's response shape changes.**
 
-Tests (446 backend + 91 frontend, all offline — no IBKR, Yahoo or FX-provider calls):
+Tests (451 backend + 91 frontend, all offline — no IBKR, Yahoo or FX-provider calls):
 ```bash
 cd backend && ./venv/Scripts/python.exe -m pytest tests/ -q
 cd frontend && npx tsc -b && npm run test && npm run build

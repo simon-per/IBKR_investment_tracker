@@ -14,11 +14,14 @@ of those read-side filters was relaxed they broke `/api/dividends/breakdown`
 outright. `sync_dividend_data` no longer ingests them, so pruning is permanent
 rather than a treadmill.
 
-A row is pruned only when **both** gross and net are non-positive (NULL counts as
-absent) — i.e. the same `_is_income()` rule the readers use, so this can never
-delete something the UI would have shown. Rows still awaiting computation
-(`shares_held IS NULL`) are always kept: they have no amounts *yet*, and deleting
-them would silently drop real income.
+A row is pruned only when it carries no income **and** falls outside the window
+`sync_dividend_data` would still ingest (`PRE_OWNERSHIP_HISTORY_YEARS` before the
+security's first lot). The income test alone is not sufficient and treating it as
+such was a bug: the forecast infers cadence from the RAW history, so an
+income-free pre-ownership row with an `amount_per_share` is exactly what lets a
+recently-bought payer project at all. Deleting those silently reverts that fix.
+Rows still awaiting computation (`shares_held IS NULL`) are always kept: they have
+no amounts *yet*, and deleting them would silently drop real income.
 
 Fifth CLI in the same pattern as `ingest_flex_xml`, `import_prices`,
 `manage_mappings` and `manage_cash_flows`, for the same reason: `/api/` is proxied
@@ -32,7 +35,8 @@ import argparse
 import asyncio
 import logging
 import sys
-from datetime import datetime
+from datetime import date, datetime, timedelta
+from typing import Optional
 
 from sqlalchemy import delete, func, select
 
@@ -40,16 +44,41 @@ from app.database import AsyncSessionLocal
 from app.models.dividend_payment import DividendPayment
 from app.models.security import Security
 from app.repositories.sync_run_repository import SyncRunRepository
-from app.services.dividend_service import DividendService
+from app.services.dividend_service import PRE_OWNERSHIP_HISTORY_YEARS, DividendService
 
 logger = logging.getLogger(__name__)
 
 SYNC_TYPE = "manual_dividend_prune"
 
 
-def _is_empty(p: DividendPayment) -> bool:
-    """The readers' own rule, inverted — never delete what the UI would show."""
-    return p.shares_held is not None and not DividendService._is_income(p)
+def _is_empty(p: DividendPayment, keep_from: Optional[date] = None) -> bool:
+    """
+    Prunable when the row carries no income **and** the current ingest window would no
+    longer create it.
+
+    The income half alone is not enough, and assuming it was is a bug this predicate
+    shipped with. `_forecast_inputs()` is built from the RAW history precisely because a
+    payout from before we owned the share still evidences the schedule and still sizes
+    the next one — keying on realized income is what left TSMC, Samsung, SK Hynix, HPE
+    and SOXQ forecasting nothing. So a pre-ownership yfinance row is *income-free and
+    load-bearing*: the forecast is a reader, and it does not ignore these.
+
+    `sync_dividend_data()` already draws that line, keeping `PRE_OWNERSHIP_HISTORY_YEARS`
+    of history before the first lot. Reusing it here means prune deletes exactly what
+    ingest would no longer write — one policy rather than two free to drift — so the
+    decades of pre-portfolio bookkeeping it was built for still go, and the three years
+    deliberately retained for cadence stay.
+
+    `keep_from is None` means the security has no lots at all, which is the one case
+    ingest itself refuses to guess a cutoff for; nothing is pruned there either.
+    """
+    if p.shares_held is None:
+        return False                                  # awaiting computation, not empty
+    if DividendService._is_income(p):
+        return False                                  # real money
+    if keep_from is None:
+        return False                                  # no cutoff inferable, as at ingest
+    return p.ex_date is not None and p.ex_date < keep_from
 
 
 async def prune(dry_run: bool) -> int:
@@ -66,12 +95,26 @@ async def prune(dry_run: bool) -> int:
                 .order_by(DividendPayment.ex_date.asc())
             )).all())
 
-            empty = [(p, s) for p, s in rows if _is_empty(p)]
+            # Same cutoff the ingest applies, per security: first lot minus the
+            # deliberately-retained pre-ownership history.
+            first_lot = await DividendService(db)._first_lot_dates()
+            lookback = timedelta(days=365 * PRE_OWNERSHIP_HISTORY_YEARS)
+            keep_from = {sid: d - lookback for sid, d in first_lot.items()}
+
+            empty = [(p, s) for p, s in rows if _is_empty(p, keep_from.get(p.security_id))]
             pending = sum(1 for p, _ in rows if p.shares_held is None)
+            # Income-free rows that survive because the forecast infers cadence from them.
+            cadence_kept = sum(
+                1 for p, _ in rows
+                if p.shares_held is not None
+                and not DividendService._is_income(p)
+                and not _is_empty(p, keep_from.get(p.security_id))
+            )
 
             if not empty:
-                print(f"Nothing to prune: {total} row(s), none empty "
-                      f"({pending} still awaiting computation).")
+                print(f"Nothing to prune: {total} row(s), none prunable "
+                      f"({pending} awaiting computation, "
+                      f"{cadence_kept} income-free but inside the forecast window).")
                 return 0
 
             per_symbol: dict = {}
@@ -81,8 +124,9 @@ async def prune(dry_run: bool) -> int:
             first = min(d for dates in per_symbol.values() for d in dates)
             last = max(d for dates in per_symbol.values() for d in dates)
             print(
-                f"{len(empty)} of {total} row(s) carry no income "
-                f"({first} .. {last}); {pending} awaiting computation will be kept."
+                f"{len(empty)} of {total} row(s) predate the forecast window and carry no "
+                f"income ({first} .. {last}); {pending} awaiting computation and "
+                f"{cadence_kept} income-free cadence row(s) will be kept."
             )
             for symbol in sorted(per_symbol, key=lambda k: -len(per_symbol[k]))[:12]:
                 dates = sorted(per_symbol[symbol])
