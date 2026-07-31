@@ -1,0 +1,156 @@
+"""
+`sync_stale_ratings` has to be able to rate a security for the first time.
+
+Its work list came from `get_stale_ratings`, which selects rating rows older than
+the cutoff — rows that already **exist**. A security that had never been rated was
+therefore invisible to it forever, and against an empty table it returned "No stale
+ratings to update" and fetched nothing at all.
+
+That is the shape CLAUDE.md describes for benchmarks — "only refreshes benchmarks
+that *already have rows*, so ... a first-time selection [stays] empty forever" —
+and `FundamentalsService.sync_stale_fundamentals` already unions the two sets
+(`s.id not in existing_ids or s.id in stale_ids`). The sibling had it right.
+
+Offline: `fetch_rating_for_security` is faked, so yfinance is never reached.
+"""
+
+from datetime import timedelta
+
+import pytest
+import pytest_asyncio
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.pool import StaticPool
+
+from app.clock import utcnow
+from app.database import Base
+import app.models  # noqa: F401  register all mappers
+from app.models.analyst_rating import AnalystRating
+from app.models.security import Security
+from app.services import analyst_rating_service as ars_mod
+from app.services.analyst_rating_service import AnalystRatingService
+
+
+@pytest_asyncio.fixture
+async def db():
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session = AsyncSession(engine, expire_on_commit=False)
+    try:
+        yield session
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def _no_delays(monkeypatch):
+    async def _sleep(*_a, **_kw):
+        return None
+
+    monkeypatch.setattr(ars_mod.asyncio, "sleep", _sleep)
+    monkeypatch.setattr(ars_mod.random, "uniform", lambda *_a: 0)
+
+
+def add_security(session, security_id: int, symbol: str) -> Security:
+    security = Security(
+        id=security_id, isin=f"US000000000{security_id}", symbol=symbol,
+        description=symbol, currency="USD", conid=security_id,
+        asset_category="STK", exchange="NASDAQ",
+    )
+    session.add(security)
+    return security
+
+
+def add_rating(session, security_id: int, age_days: int) -> AnalystRating:
+    rating = AnalystRating(
+        security_id=security_id, strong_buy=5, buy=2, hold=1, sell=0, strong_sell=0,
+        last_updated=utcnow() - timedelta(days=age_days),
+    )
+    session.add(rating)
+    return rating
+
+
+@pytest.fixture
+def fetched(monkeypatch):
+    """Record which securities were fetched, without touching yfinance."""
+    seen = []
+
+    async def _fake_fetch(_self, security):
+        seen.append(security.symbol)
+        return {
+            'security_id': security.id,
+            'strong_buy': 1, 'buy': 0, 'hold': 0, 'sell': 0, 'strong_sell': 0,
+        }
+
+    monkeypatch.setattr(
+        AnalystRatingService, "fetch_rating_for_security", _fake_fetch
+    )
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_a_never_rated_security_is_picked_up(db, fetched):
+    # The bug: this security has no rating row, so the stale query cannot see it.
+    add_security(db, 1, "NEW")
+    await db.commit()
+
+    await AnalystRatingService(db).sync_stale_ratings()
+
+    assert fetched == ["NEW"]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_table_does_not_report_nothing_to_do(db, fetched):
+    """The bootstrap failure: on a fresh install this path could never populate."""
+    add_security(db, 1, "AAA")
+    add_security(db, 2, "BBB")
+    await db.commit()
+
+    result = await AnalystRatingService(db).sync_stale_ratings()
+
+    assert sorted(fetched) == ["AAA", "BBB"]
+    assert result['securities_processed'] == 2
+
+
+@pytest.mark.asyncio
+async def test_a_stale_rating_is_still_refreshed(db, fetched):
+    add_security(db, 1, "OLD")
+    add_rating(db, 1, age_days=5)
+    await db.commit()
+
+    await AnalystRatingService(db).sync_stale_ratings()
+
+    assert fetched == ["OLD"]
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_rating_is_left_alone(db, fetched):
+    # Bounded, not indiscriminate — this is still a *stale* sync.
+    add_security(db, 1, "FRESH")
+    add_rating(db, 1, age_days=1)
+    await db.commit()
+
+    result = await AnalystRatingService(db).sync_stale_ratings()
+
+    assert fetched == []
+    assert result['securities_processed'] == 0
+    assert 'No stale or missing' in result['message']
+
+
+@pytest.mark.asyncio
+async def test_it_fetches_only_what_needs_it(db, fetched):
+    add_security(db, 1, "FRESH")
+    add_rating(db, 1, age_days=1)
+    add_security(db, 2, "STALE")
+    add_rating(db, 2, age_days=9)
+    add_security(db, 3, "NEVER")
+    await db.commit()
+
+    await AnalystRatingService(db).sync_stale_ratings()
+
+    assert sorted(fetched) == ["NEVER", "STALE"]

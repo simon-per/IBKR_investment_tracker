@@ -237,21 +237,44 @@ class AnalystRatingService:
 
     async def sync_stale_ratings(self) -> Dict:
         """
-        Sync only ratings that are stale (haven't been updated in 3+ days).
-        This is used for the automated twice-weekly sync.
-        """
-        stale_ratings = await self.get_stale_ratings(days_old=3)
+        Sync ratings that are stale (3+ days old) **or missing entirely**.
 
-        if not stale_ratings:
+        The work list used to come only from `get_stale_ratings`, which selects
+        rows that already exist — so a security that had never been rated was
+        invisible to this path forever, and on an empty table it reported "No
+        stale ratings to update" and fetched nothing. A newly-bought security
+        therefore never acquired a rating unless someone happened to run the
+        full sync instead.
+
+        That is the shape CLAUDE.md describes for benchmarks: refreshing only
+        what already has rows means nothing ever bootstraps.
+        `FundamentalsService.sync_stale_fundamentals` already unions the two
+        sets; this now matches it.
+        """
+        result = await self.db.execute(select(Security))
+        all_securities = list(result.scalars().all())
+
+        rated_ids = {r.security_id for r in await self.rating_repo.get_all()}
+        stale_ids = {r.security_id for r in await self.get_stale_ratings(days_old=3)}
+
+        security_ids = [
+            s.id for s in all_securities
+            if s.id not in rated_ids or s.id in stale_ids
+        ]
+
+        if not security_ids:
             return {
                 'securities_processed': 0,
                 'ratings_updated': 0,
                 'errors': 0,
-                'message': 'No stale ratings to update'
+                'message': 'No stale or missing ratings to update'
             }
 
-        security_ids = [rating.security_id for rating in stale_ratings]
-        logger.info(f"Found {len(security_ids)} stale ratings to refresh")
+        never_rated = sum(1 for s in all_securities if s.id not in rated_ids)
+        logger.info(
+            f"Refreshing {len(security_ids)} ratings "
+            f"({never_rated} never rated, {len(security_ids) - never_rated} stale)"
+        )
 
         return await self.sync_ratings_for_securities(security_ids)
 
