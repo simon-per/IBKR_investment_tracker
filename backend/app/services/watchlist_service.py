@@ -9,6 +9,7 @@ import numpy as np
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.repositories.watchlist_repository import WatchlistRepository
+from app.services.ttm_growth import ttm_growth_from_quarterly
 
 logger = logging.getLogger(__name__)
 
@@ -154,29 +155,6 @@ class WatchlistService:
         total = valuation_score + technical_score + quality_score + analyst_score
         return round(total, 1)
 
-    def _ttm_growth_from_quarterly(self, quarterly_financials, row_candidates: list) -> Optional[float]:
-        """TTM YoY growth with tiered fallback:
-        >=8 quarters: sum(Q1-4) vs sum(Q5-8)
-        5-7 quarters: same-quarter YoY (Q[0] vs Q[4])
-        <5 quarters: returns None (caller falls back to .info)
-        """
-        if quarterly_financials is None or quarterly_financials.empty:
-            return None
-        for row_name in row_candidates:
-            if row_name in quarterly_financials.index:
-                row = quarterly_financials.loc[row_name].dropna()
-                if len(row) >= 8:
-                    current_ttm = float(row.iloc[:4].sum())
-                    prior_ttm = float(row.iloc[4:8].sum())
-                    if prior_ttm != 0:
-                        return round((current_ttm - prior_ttm) / abs(prior_ttm), 4)
-                elif len(row) >= 5:
-                    current_q = float(row.iloc[0])
-                    prior_q = float(row.iloc[4])
-                    if prior_q != 0:
-                        return round((current_q - prior_q) / abs(prior_q), 4)
-        return None
-
     async def _fetch_ticker_data(self, yahoo_ticker: str) -> tuple:
         """Fetch .info, .quarterly_financials, 1y history, and forward estimates in a single thread."""
         def _fetch():
@@ -234,8 +212,8 @@ class WatchlistService:
             return {"error": str(e)}
 
         # TTM growth from quarterly financials (always current, no annual lag)
-        ttm_rev = self._ttm_growth_from_quarterly(quarterly_financials, ['Total Revenue'])
-        ttm_eps = self._ttm_growth_from_quarterly(quarterly_financials, ['Diluted EPS', 'Basic EPS', 'Net Income'])
+        ttm_rev = ttm_growth_from_quarterly(quarterly_financials, ['Total Revenue'])
+        ttm_eps = ttm_growth_from_quarterly(quarterly_financials, ['Diluted EPS', 'Basic EPS', 'Net Income'])
 
         # Forward estimates from analyst consensus
         fwd_rev = None

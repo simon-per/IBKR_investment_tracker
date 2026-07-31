@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.repositories.fundamentals_repository import FundamentalsRepository
+from app.services.ttm_growth import ttm_growth_from_quarterly
 from app.models.security import Security
 from app.models.fundamental_metrics import FundamentalMetrics
 from app.models.earnings_event import EarningsEvent
@@ -82,20 +83,6 @@ class FundamentalsService:
 
         return await asyncio.to_thread(_fetch)
 
-    def _ttm_growth_from_quarterly(self, quarterly_financials, row_candidates: list) -> Optional[float]:
-        """TTM YoY growth: sum of 4 most recent quarters vs prior 4 quarters."""
-        if quarterly_financials is None or quarterly_financials.empty or quarterly_financials.shape[1] < 8:
-            return None
-        for row_name in row_candidates:
-            if row_name in quarterly_financials.index:
-                row = quarterly_financials.loc[row_name].dropna()
-                if len(row) >= 8:
-                    current_ttm = float(row.iloc[:4].sum())
-                    prior_ttm = float(row.iloc[4:8].sum())
-                    if prior_ttm != 0:
-                        return round((current_ttm - prior_ttm) / abs(prior_ttm), 4)
-        return None
-
     def _extract_metrics(self, security: Security, info: Dict, quarterly_financials=None,
                          growth_estimates=None, revenue_estimate=None) -> Optional[Dict]:
         """Extract fundamental metrics from a Yahoo Finance info dict."""
@@ -104,8 +91,8 @@ class FundamentalsService:
             return None
 
         # TTM growth from quarterly financials (always current, no lag)
-        ttm_rev = self._ttm_growth_from_quarterly(quarterly_financials, ['Total Revenue'])
-        ttm_eps = self._ttm_growth_from_quarterly(quarterly_financials, ['Diluted EPS', 'Basic EPS', 'Net Income'])
+        ttm_rev = ttm_growth_from_quarterly(quarterly_financials, ['Total Revenue'])
+        ttm_eps = ttm_growth_from_quarterly(quarterly_financials, ['Diluted EPS', 'Basic EPS', 'Net Income'])
 
         # Forward estimates from analyst consensus
         fwd_rev = None
