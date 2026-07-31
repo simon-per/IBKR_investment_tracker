@@ -10,15 +10,15 @@ import {
   ReferenceLine,
   ResponsiveContainer,
 } from 'recharts'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { ChevronRight } from 'lucide-react'
-import { cn } from '@/lib/utils'
+import { Card, CardContent } from '@/components/ui/card'
+import { CollapsibleCardHeader } from '@/components/ui/CollapsibleCardHeader'
 import { useCurrencySymbol } from '@/lib/CurrencyContext'
 import type { ContributionsResponse, ContributionMonthlyItem } from '@/lib/api'
 
 interface MonthlyDeploymentCardProps {
   data: ContributionsResponse | undefined
   isLoading: boolean
+  isError?: boolean
 }
 
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
@@ -37,7 +37,7 @@ const NET_COLOR = '#4a90f7'
 
 type ChartRow = ContributionMonthlyItem & { label: string }
 
-export function MonthlyDeploymentCard({ data, isLoading }: MonthlyDeploymentCardProps) {
+export function MonthlyDeploymentCard({ data, isLoading, isError }: MonthlyDeploymentCardProps) {
   const curSym = useCurrencySymbol()
   const [open, setOpen] = useState(false)
 
@@ -46,7 +46,9 @@ export function MonthlyDeploymentCard({ data, isLoading }: MonthlyDeploymentCard
 
   // Collapsed summary: last month + 12M average of capital deployed
   let summaryText: React.ReactNode = 'Capital deployed per month'
-  if (monthly.length > 0) {
+  if (isError) {
+    summaryText = 'Could not load contributions'
+  } else if (monthly.length > 0) {
     const last = monthly[monthly.length - 1]
     const window = monthly.slice(-12)
     const avg = window.reduce((sum, m) => sum + m.deployed_eur, 0) / window.length
@@ -62,19 +64,23 @@ export function MonthlyDeploymentCard({ data, isLoading }: MonthlyDeploymentCard
 
   return (
     <Card>
-      <CardHeader className="cursor-pointer select-none" onClick={() => setOpen(o => !o)}>
-        <div className="flex items-center gap-2">
-          <ChevronRight className={cn('h-5 w-5 text-muted-foreground transition-transform duration-200', open && 'rotate-90')} />
-          <div>
-            <CardTitle>Monthly Deployment</CardTitle>
-            <CardDescription>{summaryText}</CardDescription>
-          </div>
-        </div>
-      </CardHeader>
+      <CollapsibleCardHeader
+        open={open}
+        onToggle={() => setOpen(o => !o)}
+        title="Monthly Deployment"
+        description={summaryText}
+        contentId="monthly-deployment-content"
+      />
       {open && (
-        <CardContent>
+        <CardContent id="monthly-deployment-content">
           {isLoading ? (
             <div className="h-[300px] w-full animate-pulse rounded-md bg-muted" />
+          ) : isError ? (
+            // A failed fetch must not read as "you have deployed no capital" — same
+            // rule as PortfolioValueChart and PerformanceAttribution.
+            <p className="text-muted-foreground text-center py-8">
+              Couldn't load contributions — the backend didn't respond. It retries automatically.
+            </p>
           ) : chartData.length === 0 ? (
             <p className="text-muted-foreground text-center py-8">
               No contribution history yet.

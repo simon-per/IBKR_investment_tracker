@@ -7,6 +7,7 @@ import type { ContributionsResponse, ContributionWindow } from '@/lib/api'
 interface ContributionsStripProps {
   data: ContributionsResponse | undefined
   isLoading?: boolean
+  isError?: boolean
 }
 
 const WINDOW_LABELS: Record<ContributionWindow['label'], string> = {
@@ -38,12 +39,24 @@ function round(value: number): string {
  * and that gap is capital churn rather than saving, so it has to be visible without
  * hovering.
  */
-export function ContributionsStrip({ data, isLoading }: ContributionsStripProps) {
+export function ContributionsStrip({ data, isLoading, isError }: ContributionsStripProps) {
   const curSym = useCurrencySymbol()
   const formatCurrency = useFormatCurrency()
 
   if (isLoading) {
     return <div className="ml-auto h-8 w-80 animate-pulse rounded bg-muted" />
+  }
+
+  // Rendering nothing on a failed fetch made the whole strip silently vanish, which is
+  // indistinguishable from "this account has no contribution history" — the class of
+  // silent failure the rest of the app now refuses.
+  if (isError) {
+    return (
+      <div className="ml-auto flex items-center gap-1.5 pb-0.5 text-xs text-muted-foreground">
+        <PiggyBank className="h-3.5 w-3.5" />
+        <span>Avg Monthly unavailable — the backend didn't respond</span>
+      </div>
+    )
   }
 
   if (!data || data.windows.length === 0) return null

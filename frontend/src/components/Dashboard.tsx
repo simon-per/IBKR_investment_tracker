@@ -24,9 +24,8 @@ import { ThemeToggle } from './ThemeToggle'
 import { BenchmarkPicker, BENCHMARK_COLORS } from './BenchmarkPicker'
 import { useBaseCurrency, useCurrencySymbol } from '@/lib/CurrencyContext'
 import { concentrationPct, maxDrawdownPct, sharpeRatio } from '@/lib/portfolioKpis'
+import { rangeFor, TIME_RANGES, type TimeRange } from '@/lib/dateRanges'
 import { RefreshCw, Download, Clock } from 'lucide-react'
-
-type TimeRange = '1W' | 'MTD' | '1M' | '3M' | '6M' | 'YTD' | '1Y' | '2Y' | 'ALL'
 
 export function Dashboard() {
   const queryClient = useQueryClient()
@@ -47,47 +46,30 @@ export function Dashboard() {
     localStorage.setItem('selectedBenchmarks', JSON.stringify(keys))
   }
 
-  const dateRange = useMemo(() => {
-    const end = new Date().toISOString().split('T')[0]
-    let start: string
+  // Fetch average monthly contributions. Declared before `dateRange` because ALL
+  // starts at the portfolio's real inception, which this response carries
+  // (`first_contribution_date` = min(taxlots.open_date)). Transferred lots keep their
+  // original open_date, so a hardcoded inception goes stale the moment an older
+  // statement is ingested.
+  const {
+    data: contributions,
+    isLoading: contributionsLoading,
+    isError: contributionsError,
+  } = useQuery({
+    queryKey: ['portfolio', 'contributions'],
+    queryFn: () => api.getContributions(),
+    staleTime: 30 * 60 * 1000,
+  })
 
-    switch (selectedRange) {
-      case '1W':
-        start = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
-        break
-      case 'MTD': {
-        const now = new Date()
-        start = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0]
-        break
-      }
-      case '1M':
-        start = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
-        break
-      case '3M':
-        start = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
-        break
-      case '6M':
-        start = new Date(Date.now() - 180 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
-        break
-      case 'YTD': {
-        const now = new Date()
-        start = new Date(now.getFullYear(), 0, 1).toISOString().split('T')[0]
-        break
-      }
-      case '1Y':
-        start = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
-        break
-      case '2Y':
-        start = new Date(Date.now() - 2 * 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
-        break
-      case 'ALL':
-        // First tax lot opened on 2024-05-28
-        start = '2024-05-28'
-        break
-    }
+  const inception = contributions?.first_contribution_date ?? null
 
-    return { start, end }
-  }, [selectedRange])
+  // Every boundary is a LOCAL calendar date. Serialising local midnight through
+  // toISOString() made YTD/MTD start a day early in any positive-UTC-offset zone —
+  // same portfolio, different numbers by locale. See lib/dateRanges.ts.
+  const dateRange = useMemo(
+    () => rangeFor(selectedRange, new Date(), inception),
+    [selectedRange, inception]
+  )
 
   // Fetch portfolio summary
   const { data: summary, isLoading: summaryLoading, isError: summaryError } = useQuery({
@@ -107,13 +89,6 @@ export function Dashboard() {
   const { data: positions, isLoading: positionsLoading, isError: positionsError } = useQuery({
     queryKey: ['portfolio', 'positions'],
     queryFn: () => api.getPositions(),
-  })
-
-  // Fetch average monthly contributions
-  const { data: contributions, isLoading: contributionsLoading } = useQuery({
-    queryKey: ['portfolio', 'contributions'],
-    queryFn: () => api.getContributions(),
-    staleTime: 30 * 60 * 1000,
   })
 
   // Fetch benchmark comparisons (dynamic based on selection)
@@ -422,7 +397,7 @@ export function Dashboard() {
                   </div>
                   <div className="flex items-center gap-2">
                     <div className="flex gap-1">
-                      {(['1W', 'MTD', '1M', '3M', '6M', 'YTD', '1Y', '2Y', 'ALL'] as TimeRange[]).map((range) => (
+                      {TIME_RANGES.map((range) => (
                         <Button
                           key={range}
                           variant={selectedRange === range ? 'default' : 'outline'}
@@ -479,7 +454,7 @@ export function Dashboard() {
                     </div>
                   </div>
                 )}
-                  <ContributionsStrip data={contributions} isLoading={contributionsLoading} />
+                  <ContributionsStrip data={contributions} isLoading={contributionsLoading} isError={contributionsError} />
                 </div>
               </CardHeader>
               <CardContent>
@@ -493,10 +468,10 @@ export function Dashboard() {
             </Card>
 
             {/* Monthly Returns Heatmap */}
-            <MonthlyReturnsHeatmap data={valueOverTime} isLoading={chartLoading} />
+            <MonthlyReturnsHeatmap data={valueOverTime} isLoading={chartLoading} isError={chartError} />
 
             {/* Monthly Deployment (capital put to work per month) */}
-            <MonthlyDeploymentCard data={contributions} isLoading={contributionsLoading} />
+            <MonthlyDeploymentCard data={contributions} isLoading={contributionsLoading} isError={contributionsError} />
 
             {/* Dividend Income Heatmap */}
             <DividendSummary />

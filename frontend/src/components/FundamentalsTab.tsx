@@ -384,17 +384,21 @@ export function FundamentalsTab() {
   const [syncStartedAt, setSyncStartedAt] = useState<Date | null>(null)
   const isSyncing = syncStartedAt !== null
 
-  const { data: fundamentals, isLoading: metricsLoading } = useQuery({
+  // Each query captures isError: every empty state on this tab used to read as "no
+  // data yet — click Sync Now", which is a statement about the *portfolio*. When the
+  // backend is down it is a statement about the backend, and telling a user to trigger
+  // a sync that cannot succeed is worse than saying nothing.
+  const { data: fundamentals, isLoading: metricsLoading, isError: metricsError } = useQuery({
     queryKey: ['fundamentals', 'portfolio'],
     queryFn: () => api.getPortfolioFundamentals(),
   })
 
-  const { data: upcomingEarnings, isLoading: earningsLoading } = useQuery({
+  const { data: upcomingEarnings, isLoading: earningsLoading, isError: earningsError } = useQuery({
     queryKey: ['fundamentals', 'earnings', 'upcoming'],
     queryFn: () => api.getUpcomingEarnings(90),
   })
 
-  const { data: earningsHistory, isLoading: historyLoading } = useQuery({
+  const { data: earningsHistory, isLoading: historyLoading, isError: historyError } = useQuery({
     queryKey: ['fundamentals', 'earnings', 'history'],
     queryFn: () => api.getEarningsHistory(365),
   })
@@ -553,6 +557,10 @@ export function FundamentalsTab() {
         <CardContent>
           {metricsLoading ? (
             <div className="flex items-center justify-center h-40 text-muted-foreground">Loading...</div>
+          ) : metricsError ? (
+            <div className="flex items-center justify-center h-40 text-center text-muted-foreground">
+              Couldn't load fundamentals — the backend didn't respond. It retries automatically.
+            </div>
           ) : fundamentals && fundamentals.length > 0 ? (
             <MetricsTable data={fundamentals} />
           ) : (
@@ -574,6 +582,10 @@ export function FundamentalsTab() {
           <CardContent className="flex-1 flex flex-col">
             {earningsLoading ? (
               <div className="flex items-center justify-center h-20 text-muted-foreground">Loading...</div>
+            ) : earningsError ? (
+              <div className="flex items-center justify-center h-20 text-center text-muted-foreground">
+                Couldn't load upcoming earnings — the backend didn't respond.
+              </div>
             ) : (
               <EarningsCalendar data={upcomingEarnings || []} />
             )}
@@ -589,6 +601,10 @@ export function FundamentalsTab() {
           <CardContent className="flex-1 flex flex-col">
             {historyLoading ? (
               <div className="flex items-center justify-center h-20 text-muted-foreground">Loading...</div>
+            ) : historyError ? (
+              <div className="flex items-center justify-center h-20 text-center text-muted-foreground">
+                Couldn't load earnings history — the backend didn't respond.
+              </div>
             ) : (
               <EarningsSurpriseHistory data={earningsHistory || []} pageSize={historyPageSize} />
             )}

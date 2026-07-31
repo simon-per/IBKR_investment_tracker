@@ -7,7 +7,13 @@ import { api } from '@/lib/api'
 import { useCurrencySymbol } from '@/lib/CurrencyContext'
 import type { TaxReport } from '@/lib/api'
 
-const FIRST_TAX_YEAR = 2024
+/**
+ * Only the first-paint fallback for the year picker. The real floor is the year of the
+ * portfolio's first tax lot, read from /api/portfolio/contributions below — transferred
+ * lots keep their **original** open_date, so a hardcoded year silently hides a whole
+ * tax year once an older statement is ingested (which the planned 2025 backfill does).
+ */
+const FALLBACK_FIRST_TAX_YEAR = 2024
 
 function formatMoney(amount: number): string {
   return amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -25,8 +31,21 @@ export function TaxTab() {
   const currentYear = new Date().getFullYear()
   const [year, setYear] = useState(currentYear)
 
+  // Shares Dashboard's query key, so TanStack Query serves it from cache rather than
+  // refetching. Failure is non-fatal: the picker falls back to the hardcoded floor.
+  const { data: contributions } = useQuery({
+    queryKey: ['portfolio', 'contributions'],
+    queryFn: () => api.getContributions(),
+    staleTime: 30 * 60 * 1000,
+  })
+
+  const inceptionYear = contributions?.first_contribution_date
+    ? Number(contributions.first_contribution_date.slice(0, 4))
+    : FALLBACK_FIRST_TAX_YEAR
+  const firstTaxYear = Math.min(inceptionYear, FALLBACK_FIRST_TAX_YEAR)
+
   const years: number[] = []
-  for (let y = currentYear; y >= FIRST_TAX_YEAR; y--) years.push(y)
+  for (let y = currentYear; y >= firstTaxYear; y--) years.push(y)
 
   const { data, isLoading, isError, error } = useQuery<TaxReport>({
     queryKey: ['tax', 'report', year],

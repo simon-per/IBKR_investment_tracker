@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { ChevronRight } from 'lucide-react'
+import { Card, CardContent } from '@/components/ui/card'
+import { CollapsibleCardHeader } from '@/components/ui/CollapsibleCardHeader'
 import { cn } from '@/lib/utils'
 import { useCurrencySymbol } from '@/lib/CurrencyContext'
 import { computeModifiedDietzReturn, type MonthReturn } from '@/lib/monthlyReturns'
@@ -9,6 +9,7 @@ import type { PortfolioValuePoint } from '@/lib/api'
 interface MonthlyReturnsHeatmapProps {
   data: PortfolioValuePoint[] | undefined
   isLoading: boolean
+  isError?: boolean
 }
 
 interface YearRow {
@@ -41,7 +42,7 @@ function getReturnColor(pct: number): string {
   }
 }
 
-export function MonthlyReturnsHeatmap({ data, isLoading }: MonthlyReturnsHeatmapProps) {
+export function MonthlyReturnsHeatmap({ data, isLoading, isError }: MonthlyReturnsHeatmapProps) {
   const curSym = useCurrencySymbol()
   const [open, setOpen] = useState(false)
 
@@ -94,7 +95,9 @@ export function MonthlyReturnsHeatmap({ data, isLoading }: MonthlyReturnsHeatmap
 
   // Summary text for collapsed state
   let summaryText: React.ReactNode = 'Monthly return percentages by year'
-  if (yearRows.length > 0) {
+  if (isError) {
+    summaryText = 'Could not load the value history'
+  } else if (yearRows.length > 0) {
     const topRow = yearRows[0]
     // Find last filled month
     let lastMonthIdx = -1
@@ -131,22 +134,22 @@ export function MonthlyReturnsHeatmap({ data, isLoading }: MonthlyReturnsHeatmap
 
   return (
     <Card>
-      <CardHeader
-        className="cursor-pointer select-none"
-        onClick={() => setOpen(o => !o)}
-      >
-        <div className="flex items-center gap-2">
-          <ChevronRight className={cn('h-5 w-5 text-muted-foreground transition-transform duration-200', open && 'rotate-90')} />
-          <div>
-            <CardTitle>Monthly Returns</CardTitle>
-            <CardDescription>{summaryText}</CardDescription>
-          </div>
-        </div>
-      </CardHeader>
+      <CollapsibleCardHeader
+        open={open}
+        onToggle={() => setOpen(o => !o)}
+        title="Monthly Returns"
+        description={summaryText}
+        contentId="monthly-returns-content"
+      />
       {open && (
-        <CardContent>
+        <CardContent id="monthly-returns-content">
           {isLoading ? (
             <div className="h-[200px] w-full animate-pulse rounded-md bg-muted" />
+          ) : isError ? (
+            // "Not enough data" would be a lie when the request simply failed.
+            <p className="text-muted-foreground text-center py-8">
+              Couldn't load the value history — the backend didn't respond. It retries automatically.
+            </p>
           ) : yearRows.length === 0 ? (
             <p className="text-muted-foreground text-center py-8">
               Not enough data to compute monthly returns.

@@ -10,8 +10,8 @@ import {
   Cell,
   ResponsiveContainer,
 } from 'recharts'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { ChevronRight } from 'lucide-react'
+import { Card, CardContent } from '@/components/ui/card'
+import { CollapsibleCardHeader } from '@/components/ui/CollapsibleCardHeader'
 import { useFormatCurrency } from '@/lib/CurrencyContext'
 import type { PerformanceAttributionResponse } from '@/lib/api'
 
@@ -51,20 +51,15 @@ export function PerformanceAttribution({ data, isLoading, isError }: Performance
 
   return (
     <Card>
-      <CardHeader
-        className="cursor-pointer select-none"
-        onClick={() => setOpen(o => !o)}
-      >
-        <div className="flex items-center gap-2">
-          <ChevronRight className={`h-5 w-5 text-muted-foreground transition-transform duration-200 ${open ? 'rotate-90' : ''}`} />
-          <div>
-            <CardTitle>Performance Attribution</CardTitle>
-            <CardDescription>{summaryText}</CardDescription>
-          </div>
-        </div>
-      </CardHeader>
+      <CollapsibleCardHeader
+        open={open}
+        onToggle={() => setOpen(o => !o)}
+        title="Performance Attribution"
+        description={summaryText}
+        contentId="performance-attribution-content"
+      />
       {open && (
-        <CardContent>
+        <CardContent id="performance-attribution-content">
           {isLoading ? (
             <div className="h-[400px] w-full animate-pulse rounded-md bg-muted" />
           ) : isError ? (

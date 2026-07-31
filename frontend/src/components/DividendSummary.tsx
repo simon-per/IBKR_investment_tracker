@@ -1,7 +1,8 @@
 import { useState, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { ChevronRight, Loader2 } from 'lucide-react'
+import { Card, CardContent } from '@/components/ui/card'
+import { CollapsibleCardHeader } from '@/components/ui/CollapsibleCardHeader'
+import { Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { api } from '@/lib/api'
 import { useCurrencySymbol } from '@/lib/CurrencyContext'
@@ -34,7 +35,7 @@ export function DividendSummary() {
   const curSym = useCurrencySymbol()
   const [open, setOpen] = useState(false)
 
-  const { data, isLoading } = useQuery<DividendSummaryResponse>({
+  const { data, isLoading, isError } = useQuery<DividendSummaryResponse>({
     queryKey: ['dividends', 'summary'],
     queryFn: () => api.getDividendSummary(),
     staleTime: 30 * 60 * 1000, // 30 min
@@ -83,7 +84,9 @@ export function DividendSummary() {
   // card used to call them gross Yahoo estimates, so the Performance tab silently
   // disagreed with the Dividends tab and DA-1 withholding read as pre-tax income.
   let summaryText: React.ReactNode = 'Net dividend income by month'
-  if (data) {
+  if (isError) {
+    summaryText = 'Could not load dividend income'
+  } else if (data) {
     const parts: React.ReactNode[] = []
     if (data.ytd_eur > 0) {
       parts.push(
@@ -123,22 +126,23 @@ export function DividendSummary() {
 
   return (
     <Card>
-      <CardHeader
-        className="cursor-pointer select-none"
-        onClick={() => setOpen(o => !o)}
-      >
-        <div className="flex items-center gap-2">
-          <ChevronRight className={cn('h-5 w-5 text-muted-foreground transition-transform duration-200', open && 'rotate-90')} />
-          <div>
-            <CardTitle>Dividend Income</CardTitle>
-            <CardDescription>{summaryText}</CardDescription>
-          </div>
-        </div>
-      </CardHeader>
+      <CollapsibleCardHeader
+        open={open}
+        onToggle={() => setOpen(o => !o)}
+        title="Dividend Income"
+        description={summaryText}
+        contentId="dividend-summary-content"
+      />
       {open && (
-        <CardContent>
+        <CardContent id="dividend-summary-content">
           {isLoading ? (
             <div className="h-[200px] w-full animate-pulse rounded-md bg-muted" />
+          ) : isError ? (
+            // "No dividend data available yet" reads as a fact about the portfolio.
+            // A failed request is a fact about the backend; say which one it is.
+            <p className="text-muted-foreground text-center py-8">
+              Couldn't load dividend income — the backend didn't respond. It retries automatically.
+            </p>
           ) : yearRows.length === 0 ? (
             <div className="text-center py-8">
               <p className="text-muted-foreground">
