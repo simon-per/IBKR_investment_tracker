@@ -50,13 +50,20 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
   to recover nothing. **Prediction to check: 00:00 and 06:00 should now succeed** (00:30 already did
   on 07-26). If they don't, the offline XML path is the fallback — never a manual retry loop.
 
-  **The apparent explosion of 1001s was not a regression.** Those slots were added in `67e6a59` on
-  2026-07-25, the same day `sync_runs` persistence landed — so the oldest record we hold is the
-  first retry ever attempted, failing. Before that only 08:00 ran, and its rate is unchanged. New
-  failing slots plus first-ever visibility arrived together and read as IBKR degrading.
-  **Don't shorten the Flex Query period to "fix" it**: 08:00 succeeds at full YTD size, and Open
-  Positions is an as-of snapshot, so the ~979 lots that are 70% of the statement wouldn't shrink
-  anyway. The reasoning is written up in CLAUDE.md's *Sync schedule* section.
+  **Two separate things happened in the same week**, and conflating them sends you the wrong way:
+
+  - *Why the failures look constant* — the retry slots were added in `67e6a59` on 2026-07-25, the
+    same day `sync_runs` persistence landed, so the oldest record we hold is the first retry ever
+    attempted, failing. New failing slots plus first-ever visibility.
+  - *Why `1001` exists at all* — **the Flex Query went from one section to six between 07-24 and
+    07-28** (Trades, CorporateActions, CashTransactions, then Deposits & Withdrawals and Transfers).
+    Five of those scan the whole YTD period; Open Positions, the only original section, does not.
+    The 08:00 `1001`s that motivated the retries began the day after the first expansion.
+
+  **So shortening the period is the real lever if the overnight slots aren't enough** — 60 days is
+  ample and safe (trades are read from the DB, ingestion is additive, `coverage_from` only widens,
+  Open Positions is period-independent). Don't judge it by row counts: Open Positions is ~70% of the
+  rows and ~0% of the scan work. Full reasoning in CLAUDE.md's *Sync schedule* section.
 - **MCO and MRVL each forecast off only 2 samples.** Surfaced by the new `forecast_samples` field the
   day it shipped, and badged `n=2` in the dividends table. Not known-wrong — both are real payers with
   plausible schedules — but two samples is the exact shape that let SBI project a fake monthly cadence,
@@ -221,7 +228,14 @@ What landed, and why each was worth doing:
 
 Rough priority. The auto-deploy install moved to *Needs a human* — it is the last deploy step.
 
-1. **Fold `PRE_OWNERSHIP_HISTORY_YEARS` pruning into a scheduled job — reassess before building.**
+1. **Warn when IBKR has not synced successfully in ~14 days.** Nothing watches this today —
+   `find_stale_priced_securities` covers *prices*, not sync recency, so a silent multi-week IBKR
+   outage is invisible until someone reads `/api/scheduler/history`. Harmless under a YTD query,
+   which re-delivers everything, but it becomes **load-bearing the moment the period is shortened**:
+   with a 60-day window, an outage longer than the window loses those trades permanently. Build this
+   before changing the Flex Query period, not after. `SchedulerService.find_stale_priced_securities`
+   is the shape to copy, and `sync_runs` already has the data (`SyncRunRepository`).
+2. **Fold `PRE_OWNERSHIP_HISTORY_YEARS` pruning into a scheduled job — reassess before building.**
    `prune_empty_dividends.py` is a manual CLI and the ingest window already prevents new junk, so
    there is very little left for a scheduled run to find. Investigating this on 2026-07-31 turned up
    a **defect in the CLI rather than a case for automating it** (below), which is a fair warning

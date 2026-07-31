@@ -835,16 +835,35 @@ ever attempted. Before that only the 08:00 `full_sync` ran, and its success rate
 that week). Two changes arriving together — new failing slots and, for the first time, a record of
 every attempt — read as IBKR getting worse. It had not.
 
-Two hypotheses this kills, both plausible enough to be worth writing down:
+That accounts for the *volume* of failures. It does **not** account for why `1001` started at all,
+and the answer to that is the query itself:
 
-- **"Failures accumulate into a throttle."** The autocorrelation is *inverted*: the next attempt
-  succeeds 5/15 after a failure and 0/5 after a success. That is schedule position, not contagion —
-  08:00 follows a failed 20:00, and 13:00 follows a successful 08:00. A success 4½ hours after a
-  failure (2026-07-26 00:30) rules out a cooling-off period.
-- **"The YTD statement outgrew IBKR's generator."** Then 08:00 would be degrading too, and it is
-  not — it succeeds at full YTD size. Shortening the query period is also weaker than it looks
-  here: **Open Positions is an as-of snapshot, not period-bounded**, so the 979 lots that are ~70%
-  of the statement do not shrink at all. Don't trade away YTD's self-healing property for that.
+| | Flex Query contents |
+|---|---|
+| before 2026-07-24 | **Open Positions only** |
+| `6cccdab` 07-24 | + Trades, CorporateActions, CashTransactions |
+| `86960aa` 07-28 | + Deposits & Withdrawals, Transfers |
+
+**One section became six in four days, and five of them scan the whole YTD period.** Open Positions
+does not — it is an as-of snapshot, which is why it never provoked this. The 08:00 `1001`s that
+motivated adding the retries in the first place began the day *after* the first expansion. So the
+chain is: sections added → `1001` appears → retries added at hours that can never work → `1001`
+everywhere.
+
+**Do not reason about statement cost from row counts.** Open Positions is ~70% of the *rows* (979
+lots) and ~0% of the *scan work*. An earlier revision of this file used the row share to argue that
+shortening the period would barely help; that was measuring the wrong quantity.
+
+One hypothesis this does kill: **"failures accumulate into a throttle."** The autocorrelation is
+*inverted* — the next attempt succeeds 5/15 after a failure and 0/5 after a success. That is
+schedule position, not contagion: 08:00 follows a failed 20:00, and 13:00 follows a successful
+08:00. A success 4½ hours after a failure (2026-07-26 00:30) rules out a cooling-off period.
+
+**If the overnight slots are not enough, shorten the query period** (60 days is ample). It is safe
+because `reconcile_taxlots` reads trades from the *database*, ingestion is idempotent and additive,
+`coverage_from` only widens backwards, and Open Positions is period-independent. The cost is YTD's
+self-healing property — a restored backup would no longer refill the year — so pair it with the
+sync-staleness alarm rather than relying on noticing.
 
 **One pipeline at a time (`app/single_flight.py`).** `/api/` is public — and was unauthenticated when
 this was written; `app/auth.py` (below) can now gate the writes, but throttling and authorization are
