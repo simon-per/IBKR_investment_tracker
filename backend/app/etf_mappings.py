@@ -124,6 +124,31 @@ ETF_ALLOCATIONS = {
         },
     },
 
+    # Invesco PHLX Semiconductor ETF (SOXQ)
+    #
+    # Held since 2026-07-27 and previously unmapped, which is worse than it looks:
+    # without an entry here `is_known_etf` is False, so the position falls through
+    # to `security.asset_type` — whose column default is "Stock" — and to
+    # `security.sector`/`security.country`, which Yahoo leaves empty for a fund.
+    # The result was a holding absent from the sector *and* geographic treemaps
+    # and counted as a stock in the third, with no sync able to fix it.
+    #
+    # Approximate, as everywhere in this file. Sector is unambiguous for a pure
+    # semiconductor fund; the geography skews more US than SMH because the PHLX
+    # SOX index is limited to US-listed names. Adjust if you want it tighter.
+    "SOXQ": {
+        "asset_type": "ETF",
+        "geographic": {
+            "United States": 80.0,
+            "Taiwan": 10.0,
+            "Netherlands": 8.0,
+            "South Korea": 2.0,
+        },
+        "sector": {
+            "Technology": 100.0,
+        },
+    },
+
     # Xtrackers Artificial Intelligence & Big Data (XAIX)
     "XAIX": {
         "asset_type": "ETF",
