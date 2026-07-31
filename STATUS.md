@@ -24,12 +24,18 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 
       git push origin main
 
-  **Or run `bash ops/finish-deploy.sh`**, which does all three *Needs a human* deploy steps in the
-  only safe order and refuses to reach step 2 until `/health` reports the commit it just pushed.
-  It also checks the Berlin clock before pushing — via Python's `zoneinfo`, because **Git Bash on
-  Windows silently ignores `TZ=`** and returns UTC, which in summer would put the guard two hours
-  out in the unsafe direction and wave a push straight into the 08:00 slot. Every step asks first
-  and can be skipped.
+  **Or run the finish-deploy script**, which does all three *Needs a human* deploy steps in the only
+  safe order and refuses to reach step 2 until `/health` reports the commit it just pushed. Two
+  equivalent copies, because Simon works in PowerShell and the agent works in Git Bash:
+
+      pwsh -NoProfile -File .\ops\finish-deploy.ps1     # PowerShell
+      bash ops/finish-deploy.sh                          # Git Bash
+
+  Both check the Berlin clock before pushing, and **neither takes it from the shell**: Git Bash on
+  Windows silently ignores `TZ=` and returns UTC, which in summer puts the guard two hours out in
+  the unsafe direction and would wave a push straight into the 08:00 slot. The `.sh` uses Python's
+  `zoneinfo`, the `.ps1` uses .NET `TimeZoneInfo`. Every step asks first and can be skipped.
+  **Keep the two in step if you change either.**
 
   Pushing auto-deploys within 10 minutes, so land it **outside** a Berlin sync slot
   (08/13/15/20/22:00). The new persistent job store recovers a slot missed by under 30 min once it is

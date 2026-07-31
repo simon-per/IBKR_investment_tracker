@@ -1,0 +1,174 @@
+<#
+.SYNOPSIS
+    Ship the pending work and turn on write auth, in the one order that is safe.
+
+.DESCRIPTION
+    PowerShell twin of ops/finish-deploy.sh, for running from a normal PowerShell
+    prompt instead of Git Bash. Same three steps, same gate.
+
+    The steps have a hard dependency that is easy to get wrong and unpleasant to undo:
+
+        1. push            -> the VPS auto-deploys within 10 minutes
+        2. API_ADMIN_TOKEN -> ONLY once the new frontend is actually live
+        3. auto-deploy.sh  -> any time after
+
+    Setting the token first locks you out of your own site: the currently-deployed
+    frontend has no lock button, so its sync and base-currency controls start getting
+    401s with no way to supply the key. Recovering means another ssh trip to unset it.
+
+    So this refuses to reach step 2 until /health reports the commit it pushed.
+    Every step asks first and can be skipped; nothing here is silent.
+
+.EXAMPLE
+    pwsh -NoProfile -File .\ops\finish-deploy.ps1
+#>
+[CmdletBinding()]
+param(
+    [string]$DeployHost = 'portfolio.srv1211053.hstgr.cloud',
+    [string]$SshKey     = "$HOME\.ssh\id_ed25519_hostinger"
+)
+
+$ErrorActionPreference = 'Stop'
+
+$Remote  = "root@$DeployHost"
+$EnvPath = '/root/IBKR_investment_tracker/backend/.env'
+$Health  = "https://$DeployHost/health"
+
+function Say  { param($m) Write-Host "`n== $m" -ForegroundColor White }
+function Warn { param($m) Write-Host "!! $m" -ForegroundColor Yellow }
+function Die  { param($m) Write-Host "XX $m" -ForegroundColor Red; exit 1 }
+
+function Ask {
+    param($Question)
+    (Read-Host "$Question [y/N]") -match '^[Yy]$'
+}
+
+# Berlin time from .NET, which knows the DST rules. Never from the shell clock.
+function Get-BerlinTime {
+    foreach ($id in @('Europe/Berlin', 'W. Europe Standard Time')) {
+        try {
+            $tz = [System.TimeZoneInfo]::FindSystemTimeZoneById($id)
+            return [System.TimeZoneInfo]::ConvertTimeFromUtc([DateTime]::UtcNow, $tz)
+        } catch { continue }
+    }
+    return $null
+}
+
+# --- preflight -------------------------------------------------------------
+Say 'Preflight'
+
+Set-Location (Join-Path $PSScriptRoot '..')
+
+if (git status --porcelain) { Die 'Working tree is dirty. Commit or stash first.' }
+
+$branch = (git rev-parse --abbrev-ref HEAD).Trim()
+if ($branch -ne 'main') { Die "On '$branch', not main." }
+
+$ahead = [int](git rev-list --count origin/main..main).Trim()
+Write-Host "Branch main, tree clean, $ahead commit(s) to push."
+if ($ahead -eq 0) { Warn 'Nothing to push - skipping to the verification step.' }
+
+# A deploy rebuilding during a Berlin sync slot used to lose that sync outright. The
+# persistent job store now recovers a miss under 30 min, but it is not live until this
+# very deploy lands, so the first push still has to dodge the slots by hand.
+$berlin = Get-BerlinTime
+if ($null -eq $berlin) {
+    Warn 'Could not resolve the Europe/Berlin timezone, so the sync-slot check was skipped.'
+    Warn 'Slots are 08:00/13:00/15:00/20:00/22:00 Europe/Berlin.'
+    if (-not (Ask 'Continue anyway?')) { Die 'Stopped.' }
+} else {
+    $nowMin = $berlin.Hour * 60 + $berlin.Minute
+    $near = @(480, 780, 900, 1200, 1320) | Where-Object { [Math]::Abs($nowMin - $_) -le 12 }
+    if ($near) {
+        $slot = '{0:00}:{1:00}' -f [int]($near[0] / 60), ($near[0] % 60)
+        Warn ("It is {0} Berlin - within 12 minutes of the {1} sync slot." -f $berlin.ToString('HH:mm'), $slot)
+        Warn 'Auto-deploy rebuilds in ~90s and would land on top of it.'
+        if (-not (Ask 'Push anyway?')) { Die 'Stopped. Try again in ~15 minutes.' }
+    } else {
+        Write-Host ("Berlin time {0} - clear of every sync slot." -f $berlin.ToString('HH:mm'))
+    }
+}
+
+# --- step 1: push ----------------------------------------------------------
+$target = (git rev-parse HEAD).Trim()
+if ($ahead -gt 0) {
+    Say 'Step 1/3 - push to origin/main'
+    git --no-pager log --oneline origin/main..main | ForEach-Object { "    $_" }
+    if (-not (Ask 'Push these?')) { Die 'Stopped before pushing.' }
+    git push origin main
+    if ($LASTEXITCODE -ne 0) { Die 'Push failed.' }
+    Write-Host 'Pushed. The VPS cron picks it up within 10 minutes.'
+}
+
+# --- step 2 gate: the deploy must actually be live -------------------------
+Say "Waiting for $($target.Substring(0,7)) to go live at $Health"
+Write-Host 'Auto-deploy runs every 10 min and the rebuild takes ~90s, so allow ~12 min.'
+Write-Host '(Ctrl-C is safe - the deploy continues; re-run this script to pick up here.)'
+
+$deadline = (Get-Date).AddMinutes(15)
+$live = $null
+while ((Get-Date) -lt $deadline) {
+    try   { $live = (Invoke-RestMethod -Uri $Health -TimeoutSec 10).commit }
+    catch { $live = $null }
+
+    if ($live -and $live.Substring(0, [Math]::Min(7, $live.Length)) -eq $target.Substring(0, 7)) {
+        Write-Host "Live commit is $($live.Substring(0,7)) - the deploy landed." -ForegroundColor Green
+        break
+    }
+    Write-Host ("  still {0}, waiting..." -f $(if ($live) { $live } else { 'old build' }))
+    Start-Sleep -Seconds 20
+}
+
+if (-not $live -or $live.Substring(0, [Math]::Min(7, $live.Length)) -ne $target.Substring(0, 7)) {
+    Warn ("Live commit is '{0}', expected {1}." -f $(if ($live) { $live } else { 'unreachable/old' }), $target.Substring(0,7))
+    Warn 'Check /root/auto-deploy.log - a failed health check rolls back automatically.'
+    Die  'NOT setting the API token: the frontend carrying the lock button is not live yet.'
+}
+
+# --- step 2: write auth ----------------------------------------------------
+Say 'Step 2/3 - turn on write auth'
+
+ssh -i $SshKey $Remote "grep -qs '^API_ADMIN_TOKEN=.\+' '$EnvPath'"
+if ($LASTEXITCODE -eq 0) {
+    Write-Host 'API_ADMIN_TOKEN is already set on the VPS. Nothing to do.'
+} else {
+    Write-Host 'Right now anyone who can reach the host can change the base currency, edit the'
+    Write-Host 'watchlist, and start syncs that spend the IBKR and Yahoo budgets.'
+    if (Ask 'Generate a token and install it?') {
+        # URL-safe base64, equivalent to Python's secrets.token_urlsafe(32). Works on
+        # both Windows PowerShell 5.1 and PowerShell 7.
+        $bytes = New-Object byte[] 32
+        $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+        $rng.GetBytes($bytes)
+        $token = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+
+        # Written straight over ssh; never into a file in this repo, which is public.
+        $cmd = "printf '\nAPI_ADMIN_TOKEN=%s\n' '$token' >> '$EnvPath' && cd /root/IBKR_investment_tracker/backend && docker compose restart portfolio-backend"
+        ssh -i $SshKey $Remote $cmd | Out-Null
+        if ($LASTEXITCODE -ne 0) { Die 'Failed to install the token.' }
+
+        Write-Host ''
+        Write-Host '  Token (shown once - paste it into the lock button beside Sync):' -ForegroundColor Cyan
+        Write-Host "      $token" -ForegroundColor Cyan
+        Write-Host ''
+        Write-Host 'Verify: a write without the header should now return 401.'
+    } else {
+        Warn "Skipped. The footer will keep reporting 'write API unauthenticated'."
+    }
+}
+
+# --- step 3: the guarded deploy script -------------------------------------
+Say 'Step 3/3 - install the sync-slot-guarded auto-deploy script'
+if (Ask 'Install ops/auto-deploy.sh to /root/auto-deploy.sh?') {
+    scp -i $SshKey ops/auto-deploy.sh "${Remote}:/tmp/auto-deploy.sh"
+    if ($LASTEXITCODE -ne 0) { Die 'scp failed.' }
+    ssh -i $SshKey $Remote 'install -m 755 /tmp/auto-deploy.sh /root/auto-deploy.sh && rm -f /tmp/auto-deploy.sh'
+    if ($LASTEXITCODE -ne 0) { Die 'install failed.' }
+    Write-Host "Installed. Watch /root/auto-deploy.log for a 'SKIP: within 10min' line near a slot."
+} else {
+    Warn 'Skipped. Deploys can still land inside a sync slot; the job store recovers a'
+    Warn 'miss under 30 minutes, so this is belt-and-braces rather than the only defence.'
+}
+
+Say 'Done'
+try { Invoke-RestMethod -Uri $Health -TimeoutSec 10 | ConvertTo-Json -Compress } catch { Warn 'Health check unreachable.' }
