@@ -274,6 +274,31 @@ Two stale docstrings in `scheduler_service.py` went with it: `_ibkr_only_sync_lo
 and both still called the Flex Query Year-to-Date. Not cosmetic in that file — every token lockout
 came from reasoning wrongly about when to ask IBKR.
 
+**Target allocation & drift on the Allocation tab.** `lib/rebalance.ts` +
+`components/RebalanceCard.tsx`: an editable target weight per position, a tolerance band (default
+5 pp), the signed trade that closes each gap, and "adopt current weights". Targets live in
+**localStorage**, following `ForecastTab`'s precedent — chosen over a table plus endpoint because
+`/api/` is proxied publicly and every write is auth-gated, so a new mutating route is a larger surface
+than the feature earns. The trade-off (targets do not follow you to another browser) is stated in the
+panel. Frontend suite 133 → 171; all of it lands in the **lazy** AllocationTab chunk, so the eager
+bundle is unchanged.
+
+Four rules there are load-bearing and should not be "simplified":
+
+- **A missing target means unmanaged, not 0%.** Reading absence as zero advises liquidating every
+  holding whose target has not been set — which is all of them on first use.
+- **Targets are never renormalised to 100%.** The shortfall is reported instead. Scaling them invents
+  a target nobody chose, and the invented one moves whenever an *unrelated* target is edited.
+- **An unpriced position has no weight rather than a zero weight.** The portfolio values a holding
+  with no cached price at 0.00, so naive drift would advise buying its entire target when the position
+  may be the largest one held — the SBI shape. A priced holding genuinely worth zero is a different
+  case and stays advisable.
+- **Targets key on `security_id`, not symbol**, because identity is `isin + exchange` and ASML is two
+  securities.
+
+Also: an empty plan is deliberately **not** "balanced" — vacuous truth would render *nothing to do* on
+a portfolio nobody has configured yet.
+
 Four things were checked and are **not** bugs, recorded so nobody re-chases them: `ActivityTab`'s
 `amount_base ?? 0` (unreachable — `BaseFx.convert` never returns `None`), `DividendKpiCards`'
 `prev_net_eur ?? 0` (over-permissive TS type; the backend always emits a float),
@@ -325,6 +350,12 @@ Each of these cost real time at least once.
   `VITE_API_URL` at `localhost:8000`, so the browser calls the backend cross-origin and only the
   ports in `CORS_ORIGINS` work. Any other port fails every request with a CORS error and looks like
   a backend outage.
+- **A jsdom test that renders `ScrollableTable` needs a `ResizeObserver` stub**, and a component test
+  that renders anything using `useBaseCurrency`/`useCurrencySymbol` needs a `QueryClientProvider`
+  *above* `CurrencyProvider` — the provider reads the base currency through TanStack Query, so
+  wrapping in `CurrencyProvider` alone throws `No QueryClient set`. Neither is a component defect:
+  `ResizeObserver` has been in every browser since 2020, so guarding production code for jsdom's gap
+  would be wrong. `RebalanceCard.test.tsx` has both patterns to copy.
 - **A test that starts a scheduler drops a `scheduler_jobs.db` wherever it runs.** `tests/conftest.py`
   blanks `scheduler_jobstore_url` for the whole suite, so an in-memory store is the default; a test
   that wants persistence points it at `tmp_path` itself.
