@@ -26,6 +26,7 @@ from app.models.benchmark_price import BenchmarkPrice
 from app.models.dividend_payment import DividendPayment
 from app.models.market_price import MarketPrice
 from app.models.security import Security
+from app.models.sync_run import SyncRun
 from app.models.taxlot import TaxLot
 from app.models.ticker_mapping import TickerMapping
 from sqlalchemy import select, distinct, func, and_
@@ -37,6 +38,24 @@ logger = logging.getLogger(__name__)
 # before the US open, so a warning means something is actually wrong rather than "the
 # market was shut". Five days is roughly one trading week of silence.
 STALE_PRICE_DAYS = 5
+
+# How long IBKR may go without a *successful* sync before we say so.
+#
+# Nothing watched this until 2026-07-31, and under a Year-to-Date Flex Query it did not
+# much matter: every statement re-delivers the whole year, so a gap self-heals the moment
+# one sync lands. **It becomes load-bearing the moment the query period is bounded.**
+# With a 30-day window, an outage longer than the window loses those trades permanently
+# and silently — the rows simply never appear in any future statement.
+#
+# Seven days against three IBKR attempts a day (00:00/06:00/08:00) means ~21 consecutive
+# failures before it fires, so it cannot cry wolf over a `1025` lockout (~14h) or a bad
+# night. It leaves ~23 days of margin under a 30-day window to fix the cause or fall back
+# to the offline XML path.
+IBKR_SYNC_STALE_DAYS = 7
+
+# Sync types that actually reach IBKR. Market-data and manual-CLI runs must not count:
+# a green market-data job says nothing about whether Flex is answering.
+IBKR_SYNC_TYPES = ('ibkr', 'ibkr_sync', 'full_sync', 'ibkr_manual_xml')
 
 # How late a missed run may still be honoured.
 #
@@ -232,6 +251,14 @@ class SchedulerService:
                     diagnostics += await self.find_dividends_predating_their_mapping(db)
                 except Exception as e:
                     logger.warning(f"Could not check dividend provenance: {e}")
+                # IBKR freshness is checked from the *market-data* job on purpose: it
+                # runs at 15:00 and 22:00 and succeeds even while Flex is refusing, so
+                # the warning still reaches `warnings[]`. Hanging it off the IBKR job
+                # instead would silence it in exactly the outage it exists to report.
+                try:
+                    diagnostics += await self.find_stale_ibkr_sync(db)
+                except Exception as e:
+                    logger.warning(f"Could not check IBKR sync freshness: {e}")
                 if diagnostics:
                     result["warnings"] = diagnostics
 
@@ -302,6 +329,67 @@ class SchedulerService:
         if warnings:
             logger.warning(f"{len(warnings)} security(ies) with missing or stale prices")
         return warnings
+
+    async def find_stale_ibkr_sync(
+        self, db: AsyncSession, as_of: Optional[datetime] = None
+    ) -> list:
+        """
+        Warn when no IBKR sync has *succeeded* for `IBKR_SYNC_STALE_DAYS`.
+
+        The gap this closes: a run that fails is recorded and visible in
+        `/api/scheduler/history`, but nobody reads that daily, and a portfolio quietly
+        serving last week's positions looks exactly like one serving today's. The
+        failures are individually unremarkable — `1001` is routine — so the thing worth
+        alarming on is not any single failure but the *absence of a success*.
+
+        **This is a precondition for shortening the Flex Query period.** A Year-to-Date
+        query re-delivers everything, so a gap costs freshness and nothing else. A bounded
+        window does not: trades that fall out of it before a sync succeeds are gone from
+        every future statement, and the only recovery is a manual period change and an
+        offline XML ingest. So the alarm has to exist before the window shrinks, not after
+        someone notices a hole in the ledger.
+
+        Counts only sync types that actually reach IBKR (`IBKR_SYNC_TYPES`), including the
+        offline `ibkr_manual_xml` path — ingesting a browser download genuinely refreshes
+        the data, so it should reset the clock exactly like an API sync.
+
+        Returns `warnings[]`-ready strings, like the sibling detectors.
+        """
+        as_of = as_of or datetime.now()
+
+        latest = await db.execute(
+            select(func.max(SyncRun.finished_at)).where(
+                and_(
+                    SyncRun.sync_type.in_(IBKR_SYNC_TYPES),
+                    SyncRun.status == 'success',
+                )
+            )
+        )
+        newest = latest.scalar_one_or_none()
+
+        if newest is None:
+            # No successful IBKR sync on record at all. Silent on a fresh install, where
+            # an empty history is expected rather than alarming — the first sync fixes it.
+            has_any = await db.execute(
+                select(func.count(SyncRun.id)).where(SyncRun.sync_type.in_(IBKR_SYNC_TYPES))
+            )
+            if (has_any.scalar_one_or_none() or 0) == 0:
+                return []
+            return [
+                "IBKR: no sync has ever succeeded, only failures. The portfolio is not "
+                "being updated — check the Flex token and the query configuration"
+            ]
+
+        age = (as_of - newest).days
+        if age < IBKR_SYNC_STALE_DAYS:
+            return []
+
+        return [
+            f"IBKR: last successful sync was {newest:%Y-%m-%d} ({age} days ago). "
+            f"Positions and trades are stale. If the Flex Query period is bounded, "
+            f"trades older than that window will be lost permanently — ingest a browser "
+            f"download via app/cli/ingest_flex_xml.py rather than waiting"
+        ]
 
     async def find_dividends_predating_their_mapping(self, db: AsyncSession) -> list:
         """

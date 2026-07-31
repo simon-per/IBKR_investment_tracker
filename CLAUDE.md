@@ -928,6 +928,26 @@ security **with open lots** has no cached price at all, or none newer than `STAL
 enough to absorb a weekend plus a holiday). Closed-out holdings are excluded: they legitimately stop
 getting prices, and warning on them would be permanent noise.
 
+**A sync that never *succeeds* is silent in the same way.** Individually a failed IBKR run is
+unremarkable — `1001` is routine and the schedule shrugs it off — so the thing worth alarming on is
+the **absence of a success**, not any single failure. `find_stale_ibkr_sync()` warns after
+`IBKR_SYNC_STALE_DAYS` (7) with no successful run of an `IBKR_SYNC_TYPES` sync. Three details carry
+the weight:
+
+- It runs from the **market-data** job, not an IBKR one. Market data succeeds while Flex is refusing,
+  so the warning still reaches `warnings[]`; hanging it off the IBKR job would silence it in exactly
+  the outage it exists to report.
+- **`ibkr_manual_xml` counts as a success.** Ingesting a browser download genuinely refreshes the
+  data, so the documented escape hatch from a token lockout must reset the clock — otherwise the
+  alarm blares through the correct recovery and trains the reader to ignore it.
+- An **empty** history is quiet (fresh install), but *attempts with no success ever* warns. Those are
+  different states and collapsing them would either cry wolf on day one or hide a broken token.
+
+This is what makes **shortening the Flex Query period** safe. Under Year-to-Date a gap costs only
+freshness, because every statement re-delivers the year; under a bounded window trades that fall out
+of it before a sync succeeds are gone from every future statement. Seven days against three IBKR
+attempts a day is ~21 consecutive failures, so it cannot fire over a `1025` lockout (~14h).
+
 `_collect_warnings()` hoists each step's warnings to the top of the job's result, because `_record_run`
 reads `result["warnings"]` and a job's own dict never had that key — so warnings were being buried in
 `details` and never rendered as warnings.
@@ -1076,7 +1096,7 @@ raiser for that whole module, so an accidental network reach fails loudly; `/api
 is excluded because it lazy-fetches Yahoo on a cache miss, and POST routes are excluded because they
 start real syncs. **Add a case here when an endpoint's response shape changes.**
 
-Tests (453 backend + 91 frontend, all offline — no IBKR, Yahoo or FX-provider calls):
+Tests (462 backend + 91 frontend, all offline — no IBKR, Yahoo or FX-provider calls):
 ```bash
 cd backend && ./venv/Scripts/python.exe -m pytest tests/ -q
 cd frontend && npx tsc -b && npm run test && npm run build
