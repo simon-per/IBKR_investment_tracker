@@ -137,8 +137,10 @@ What landed, and why each was worth doing:
   bind-mounted; `deploy.sh` touches it so Docker cannot make it a directory. Confirm
   `/api/scheduler/status` still lists five jobs after the deploy, and that the container logs show
   `kept, next run:` on the *second* restart rather than recomputing.
-- **The CSP is new.** It is strict on `script-src` and the bundle is entirely self-hosted, so nothing
-  should break — but a blocked resource shows up only in the browser console, not in any log we keep.
+- ~~The CSP~~ — **verified, nothing to watch.** The production policy was applied to the real
+  `npm run build` output in a browser: eight tabs render, the recharts SVGs and lucide icons draw,
+  the `data:` favicon loads, and the console reports zero violations. Worth having done rather than
+  waiting, since a blocked resource shows up only in the browser console and in no log we keep.
 - **`index.html` is now `no-cache`.** Deploys should take effect on reload without a hard refresh.
 
 ## Worth doing next
