@@ -97,6 +97,35 @@ def test_health_stays_reachable_for_the_deploy_script(client, monkeypatch):
     assert client.get("/health").status_code == 200
 
 
+@pytest.mark.parametrize("path", [
+    "/api/settings/base-currency",          # the plain form
+    "//api/settings/base-currency",          # doubled leading slash
+    "/api//settings/base-currency",          # doubled interior slash
+    "/./api/settings/base-currency",         # dot segment
+    "/foo/../api/settings/base-currency",    # parent traversal back into /api/
+    "/%61pi/settings/base-currency",         # percent-encoded 'a'
+    "/API/settings/base-currency",           # case
+    "/api/settings/base-currency/",          # trailing slash
+    "/api/settings/base-currency%2f",        # encoded trailing slash
+])
+def test_no_path_spelling_reaches_a_mutating_route_unauthenticated(client, monkeypatch, path):
+    """
+    The guard keys on `request.url.path.startswith("/api/")`, so it is only sound if
+    every spelling that *routes* to a handler also matches that prefix. This is the
+    classic normalisation bypass, and it is worth pinning rather than reasoning about:
+    ASGI servers decode and normalise before both the middleware and the router, so the
+    two see the same string — but that is a property of the stack, not of this code.
+
+    Either outcome is acceptable; reaching the handler is not.
+    """
+    monkeypatch.setattr(settings, "api_admin_token", TOKEN, raising=False)
+
+    r = client.put(path, json={"base_currency": "USD"}, follow_redirects=False)
+
+    assert r.status_code != 200, f"{path} reached the handler unauthenticated"
+    assert r.status_code in (401, 404, 405, 307), f"{path} -> unexpected {r.status_code}"
+
+
 def test_every_mutating_route_is_covered_without_being_annotated(client, monkeypatch):
     """
     The reason this is middleware and not a per-route dependency: the guard keys on the
