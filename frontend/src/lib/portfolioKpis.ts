@@ -1,4 +1,4 @@
-import type { PortfolioValuePoint } from './api'
+import type { BenchmarkValuePoint } from './api'
 
 /** Trading days per year, for annualising a daily return series. */
 const TRADING_DAYS = 252
@@ -6,6 +6,30 @@ const TRADING_DAYS = 252
 const RISK_FREE_RATE = 0.03
 /** Below this many daily returns the statistics are noise, not signal. */
 const MIN_RETURNS = 5
+/**
+ * Below this many *paired* returns a beta is an anecdote. Higher than
+ * `MIN_RETURNS` because a regression slope needs far more evidence than a mean
+ * does, and because the pairing rule below throws days away.
+ */
+const MIN_PAIRED_RETURNS = 20
+/**
+ * A cost-basis line unchanged from one day to the next subtracts to exactly
+ * zero, so this only has to absorb the cent rounding the API applies.
+ */
+const FLOW_EPSILON = 0.01
+
+/**
+ * The minimum either series needs: a date, a value, and the cost-basis line the
+ * flow is inferred from. Both `PortfolioValuePoint` and an adapted
+ * `BenchmarkValuePoint` satisfy it, so the statistics below have one
+ * implementation rather than a portfolio copy and a benchmark copy.
+ */
+export interface ValueSeriesPoint {
+  date: string
+  market_value_eur: number
+  cost_basis_eur: number
+  external_flow_eur?: number
+}
 
 /**
  * The day's external flow: money entering (+) or leaving (−) the holdings.
@@ -16,29 +40,49 @@ const MIN_RETURNS = 5
  * the lot cost while market value falls by what it sold for, so the difference
  * shows up as a fabricated return on every sale date.
  */
-export function externalFlow(prev: PortfolioValuePoint, curr: PortfolioValuePoint): number {
+export function externalFlow(prev: ValueSeriesPoint, curr: ValueSeriesPoint): number {
   if (typeof curr.external_flow_eur === 'number') return curr.external_flow_eur
   return curr.cost_basis_eur - prev.cost_basis_eur
+}
+
+/**
+ * Modified-Dietz daily returns, each tagged with the date it lands on.
+ *
+ * The dates matter because `dailyReturns` **drops** days with nothing to divide
+ * by, so the nth return is not the nth calendar point — indexing back into the
+ * input series to name a drawdown's peak would silently pick the wrong day.
+ */
+export function dailyReturnSeries(series: ValueSeriesPoint[]): { date: string; ret: number }[] {
+  const out: { date: string; ret: number }[] = []
+  for (let i = 1; i < series.length; i++) {
+    const prevMV = series[i - 1].market_value_eur
+    const currMV = series[i].market_value_eur
+    const cf = externalFlow(series[i - 1], series[i])
+    const denominator = prevMV + cf * 0.5
+    if (denominator > 0) {
+      out.push({ date: series[i].date, ret: (currMV - prevMV - cf) / denominator })
+    }
+  }
+  return out
 }
 
 /**
  * Modified-Dietz daily returns: the flow is assumed to arrive mid-day, so it
  * earns half the period.
  */
-export function dailyReturns(series: PortfolioValuePoint[]): number[] {
-  const out: number[] = []
-  for (let i = 1; i < series.length; i++) {
-    const prevMV = series[i - 1].market_value_eur
-    const currMV = series[i].market_value_eur
-    const cf = externalFlow(series[i - 1], series[i])
-    const denominator = prevMV + cf * 0.5
-    if (denominator > 0) out.push((currMV - prevMV - cf) / denominator)
-  }
-  return out
+export function dailyReturns(series: ValueSeriesPoint[]): number[] {
+  return dailyReturnSeries(series).map((r) => r.ret)
+}
+
+/** Mean and (population) standard deviation of a sample. */
+function meanAndStdDev(values: number[]): { mean: number; stdDev: number } {
+  const mean = values.reduce((s, v) => s + v, 0) / values.length
+  const variance = values.reduce((s, v) => s + (v - mean) ** 2, 0) / values.length
+  return { mean, stdDev: Math.sqrt(variance) }
 }
 
 /** Worst peak-to-trough decline of the flow-adjusted value, as a negative percent. */
-export function maxDrawdownPct(series: PortfolioValuePoint[]): number {
+export function maxDrawdownPct(series: ValueSeriesPoint[]): number {
   let worst = 0
   let value = series.length ? series[0].market_value_eur : 0
   let peak = value
@@ -53,17 +97,116 @@ export function maxDrawdownPct(series: PortfolioValuePoint[]): number {
   return worst
 }
 
+/**
+ * The worst drawdown *and the story around it*: when it started, when it
+ * bottomed, whether it ever recovered, and how far below the running peak the
+ * portfolio sits today.
+ *
+ * `maxDrawdownPct` answers "how bad did it get" and stops there, which reads as
+ * a live warning long after the recovery. The current drawdown is the one that
+ * describes now; the max describes the worst the account has survived.
+ * `recoveredDate` is null while the trough is still underwater.
+ */
+export function drawdownDetail(series: ValueSeriesPoint[]): {
+  maxDrawdownPct: number
+  peakDate: string | null
+  troughDate: string | null
+  recoveredDate: string | null
+  currentDrawdownPct: number
+} {
+  let value = series.length ? series[0].market_value_eur : 0
+  let peak = value
+  let peakDate = series.length ? series[0].date : null
+
+  let worst = 0
+  let worstPeakDate: string | null = null
+  let troughDate: string | null = null
+  let recoveredDate: string | null = null
+  let current = 0
+
+  for (const { date, ret } of dailyReturnSeries(series)) {
+    value *= 1 + ret
+    if (value >= peak) {
+      // A new high closes out whatever drawdown was open. Only the *worst*
+      // one's recovery is reported, and only the first time it is reached.
+      if (troughDate !== null && recoveredDate === null && worst < 0) recoveredDate = date
+      peak = value
+      peakDate = date
+    }
+    if (peak > 0) {
+      current = ((value - peak) / peak) * 100
+      if (current < worst) {
+        worst = current
+        worstPeakDate = peakDate
+        troughDate = date
+        // A deeper trough supersedes the previous one, so its recovery is not
+        // this drawdown's recovery.
+        recoveredDate = null
+      }
+    }
+  }
+
+  return {
+    maxDrawdownPct: worst,
+    peakDate: worst < 0 ? worstPeakDate : null,
+    troughDate: worst < 0 ? troughDate : null,
+    recoveredDate,
+    currentDrawdownPct: current,
+  }
+}
+
+/**
+ * Annualised volatility of the flow-adjusted daily returns, as a percent.
+ *
+ * Already computed inside `sharpeRatio` as its denominator and thrown away —
+ * which left the portfolio reporting return per unit of risk without ever
+ * reporting the risk. Null below the minimum sample rather than 0: a handful of
+ * days is an unknown volatility, not a calm one.
+ */
+export function annualizedVolatilityPct(series: ValueSeriesPoint[]): number | null {
+  const returns = dailyReturns(series)
+  if (returns.length < MIN_RETURNS) return null
+  return meanAndStdDev(returns).stdDev * Math.sqrt(TRADING_DAYS) * 100
+}
+
 /** Annualised Sharpe of the daily return series; 0 when there isn't enough of it. */
-export function sharpeRatio(series: PortfolioValuePoint[]): number {
+export function sharpeRatio(series: ValueSeriesPoint[]): number {
   const returns = dailyReturns(series)
   if (returns.length < MIN_RETURNS) return 0
 
-  const avg = returns.reduce((s, r) => s + r, 0) / returns.length
-  const variance = returns.reduce((s, r) => s + (r - avg) ** 2, 0) / returns.length
-  const annualisedStdDev = Math.sqrt(variance) * Math.sqrt(TRADING_DAYS)
+  const { mean, stdDev } = meanAndStdDev(returns)
+  const annualisedStdDev = stdDev * Math.sqrt(TRADING_DAYS)
   if (annualisedStdDev <= 0.001) return 0
 
-  const ratio = (avg * TRADING_DAYS - RISK_FREE_RATE) / annualisedStdDev
+  const ratio = (mean * TRADING_DAYS - RISK_FREE_RATE) / annualisedStdDev
+  return Math.max(-10, Math.min(10, ratio))
+}
+
+/**
+ * Sortino: the same excess return as Sharpe, divided by *downside* deviation
+ * only.
+ *
+ * Sharpe penalises upside volatility identically to downside, so a portfolio
+ * that jumps in the direction the owner wants scores as risky. The threshold is
+ * the daily risk-free rate, and the deviation divides by the full sample (not
+ * the count of down days), which is what keeps it comparable to Sharpe.
+ *
+ * Null — never a large number — when nothing fell below the threshold. A
+ * portfolio with no downside has an undefined Sortino, and rendering an
+ * arbitrary cap as if it were measured is how a `0` for "unknown" becomes a
+ * fact elsewhere in this codebase.
+ */
+export function sortinoRatio(series: ValueSeriesPoint[]): number | null {
+  const returns = dailyReturns(series)
+  if (returns.length < MIN_RETURNS) return null
+
+  const dailyRiskFree = RISK_FREE_RATE / TRADING_DAYS
+  const downside = returns.reduce((s, r) => s + Math.min(0, r - dailyRiskFree) ** 2, 0)
+  const annualisedDownside = Math.sqrt(downside / returns.length) * Math.sqrt(TRADING_DAYS)
+  if (annualisedDownside <= 0.001) return null
+
+  const mean = returns.reduce((s, r) => s + r, 0) / returns.length
+  const ratio = (mean * TRADING_DAYS - RISK_FREE_RATE) / annualisedDownside
   return Math.max(-10, Math.min(10, ratio))
 }
 
@@ -79,4 +222,104 @@ export function concentrationPct(
     .slice(0, topN)
     .reduce((s, p) => s + p.market_value_eur, 0)
   return (top / total) * 100
+}
+
+/**
+ * Herfindahl concentration (Σ of squared weights) and the effective number of
+ * holdings it implies (1/HHI).
+ *
+ * A top-5 weight cannot tell 5 equal positions from 1 dominant one plus 4
+ * rounding errors — both read as the same percent. The effective count can:
+ * thirty-six holdings where one is half the book are worth about four.
+ * Positions with no resolvable value contribute nothing rather than dragging
+ * the count up, because a zero-valued row is an unpriced holding, not a small
+ * one.
+ */
+export function herfindahlConcentration(positions: { market_value_eur: number }[]): {
+  hhi: number
+  effectiveHoldings: number | null
+} {
+  const total = positions.reduce((s, p) => s + Math.max(0, p.market_value_eur), 0)
+  if (total <= 0) return { hhi: 0, effectiveHoldings: null }
+  const hhi = positions.reduce(
+    (s, p) => s + (Math.max(0, p.market_value_eur) / total) ** 2,
+    0,
+  )
+  return { hhi, effectiveHoldings: hhi > 0 ? 1 / hhi : null }
+}
+
+/**
+ * Reshape a benchmark point into the common series shape.
+ *
+ * The benchmark is a flow-matched hypothetical — the same lot cost basis
+ * deployed into the index — so it shares the portfolio's cost-basis line and
+ * its flows land on the same days. It carries no `external_flow_eur` of its
+ * own, which is precisely why `betaAndCorrelation` refuses to measure a day
+ * that has any flow at all rather than inferring one from the cost delta.
+ */
+export function benchmarkAsValueSeries(points: BenchmarkValuePoint[]): ValueSeriesPoint[] {
+  return points.map((p) => ({
+    date: p.date,
+    market_value_eur: p.benchmark_value_eur,
+    cost_basis_eur: p.cost_basis_eur,
+  }))
+}
+
+/**
+ * Beta and correlation of the portfolio against a benchmark, measured over the
+ * days when **neither** side saw a deposit, purchase or sale.
+ *
+ * Flow days are dropped rather than adjusted. Modified-Dietz can net a flow out
+ * of the portfolio because the backend reports what it was worth, but the
+ * benchmark only exposes a cost-basis line — and on a *sale* date cost basis
+ * falls by what the lot cost while value falls by what the index leg was worth,
+ * which is the same asymmetry that fabricates a loss in `externalFlow`'s
+ * fallback. Inventing that number would bias beta on exactly the days the
+ * portfolio traded. Excluding the pair costs a few days a month and biases
+ * nothing.
+ *
+ * `sampleDays` is always returned, including when the estimate is refused, so a
+ * thin window can say so instead of showing a confident-looking slope drawn
+ * from a fortnight.
+ */
+export function betaAndCorrelation(
+  portfolio: ValueSeriesPoint[],
+  benchmark: ValueSeriesPoint[],
+): { beta: number | null; correlation: number | null; sampleDays: number } {
+  const byDate = new Map(benchmark.map((p) => [p.date, p]))
+  const portReturns: number[] = []
+  const benchReturns: number[] = []
+
+  for (let i = 1; i < portfolio.length; i++) {
+    const prev = portfolio[i - 1]
+    const curr = portfolio[i]
+    const benchPrev = byDate.get(prev.date)
+    const benchCurr = byDate.get(curr.date)
+    if (!benchPrev || !benchCurr) continue
+
+    // Either side flowing disqualifies the day for both.
+    if (Math.abs(externalFlow(prev, curr)) > FLOW_EPSILON) continue
+    if (Math.abs(externalFlow(benchPrev, benchCurr)) > FLOW_EPSILON) continue
+
+    if (prev.market_value_eur <= 0 || benchPrev.market_value_eur <= 0) continue
+    portReturns.push(curr.market_value_eur / prev.market_value_eur - 1)
+    benchReturns.push(benchCurr.market_value_eur / benchPrev.market_value_eur - 1)
+  }
+
+  const sampleDays = portReturns.length
+  if (sampleDays < MIN_PAIRED_RETURNS) return { beta: null, correlation: null, sampleDays }
+
+  const p = meanAndStdDev(portReturns)
+  const b = meanAndStdDev(benchReturns)
+  const covariance =
+    portReturns.reduce((s, r, i) => s + (r - p.mean) * (benchReturns[i] - b.mean), 0) / sampleDays
+
+  // A benchmark that did not move has no slope to regress against, and a
+  // portfolio that did not move has no correlation — both are undefined
+  // rather than zero.
+  const beta = b.stdDev > 0 ? covariance / b.stdDev ** 2 : null
+  const correlation =
+    p.stdDev > 0 && b.stdDev > 0 ? covariance / (p.stdDev * b.stdDev) : null
+
+  return { beta, correlation, sampleDays }
 }
