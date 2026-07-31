@@ -258,6 +258,15 @@ this section can be deleted once the commits are pushed without losing them.
   above rows reading *Not currently held*. Caught by `e2e/errors`, which now covers it.
 - **`e2e/a11y.mjs` claimed "backend optional"** and never could have been: three of its checks need one,
   so run as documented it reported 11/14 with every failure a phantom.
+- **The two endpoints reporting PEG disagreed about how to compute it.** `FundamentalsService` and
+  `WatchlistService` both fall back when Yahoo gives no `pegRatio`, and their orders had drifted: the
+  watchlist tries forward-EPS growth (its own comment calls that tier *"preferred"*) before the analyst
+  5-year CAGR, while fundamentals went straight to the CAGR with **no forward-EPS tier at all**. So one
+  security could show a PEG on `/api/watchlist` and a different one, or none, on
+  `/api/fundamentals/portfolio` — the same defect, between the same two services, that `ttm_growth.py`
+  was extracted to end. Closing it cost **nothing**: fundamentals already fetches `growth_estimates`
+  and already computes `fwd_eps` for its own column; it just never fed it to the fallback.
+  `app/services/peg_ratio.py` now holds the arithmetic so it cannot drift again.
 - **A fallback price claimed Yahoo's provenance.** `fetch_and_cache_prices` wrote
   `source='yahoo_finance'` for every cached row, with a comment conceding the truth (`# or
   'alpha_vantage' if from fallback`) — and the fallback is **live**, since `ALPHA_VANTAGE_API_KEY` is
@@ -446,9 +455,9 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
 "tidy up" the overlap by deleting the wrong one.
 
 - **2026-07-31 (overnight, unpushed)** — autonomous loop: three frontend features (risk row, target
-  allocation & drift, currency exposure) and eight bugs (49 sites reading the clock in local time; SOXQ
+  allocation & drift, currency exposure) and nine bugs (49 sites reading the clock in local time; SOXQ
   missing from the ETF look-through; the rebalance panel building a plan out of an outage; `e2e/a11y`'s
-  "backend optional" claim). Suites 462 → 556 backend, 91 → 268 frontend; all `e2e` scripts green bar
+  "backend optional" claim). Suites 462 → 574 backend, 91 → 268 frontend; all `e2e` scripts green bar
   `ledger`. Durable rules promoted into CLAUDE.md. **Nothing deployed** — see *Unpushed*.
 - **2026-07-31** — enterprise-readiness pass: shared TTM growth,
   locale-independent chart dates, inception read from the data, keyboard/ARIA across the tab strip and
