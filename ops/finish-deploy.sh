@@ -108,21 +108,42 @@ say "Waiting for ${target:0:7} to go live at ${HEALTH}"
 echo "Auto-deploy runs every 10 min and the rebuild takes ~90s, so allow ~12 min."
 echo "(Ctrl-C is safe — the deploy continues; re-run this script to pick up here.)"
 
+# Two accepted signals, because an exact sha match is not always available:
+#
+#   * commit == target                     -> unambiguous, the normal case.
+#   * commit == "unknown" AND the response carries the new-build marker fields.
+#     `deploy.sh` pulls the repo *itself*, so the copy already executing is the one from
+#     before the pull — bash does not reload a running script. Any deploy that changes
+#     deploy.sh therefore runs the OLD logic once, and the GIT_COMMIT export it gained
+#     is missing for exactly that run. Matching only on sha hangs the full 15 minutes
+#     over a cosmetic stamp. Hit on 2026-07-31.
+#
+# `write_auth_enabled` is the marker: it does not exist in any build predating this
+# work, so a rolled-back old build cannot satisfy it.
 deadline=$(( $(date +%s) + 900 ))
-live=""
+landed=""
 while [ "$(date +%s)" -lt "$deadline" ]; do
-  live="$(curl -fsS --max-time 10 "$HEALTH" 2>/dev/null | sed -n 's/.*"commit"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' || true)"
+  body="$(curl -fsS --max-time 10 "$HEALTH" 2>/dev/null || true)"
+  live="$(printf '%s' "$body" | sed -n 's/.*"commit"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+
   if [ -n "$live" ] && [ "${live:0:7}" = "${target:0:7}" ]; then
     echo "Live commit is ${live:0:7} — the deploy landed."
-    break
+    landed=1; break
   fi
-  printf '  still %s, waiting...\r' "${live:-unreachable}"
+  if [ "$live" = "unknown" ] && printf '%s' "$body" | grep -q '"write_auth_enabled"'; then
+    echo "New build is live (commit reads 'unknown' — expected once, when the deploy"
+    echo "changed deploy.sh itself; the next deploy stamps the real sha)."
+    landed=1; break
+  fi
+
+  printf '  still %s, waiting...\n' "${live:-old build}"
   sleep 20
 done
 
-if [ -z "$live" ] || [ "${live:0:7}" != "${target:0:7}" ]; then
-  warn "Live commit is '${live:-unreachable}', expected ${target:0:7}."
-  warn "Check /root/auto-deploy.log — a failed health check rolls back automatically."
+if [ -z "$landed" ]; then
+  warn "The new build never appeared at $HEALTH."
+  warn "Check /root/auto-deploy.log — a failed health check rolls back automatically,"
+  warn "which looks identical to 'still waiting' from out here."
   die "NOT setting the API token: the frontend carrying the lock button is not live yet."
 fi
 
@@ -136,7 +157,22 @@ else
   if ask "Generate a token and install it?"; then
     token="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
     # Written over ssh, never echoed into a file in this repo (which is public).
-    "${SSH[@]}" "printf '\nAPI_ADMIN_TOKEN=%s\n' '$token' >> '$ENV_PATH' && cd /root/IBKR_investment_tracker/backend && docker compose restart portfolio-backend" >/dev/null
+    #
+    # `up -d`, NOT `restart`: compose reads `env_file` when it *creates* a container, so
+    # `restart` reuses the existing one with its original environment and the new token
+    # is silently ignored — the script then reports success over a site whose write API
+    # is still open. `up -d` notices the changed config and recreates. Cost us a
+    # confused ten minutes on 2026-07-31.
+    "${SSH[@]}" "printf '\nAPI_ADMIN_TOKEN=%s\n' '$token' >> '$ENV_PATH' && cd /root/IBKR_investment_tracker/backend && docker compose up -d" >/dev/null
+
+    # Confirm rather than assume: /health reports the flag the middleware actually read.
+    sleep 15
+    if curl -fsS --max-time 10 "$HEALTH" | grep -q '"write_auth_enabled"[[:space:]]*:[[:space:]]*true'; then
+      echo "Confirmed: /health reports write_auth_enabled=true."
+    else
+      warn "/health still reports write_auth_enabled=false — the container did not pick"
+      warn "up the token. Check: ssh <host> \"cd /root/IBKR_investment_tracker/backend && docker compose up -d\""
+    fi
     echo
     echo "  Token (shown once — paste it into the lock button beside Sync):"
     echo "      $token"

@@ -105,23 +105,43 @@ Say "Waiting for $($target.Substring(0,7)) to go live at $Health"
 Write-Host 'Auto-deploy runs every 10 min and the rebuild takes ~90s, so allow ~12 min.'
 Write-Host '(Ctrl-C is safe - the deploy continues; re-run this script to pick up here.)'
 
+# Two accepted signals, because an exact sha match is not always available:
+#
+#   * commit == target                     -> unambiguous, the normal case.
+#   * commit == "unknown" AND the response carries the new-build marker fields.
+#     deploy.sh pulls the repo *itself*, so the copy already executing is the one from
+#     before the pull - bash does not reload a running script. Any deploy that changes
+#     deploy.sh therefore runs the OLD logic once, and the GIT_COMMIT export it gained
+#     is missing for exactly that run. Matching only on sha hangs the full 15 minutes
+#     over a cosmetic stamp. Hit on 2026-07-31.
+#
+# write_auth_enabled is the marker: it exists in no build predating this work, so a
+# rolled-back old build cannot satisfy it.
 $deadline = (Get-Date).AddMinutes(15)
-$live = $null
+$landed = $false
 while ((Get-Date) -lt $deadline) {
-    try   { $live = (Invoke-RestMethod -Uri $Health -TimeoutSec 10).commit }
-    catch { $live = $null }
+    try   { $resp = Invoke-RestMethod -Uri $Health -TimeoutSec 10 }
+    catch { $resp = $null }
+    $live = if ($resp) { $resp.commit } else { $null }
 
     if ($live -and $live.Substring(0, [Math]::Min(7, $live.Length)) -eq $target.Substring(0, 7)) {
         Write-Host "Live commit is $($live.Substring(0,7)) - the deploy landed." -ForegroundColor Green
-        break
+        $landed = $true; break
     }
+    if ($live -eq 'unknown' -and $null -ne $resp.PSObject.Properties['write_auth_enabled']) {
+        Write-Host "New build is live (commit reads 'unknown' - expected once, when the deploy" -ForegroundColor Green
+        Write-Host "changed deploy.sh itself; the next deploy stamps the real sha)." -ForegroundColor Green
+        $landed = $true; break
+    }
+
     Write-Host ("  still {0}, waiting..." -f $(if ($live) { $live } else { 'old build' }))
     Start-Sleep -Seconds 20
 }
 
-if (-not $live -or $live.Substring(0, [Math]::Min(7, $live.Length)) -ne $target.Substring(0, 7)) {
-    Warn ("Live commit is '{0}', expected {1}." -f $(if ($live) { $live } else { 'unreachable/old' }), $target.Substring(0,7))
-    Warn 'Check /root/auto-deploy.log - a failed health check rolls back automatically.'
+if (-not $landed) {
+    Warn "The new build never appeared at $Health."
+    Warn 'Check /root/auto-deploy.log - a failed health check rolls back automatically,'
+    Warn 'which looks identical to "still waiting" from out here.'
     Die  'NOT setting the API token: the frontend carrying the lock button is not live yet.'
 }
 
@@ -143,7 +163,13 @@ if ($LASTEXITCODE -eq 0) {
         $token = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
 
         # Written straight over ssh; never into a file in this repo, which is public.
-        $cmd = "printf '\nAPI_ADMIN_TOKEN=%s\n' '$token' >> '$EnvPath' && cd /root/IBKR_investment_tracker/backend && docker compose restart portfolio-backend"
+        #
+        # `up -d`, NOT `restart`: compose reads env_file when it *creates* a container, so
+        # `restart` reuses the existing one with its original environment and the new token
+        # is silently ignored - the script then reports success over a site whose write API
+        # is still wide open. `up -d` notices the changed config and recreates.
+        # Cost us a confused ten minutes on 2026-07-31.
+        $cmd = "printf '\nAPI_ADMIN_TOKEN=%s\n' '$token' >> '$EnvPath' && cd /root/IBKR_investment_tracker/backend && docker compose up -d"
         ssh -i $SshKey $Remote $cmd | Out-Null
         if ($LASTEXITCODE -ne 0) { Die 'Failed to install the token.' }
 
@@ -151,7 +177,17 @@ if ($LASTEXITCODE -eq 0) {
         Write-Host '  Token (shown once - paste it into the lock button beside Sync):' -ForegroundColor Cyan
         Write-Host "      $token" -ForegroundColor Cyan
         Write-Host ''
-        Write-Host 'Verify: a write without the header should now return 401.'
+
+        # Confirm rather than assume: /health reports the flag the middleware actually read.
+        Start-Sleep -Seconds 15
+        try { $ok = (Invoke-RestMethod -Uri $Health -TimeoutSec 10).write_auth_enabled } catch { $ok = $false }
+        if ($ok) {
+            Write-Host 'Confirmed: /health reports write_auth_enabled=true.' -ForegroundColor Green
+            Write-Host 'Hard-refresh the site (Ctrl+Shift+R) and the lock icon appears beside Sync.'
+        } else {
+            Warn '/health still reports write_auth_enabled=false - the container did not pick up'
+            Warn 'the token. Re-run:  docker compose up -d  in /root/IBKR_investment_tracker/backend'
+        }
     } else {
         Warn "Skipped. The footer will keep reporting 'write API unauthenticated'."
     }

@@ -16,45 +16,22 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 
 ## Needs a human
 
-- **Nothing from 2026-07-31 has been pushed** — `git push` is **refused to an agent by the permission
-  classifier**, so this is a human step, not an oversight. The unpushed work sits on local `main` (see
-  *Shipped locally* below; `git log --oneline origin/main..main` is the current list — the count is
-  deliberately not written here, it drifted three times in one session). The tree is clean and both
-  suites are green, so it is one command:
+- **Install the guarded auto-deploy script — the only deploy step still outstanding.** `git push` and
+  VPS edits are **refused to an agent by the permission classifier**, so this one needs a human:
 
-      git push origin main
+      scp -i ~/.ssh/id_ed25519_hostinger ops/auto-deploy.sh root@<host>:/tmp/
+      ssh -i ~/.ssh/id_ed25519_hostinger root@<host> 'install -m 755 /tmp/auto-deploy.sh /root/auto-deploy.sh'
 
-  **Or run the finish-deploy script**, which does all three *Needs a human* deploy steps in the only
-  safe order and refuses to reach step 2 until `/health` reports the commit it just pushed. Two
-  equivalent copies, because Simon works in PowerShell and the agent works in Git Bash:
+  Verify by watching `/root/auto-deploy.log` for a `SKIP: within 10min` line near a slot. The
+  persistent job store now recovers a slot missed by under 30 minutes, so this is belt to that
+  braces rather than the only defence.
 
-      pwsh -NoProfile -File .\ops\finish-deploy.ps1     # PowerShell
-      bash ops/finish-deploy.sh                          # Git Bash
+  `ops/finish-deploy.ps1` (PowerShell) and `ops/finish-deploy.sh` (Git Bash) are equivalent twins
+  that run the push / token / guard sequence in the only safe order, skipping whatever is already
+  done. **Keep the two in step if you change either.** Both take Berlin time from a real timezone
+  database rather than the shell, because Git Bash on Windows silently ignores `TZ=` and returns
+  UTC — a two-hour error in the direction that permits a collision.
 
-  Both check the Berlin clock before pushing, and **neither takes it from the shell**: Git Bash on
-  Windows silently ignores `TZ=` and returns UTC, which in summer puts the guard two hours out in
-  the unsafe direction and would wave a push straight into the 08:00 slot. The `.sh` uses Python's
-  `zoneinfo`, the `.ps1` uses .NET `TimeZoneInfo`. Every step asks first and can be skipped.
-  **Keep the two in step if you change either.**
-
-  Pushing auto-deploys within 10 minutes, so land it **outside** a Berlin sync slot
-  (08/13/15/20/22:00). The new persistent job store recovers a slot missed by under 30 min once it is
-  live — but it is not live until this deploy lands, so **this first one still has to be timed by
-  hand**; afterwards the timing stops mattering. *Worth doing next* item 1 would prevent the overlap
-  outright. Confirm it landed from the browser: the footer reports the running commit.
-- **Turn on the write API auth.** `app/auth.py` gates every `POST/PUT/PATCH/DELETE` under `/api/`,
-  but it is **inert until `API_ADMIN_TOKEN` is set** — deliberately, so shipping it could not 401 the
-  running site. Until then `/api/` is what it has always been: anyone who can reach the host can
-  change the base currency, edit the watchlist and start syncs that spend the IBKR and Yahoo budgets.
-  Generate a token (`python -c "import secrets; print(secrets.token_urlsafe(32))"`), put it in
-  `/root/IBKR_investment_tracker/backend/.env`, and paste the same value into the app's lock button
-  (header, beside Sync). The footer shows *write API unauthenticated* while it is off. **Do it after
-  the deploy, not before** — the currently-live frontend has no lock button, so enabling auth first
-  would refuse its sync and currency controls with no way to unlock them.
-
-  This and *Worth doing next* item 1 are both **production config edits on the VPS, which the
-  permission classifier refuses to an agent** — correctly. Everything either needs is written and
-  tested; only the two commands remain.
 - **Rotate the IBKR Flex token.** It travelled as a `t=` URL parameter into `sync_runs.message` and
   was served by the public `/api/scheduler/history` until the 2026-07-28 scrub. `app/redact.py` now
   redacts on write *and* on read, so it cannot recur — but redaction cannot un-leak what was already
@@ -103,10 +80,27 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
   splice that governs the Dividends tab does **not** apply here, because a ledger's job is to show
   what is on record rather than to pick a source per period.
 
-## Shipped locally 2026-07-31 — NOT deployed
+## Shipped 2026-07-31 — DEPLOYED and verified
 
-Nothing pushed (`git log --oneline origin/main..main`). Suites: backend 357 → 451, frontend 45 → 91,
-`tsc -b` and `npm run build` clean.
+Live at 19:31 Berlin. Suites: backend 357 → 451, frontend 45 → 91, `tsc -b` and `npm run build`
+clean. **Write auth is ON in production** — verified from outside the host: a write with no key and
+a write with a wrong key both 401, reads still 200. All five scheduler jobs re-registered after the
+rebuild, which is the persistent job store doing its job.
+
+Two things about that deploy worth knowing, both cost time on the day:
+
+- **`commit` reads `unknown` on this one deploy, and that is expected.** `deploy.sh` pulls the repo
+  *itself* (line 13), so the copy already executing is the one from before the pull — bash does not
+  reload a running script. Any deploy that changes `deploy.sh` therefore runs the **old** logic once,
+  and the `GIT_COMMIT` export it gained is missing for exactly that run. The next deploy stamps the
+  real sha. The finish-deploy scripts now accept `unknown` + the `write_auth_enabled` marker as
+  proof the new build is live, instead of hanging 15 minutes over a cosmetic stamp.
+- **`docker compose restart` does not reload `env_file`.** Compose reads it when it *creates* a
+  container; `restart` reuses the existing one with its original environment. So `API_ADMIN_TOKEN`
+  landed in `.env` and was silently ignored — `write_auth_enabled` stayed `false` while everything
+  reported success. **`docker compose up -d`** is required. Both scripts now use it *and* re-check
+  `/health` afterwards rather than assuming, because the failure is invisible: a site whose write
+  API is still wide open looks exactly like one that is locked down.
 
 **The bundle is now code-split**, which changed the shape of a deploy for users. It was one 891 kB /
 264 kB-gzipped chunk; it is now four eager files (app 52 kB gz, react 57, charts 119, query 15) plus
@@ -200,35 +194,21 @@ What landed, and why each was worth doing:
   CSP had already been verified against the real build (see *Watch after the first deploy*), and
   re-running it there passes 4/4 — but the reusable script was measuring Vite's HMR transport.
 
-## Watch after the first deploy
+## Watch after the next deploy
 
-- **The scheduler job store is new.** `backend/scheduler_jobs.db` is created on first start and
-  bind-mounted; `deploy.sh` touches it so Docker cannot make it a directory. Confirm
-  `/api/scheduler/status` still lists five jobs after the deploy, and that the container logs show
-  `kept, next run:` on the *second* restart rather than recomputing.
-- ~~The CSP~~ — **verified, nothing to watch.** The production policy was applied to the real
-  `npm run build` output in a browser: eight tabs render, the recharts SVGs and lucide icons draw,
-  the `data:` favicon loads, and the console reports zero violations. Worth having done rather than
-  waiting, since a blocked resource shows up only in the browser console and in no log we keep.
-- **`index.html` is now `no-cache`.** Deploys should take effect on reload without a hard refresh.
+- **The scheduler job store survived its first rebuild** — `/api/scheduler/status` listed all five
+  jobs immediately after. Still worth one look on the *next* deploy for the other half of the claim:
+  the container logs should show `kept, next run:` rather than recomputing, which is what proves a
+  missed slot would actually be recovered instead of silently rescheduled forward.
+- **`commit` should read a real sha next time, not `unknown`** — see *Shipped* above. If it still
+  says `unknown` after a deploy that did **not** touch `deploy.sh`, then `GIT_COMMIT` genuinely is
+  not reaching the container and the build-identity feature is broken rather than bootstrapping.
 
 ## Worth doing next
 
-Rough priority. Item 1 is written but not installed; item 2 is not started.
+Rough priority. The auto-deploy install moved to *Needs a human* — it is the last deploy step.
 
-1. **Install the guarded auto-deploy script — WRITTEN, NOT INSTALLED.** `ops/auto-deploy.sh` is in
-   the repo (it previously existed only as `/root/auto-deploy.sh`, unversioned and unreviewed despite
-   governing every deploy) and adds the sync-slot guard: it refuses to deploy within 10 minutes
-   either side of a Berlin slot and defers to the next tick. The boundary logic is tested across all
-   five slots, the quiet hours and the midnight wrap. **The VPS still runs the old copy** —
-   installing it changes deploy behaviour, so it needs a deliberate step:
-
-       scp ops/auto-deploy.sh root@<host>:/tmp/ && ssh root@<host> 'install -m 755 /tmp/auto-deploy.sh /root/auto-deploy.sh'
-
-   Verify afterwards by watching `/root/auto-deploy.log` for a `SKIP: within 10min` line near a slot.
-   The persistent job store now recovers a missed slot within 30 minutes anyway, so this is belt to
-   that braces rather than the only defence.
-2. **Fold `PRE_OWNERSHIP_HISTORY_YEARS` pruning into a scheduled job — reassess before building.**
+1. **Fold `PRE_OWNERSHIP_HISTORY_YEARS` pruning into a scheduled job — reassess before building.**
    `prune_empty_dividends.py` is a manual CLI and the ingest window already prevents new junk, so
    there is very little left for a scheduled run to find. Investigating this on 2026-07-31 turned up
    a **defect in the CLI rather than a case for automating it** (below), which is a fair warning

@@ -963,6 +963,21 @@ FAILED spuriously — check `/health` again after ~15s before believing it.
   record exists)
 - Backups: `/root/ibkr-backups/<date>/`
 
+**Changing `backend/.env` needs `docker compose up -d`, never `restart`.** Compose reads `env_file`
+when it *creates* a container; `restart` reuses the existing one with its original environment, so a
+new value is accepted, written, and silently ignored. `up -d` sees the changed config and recreates.
+This bit us turning on `API_ADMIN_TOKEN` (2026-07-31): the token was in `.env`, every command
+reported success, and `write_auth_enabled` stayed `false` — a site that looks locked down and isn't.
+**Always confirm against `/health` rather than the command's exit status.**
+
+**`deploy.sh` pulls the repo itself (line 13), so a deploy that changes `deploy.sh` runs the OLD
+copy once.** Bash does not reload a running script. Any behaviour newly added to `deploy.sh` is
+therefore absent from exactly the deploy that introduces it, and appears from the next one on. That
+is why the build-identity deploy reported `commit: "unknown"` — the `GIT_COMMIT` export existed in
+the pulled file but not in the executing one. Expect this for any future `deploy.sh` change; it is
+not a failure, and it self-corrects. Anything asserting "the deploy landed" must therefore not key
+solely on the commit sha (`ops/finish-deploy.*` also accept the `write_auth_enabled` marker).
+
 A **cloud routine** `ibkr-sync-validator` (claude.ai/code/routines) runs daily at 07:45 UTC to validate
 the morning sync via the public API + the IBKR MCP connector. It **cannot SSH**, so it opens PRs rather
 than pushing to `main`.
