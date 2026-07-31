@@ -16,9 +16,10 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 
 ## Needs a human
 
-- **Nothing from 2026-07-31 has been pushed.** Eight commits sit on local `main` (see *Shipped
+- **Nothing from 2026-07-31 has been pushed.** Twelve commits sit on local `main` (see *Shipped
   locally* below). Pushing auto-deploys within 10 minutes, so land it **outside** a Berlin sync slot
-  (08/13/15/20/22:00) — item 2 below removes that constraint but is not installed yet.
+  (08/13/15/20/22:00). The new persistent job store recovers a slot missed by under 30 min, and
+  *Worth doing next* item 1 would prevent the overlap outright — but it is not installed yet.
 - **Turn on the write API auth.** `app/auth.py` gates every `POST/PUT/PATCH/DELETE` under `/api/`,
   but it is **inert until `API_ADMIN_TOKEN` is set** — deliberately, so shipping it could not 401 the
   running site. Until then `/api/` is what it has always been: anyone who can reach the host can
@@ -76,7 +77,7 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 
 ## Shipped locally 2026-07-31 — NOT deployed
 
-Eight commits on local `main`, none pushed. Suites: backend 357 → 425, frontend 45 → 85, `tsc -b`
+Twelve commits on local `main`, none pushed. Suites: backend 357 → 427, frontend 45 → 85, `tsc -b`
 and `npm run build` clean. Verified against a live uvicorn as well as through the test client —
 `/health`, the activity ledger and its CSV, the 400s on a bad `kind` and an over-wide window, write
 auth in all four states, the 429 with `Retry-After`, and a persistent-job-store restart preserving
@@ -151,7 +152,7 @@ Rough priority. Item 1 is written but not installed; the rest are not started.
    is a manual CLI; the ingest window now prevents new junk, so this is cleanup-only and low value.
 
 Also noted, not yet items: `CLAUDE.md` says React 18; `package.json` pins `react@^19.2.0`. And
-`CLAUDE.md`'s test counts (357 backend + 45 frontend) are now 425 + 85.
+`CLAUDE.md`'s test counts (357 backend + 45 frontend) are now 427 + 85.
 
 ## Local development traps
 
@@ -196,7 +197,7 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
   every collapsible and sortable header, four more explicit error states, optional write auth +
   per-IP rate limit + request ids + `/health` build identity, the Activity ledger over the four
   unread tables, a persistent scheduler job store, delta-chip and scroll-affordance consolidation,
-  real product chrome. Suites 357 → 425 backend, 45 → 85 frontend.
+  real product chrome. Suites 357 → 427 backend, 45 → 85 frontend.
 - **2026-07-30** — two batches: five audit fixes (Yahoo gating, `openDateTime` off ibflex, SELL beats
   the cost-conserved heuristic, tax-report honesty, dividend card net), then the SBI dividend bug —
   poisoned estimates purged on prod, mapping changes now retire the rows they produced, source-aware
