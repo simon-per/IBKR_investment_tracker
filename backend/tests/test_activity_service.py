@@ -460,3 +460,29 @@ async def test_csv_names_the_base_currency_in_its_amount_columns(db):
     await seed(db, base_currency="CHF")
     header = ActivityService.to_csv(await fetch(db)).split("\n")[0]
     assert "amount_chf" in header
+
+
+@pytest.mark.asyncio
+async def test_a_fractional_share_count_is_not_rounded_away(db):
+    """
+    The column is Numeric(18, 6) and this account trades fractional shares constantly
+    (0.3 MU, 0.1 CSU), so `str(Decimal)` pads every description to six decimals and
+    rounding the quantity to whole shares renders the real trades as 0 — or, for a
+    sell, as -0.
+    """
+    await seed(db)
+    db.add(Trade(
+        ib_key="T-FRAC", conid="103", security_id=1, symbol="AAPL",
+        trade_date=TODAY - timedelta(days=5), buy_sell="SELL",
+        quantity=Decimal("-0.100000"), price=Decimal("2742"),
+        proceeds=Decimal("274.2"), commission=Decimal("-1"), currency="USD",
+        realized_pnl=Decimal("27.85"),
+    ))
+    await db.commit()
+
+    row = next(r for r in (await fetch(db))["items"] if r["ib_key"] == "T-FRAC")
+    assert row["quantity"] == -0.1
+    # The padding is gone, and the whole-share rows stay whole.
+    assert row["description"] == "SELL 0.1 AAPL"
+    whole = next(r for r in (await fetch(db))["items"] if r["ib_key"] == "T-BUY")
+    assert whole["description"] == "BUY 10 AAPL"

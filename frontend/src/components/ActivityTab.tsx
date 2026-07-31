@@ -42,6 +42,21 @@ function num(value: number | null, digits = 2): string {
 }
 
 /**
+ * A share count, with as much precision as it actually carries and no more.
+ *
+ * Rounding to whole shares turned this account's fractional trades into `0` and, worse,
+ * `-0` — 0.3 MU and 0.1 CSU are ordinary rows here, not edge cases. Six decimals is the
+ * column's own precision (`Numeric(18, 6)`); `maximumFractionDigits` alone trims the
+ * trailing zeros, so a whole-share trade still reads `50` rather than `50.000000`.
+ */
+function qty(value: number | null): string {
+  if (value == null) return '—'
+  // Intl renders -0.0000001 as "-0"; the sign is already in the BUY/SELL badge.
+  const shown = Object.is(value, -0) ? 0 : value
+  return shown.toLocaleString('en-US', { maximumFractionDigits: 6 })
+}
+
+/**
  * What a row's subtype badge should say, and how loudly.
  *
  * The transfer case is the one that earns its colour: an incoming transfer booked as
@@ -289,7 +304,7 @@ export function ActivityTab() {
                             {row.description}
                           </td>
                           <td className="py-2 pr-3 text-right tabular-nums">
-                            {row.quantity == null ? '—' : num(row.quantity, 0)}
+                            {qty(row.quantity)}
                           </td>
                           <td className="py-2 pr-3 text-right tabular-nums">
                             {row.price == null ? '—' : `${num(row.price)} ${row.currency ?? ''}`.trim()}

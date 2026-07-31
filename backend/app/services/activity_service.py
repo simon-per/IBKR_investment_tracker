@@ -91,6 +91,23 @@ def _csv_num(value: Optional[float]) -> str:
     return "" if value is None else f"{value:.2f}"
 
 
+def _qty(value: Optional[Decimal]) -> str:
+    """
+    A share count with its trailing zeros trimmed.
+
+    The column is ``Numeric(18, 6)``, so `str(Decimal)` renders half a share as
+    "0.500000". This account trades fractional shares constantly (0.3 MU, 0.1 CSU),
+    so the padding is on most rows rather than a rare case.
+    """
+    if value is None:
+        return ""
+    normalized = value.normalize()
+    # normalize() turns 50 into 5E+1; quantize back when the exponent went positive.
+    if normalized == normalized.to_integral_value():
+        normalized = normalized.quantize(Decimal(1))
+    return f"{normalized:f}"
+
+
 class ActivityService:
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -215,7 +232,9 @@ class ActivityService:
                 kind=TRADE,
                 subtype=t.buy_sell or "",
                 symbol=t.symbol,
-                description=f"{t.buy_sell or 'TRADE'} {abs(t.quantity)} {t.symbol or ''}".strip(),
+                description=" ".join(filter(None, [
+                    t.buy_sell or "TRADE", _qty(abs(t.quantity)), t.symbol
+                ])),
                 quantity=_f(t.quantity),
                 price=_f(t.price),
                 currency=t.currency,
