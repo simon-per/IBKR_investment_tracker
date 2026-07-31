@@ -16,21 +16,19 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 
 ## Needs a human
 
-- **Install the guarded auto-deploy script — the only deploy step still outstanding.** `git push` and
-  VPS edits are **refused to an agent by the permission classifier**, so this one needs a human:
-
-      scp -i ~/.ssh/id_ed25519_hostinger ops/auto-deploy.sh root@<host>:/tmp/
-      ssh -i ~/.ssh/id_ed25519_hostinger root@<host> 'install -m 755 /tmp/auto-deploy.sh /root/auto-deploy.sh'
-
-  Verify by watching `/root/auto-deploy.log` for a `SKIP: within 10min` line near a slot. The
-  persistent job store now recovers a slot missed by under 30 minutes, so this is belt to that
-  braces rather than the only defence.
+- **Push the remaining commit(s).** `git push` is **refused to an agent by the permission
+  classifier**, so this is always a human step — not an oversight when you find work sitting
+  unpushed. `git log --oneline origin/main..main` is the list.
 
   `ops/finish-deploy.ps1` (PowerShell) and `ops/finish-deploy.sh` (Git Bash) are equivalent twins
-  that run the push / token / guard sequence in the only safe order, skipping whatever is already
-  done. **Keep the two in step if you change either.** Both take Berlin time from a real timezone
+  that run push / token / guard in the only safe order and skip whatever is already done.
+  **Keep the two in step if you change either.** Both take Berlin time from a real timezone
   database rather than the shell, because Git Bash on Windows silently ignores `TZ=` and returns
   UTC — a two-hour error in the direction that permits a collision.
+
+  Note the scripts define `$k`/`$h` shorthand *inside one session*; pasting a later command into a
+  fresh shell silently passes empty strings and `scp`/`ssh` print usage. Use literal paths, or
+  re-run the script.
 
 - **Rotate the IBKR Flex token.** It travelled as a `t=` URL parameter into `sync_runs.message` and
   was served by the public `/api/scheduler/history` until the 2026-07-28 scrub. `app/redact.py` now
@@ -85,7 +83,9 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 Live at 19:31 Berlin. Suites: backend 357 → 451, frontend 45 → 91, `tsc -b` and `npm run build`
 clean. **Write auth is ON in production** — verified from outside the host: a write with no key and
 a write with a wrong key both 401, reads still 200. All five scheduler jobs re-registered after the
-rebuild, which is the persistent job store doing its job.
+rebuild, which is the persistent job store doing its job. **The guarded `auto-deploy.sh` is
+installed** on the VPS at 20:11 Berlin (5140 bytes, `-rwxr-xr-x`, byte-identical to `ops/`), so
+deploys now defer rather than landing inside a sync slot.
 
 Two things about that deploy worth knowing, both cost time on the day:
 
@@ -203,6 +203,10 @@ What landed, and why each was worth doing:
 - **`commit` should read a real sha next time, not `unknown`** — see *Shipped* above. If it still
   says `unknown` after a deploy that did **not** touch `deploy.sh`, then `GIT_COMMIT` genuinely is
   not reaching the container and the build-identity feature is broken rather than bootstrapping.
+- **The newly-installed `auto-deploy.sh` has never actually fired.** It went on at 20:11, between
+  slots. Confirm on the next deploy that `/root/auto-deploy.log` still logs a normal run — and,
+  when one lands near 08/13/15/20/22:00, that it logs `SKIP: within 10min` and defers rather than
+  stalling. A guard that refuses *every* deploy would look identical to "nothing was pushed".
 
 ## Worth doing next
 
@@ -275,7 +279,8 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
   unread tables, a persistent scheduler job store, delta-chip and scroll-affordance consolidation,
   real product chrome, a completed `/api/dividends/summary` contract, and a code-split bundle. Suites
   357 → 451 backend, 45 → 91 frontend; verified against a prod snapshot and in a real browser, which
-  found three defects the green suite did not.
+  found three defects the green suite did not. **Deployed the same evening**: write auth on and
+  enforced, guarded auto-deploy installed, five scheduler jobs surviving the rebuild.
 - **2026-07-30** — two batches: five audit fixes (Yahoo gating, `openDateTime` off ibflex, SELL beats
   the cost-conserved heuristic, tax-report honesty, dividend card net), then the SBI dividend bug —
   poisoned estimates purged on prod, mapping changes now retire the rows they produced, source-aware
