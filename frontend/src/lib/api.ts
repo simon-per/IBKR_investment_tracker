@@ -530,6 +530,60 @@ export interface TaxReport {
   warnings?: string[];
 }
 
+/** One event on the ledger. Fields a kind cannot fill are null, never 0. */
+export type ActivityKind = 'trade' | 'dividend' | 'cash_flow' | 'corporate_action';
+
+export interface ActivityRow {
+  date: string;
+  kind: ActivityKind;
+  /** BUY/SELL, DEPOSITWITHDRAW/TRANSFER_IN, FORWARDSPLIT, ibkr/yfinance_estimate. */
+  subtype: string;
+  symbol: string | null;
+  description: string;
+  quantity: number | null;
+  price: number | null;
+  currency: string | null;
+  /** Signed, in the base currency: money leaving the account is negative. */
+  amount_base: number | null;
+  realized_pnl_base: number | null;
+  /** Cash flows only. A transfer is never money in — see the contributions splice. */
+  counts_as_money_in: boolean | null;
+  /** Dividends only: 'ibkr' has real withholding, 'yfinance_estimate' is a guess. */
+  source: string | null;
+  ib_key: string | null;
+}
+
+export interface ActivityResponse {
+  items: ActivityRow[];
+  total: number;
+  limit: number;
+  offset: number;
+  base_currency: string;
+  start_date: string;
+  end_date: string;
+}
+
+export interface ActivityParams {
+  startDate?: string;
+  endDate?: string;
+  kinds?: ActivityKind[];
+  symbol?: string;
+  limit?: number;
+  offset?: number;
+}
+
+function activityQuery(params: ActivityParams): string {
+  const q = new URLSearchParams();
+  if (params.startDate) q.append('start_date', params.startDate);
+  if (params.endDate) q.append('end_date', params.endDate);
+  if (params.kinds?.length) q.append('kind', params.kinds.join(','));
+  if (params.symbol) q.append('symbol', params.symbol);
+  if (params.limit != null) q.append('limit', String(params.limit));
+  if (params.offset) q.append('offset', String(params.offset));
+  const s = q.toString();
+  return s ? `?${s}` : '';
+}
+
 /** `/health`. Identifies the running build so a deploy can be confirmed from the UI. */
 export interface HealthResponse {
   status: string;
@@ -816,6 +870,16 @@ class ApiClient {
   /** Absolute URL for the CSV download (used as an <a href> target). */
   getTaxReportCsvUrl(year: number): string {
     return `${this.baseUrl}/api/tax/report.csv?year=${year}`;
+  }
+
+  // Activity ledger
+  async getActivity(params: ActivityParams = {}): Promise<ActivityResponse> {
+    return this.request<ActivityResponse>(`/api/portfolio/activity${activityQuery(params)}`);
+  }
+
+  /** <a href> target — a plain navigation, so the browser handles the download. */
+  getActivityCsvUrl(params: ActivityParams = {}): string {
+    return `${this.baseUrl}/api/portfolio/activity.csv${activityQuery(params)}`;
   }
 
   // Health check

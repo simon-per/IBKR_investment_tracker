@@ -14,6 +14,7 @@ import { PerformanceAttribution } from './PerformanceAttribution'
 import { MonthlyReturnsHeatmap } from './MonthlyReturnsHeatmap'
 import { MonthlyDeploymentCard } from './MonthlyDeploymentCard'
 import { DividendSummary } from './DividendSummary'
+import { ActivityTab } from './ActivityTab'
 import { AllocationTab } from './AllocationTab'
 import { ForecastTab } from './ForecastTab'
 import { FundamentalsTab } from './FundamentalsTab'
@@ -369,14 +370,18 @@ export function Dashboard() {
       {/* Main Content */}
       <div className="w-full px-4 py-6">
         <Tabs defaultValue="performance" className="space-y-8">
-          {/* Seven equal columns only once there is room for them: at 390px each
+          {/* Eight equal columns only once there is room for them: at 390px each
               cell was ~53px while the triggers are whitespace-nowrap, so the
               labels overlapped into an unreadable smear on every tab. Below `sm`
               the columns size to their content and the list scrolls instead.
               Stays `grid` rather than `flex` because TabsList's own base class is
               `inline-flex`, which wins over `flex` in Tailwind's output order. */}
-          <TabsList className="grid w-full max-w-3xl auto-cols-max grid-flow-col overflow-x-auto sm:auto-cols-fr">
+          <TabsList
+            label="Portfolio sections"
+            className="grid w-full max-w-4xl auto-cols-max grid-flow-col overflow-x-auto sm:auto-cols-fr"
+          >
             <TabsTrigger value="performance">Performance</TabsTrigger>
+            <TabsTrigger value="activity">Activity</TabsTrigger>
             <TabsTrigger value="allocation">Allocation</TabsTrigger>
             <TabsTrigger value="dividends">Dividends</TabsTrigger>
             <TabsTrigger value="fundamentals">Fundamentals</TabsTrigger>
@@ -492,6 +497,11 @@ export function Dashboard() {
 
             {/* Positions Table */}
             <PositionsList positions={positions || []} isLoading={positionsLoading} isError={positionsError} />
+          </TabsContent>
+
+          {/* Activity Tab — the transaction ledger */}
+          <TabsContent value="activity">
+            <ActivityTab />
           </TabsContent>
 
           {/* Allocation Tab */}

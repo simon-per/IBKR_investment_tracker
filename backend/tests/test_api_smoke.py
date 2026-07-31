@@ -51,6 +51,11 @@ READ_ENDPOINTS = [
     f"/api/portfolio/value-over-time?start_date={START}&end_date={TODAY}",
     "/api/portfolio/positions",
     "/api/portfolio/contributions",
+    "/api/portfolio/activity",
+    f"/api/portfolio/activity?start_date={START}&end_date={TODAY}",
+    "/api/portfolio/activity?kind=trade,cash_flow",
+    "/api/portfolio/activity?symbol=ASML&limit=5",
+    "/api/portfolio/activity.csv",
     f"/api/portfolio/annualized-return?start_date={START}&end_date={TODAY}",
     f"/api/portfolio/attribution?start_date={START}&end_date={TODAY}",
     "/api/portfolio/benchmarks",
@@ -322,3 +327,29 @@ def test_the_shapes_that_broke_production_serialize(client):
     assert tax["holdings_snapshot_total"] is not None
     assert tax["warnings"] == []
     assert tax["realized_source"] in {"trades", "closed_lot_estimate"}
+
+    # The activity ledger unions four tables that each had no read surface at all.
+    act = client.get(f"/api/portfolio/activity?start_date={START}&end_date={TODAY}").json()
+    assert act["base_currency"] == "CHF"
+    kinds = {row["kind"] for row in act["items"]}
+    assert {"trade", "dividend", "cash_flow"} <= kinds
+    # Newest first, and the deposit is flagged as money in while nothing else is.
+    dates = [row["date"] for row in act["items"]]
+    assert dates == sorted(dates, reverse=True)
+    deposit = next(r for r in act["items"] if r["ib_key"] == "C1")
+    assert deposit["counts_as_money_in"] is True
+    assert all(r["counts_as_money_in"] is None for r in act["items"] if r["kind"] != "cash_flow")
+    # The fixture's SELL carries IBKR's own realized P&L through to the row.
+    sell = next(r for r in act["items"] if r["ib_key"] == "T1")
+    assert sell["realized_pnl_base"] is not None
+
+    # An unknown kind is refused rather than silently returning everything.
+    assert client.get("/api/portfolio/activity?kind=nonsense").status_code == 400
+    # And the window is bounded like value-over-time's.
+    assert client.get(
+        f"/api/portfolio/activity?start_date=1990-01-01&end_date={TODAY}"
+    ).status_code == 400
+
+    csv_text = client.get("/api/portfolio/activity.csv").text
+    assert csv_text.splitlines()[0].startswith("date,kind,subtype")
+    assert "amount_chf" in csv_text.splitlines()[0]

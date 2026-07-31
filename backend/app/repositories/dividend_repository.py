@@ -114,6 +114,25 @@ class DividendRepository:
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
+    async def get_between(self, start: date, end: date) -> List[DividendPayment]:
+        """
+        Payments landing in [start, end], windowed on **pay_date falling back to
+        ex_date** — the same `coalesce` `has_ibkr_dividends` uses.
+
+        That coalesce is the point. yfinance rows are stored under the ex-date and IBKR
+        rows under the pay date (the divergence that forced the source-aware key on this
+        table), and a payment with Mastercard's 29-day lag would fall in a different
+        window depending on which column was asked. A ledger is about when the cash
+        moved, so pay_date wins wherever it exists.
+        """
+        on_date = func.coalesce(DividendPayment.pay_date, DividendPayment.ex_date)
+        result = await self.session.execute(
+            select(DividendPayment)
+            .where(and_(on_date >= start, on_date <= end))
+            .order_by(on_date.asc())
+        )
+        return list(result.scalars().all())
+
     async def has_ibkr_dividends(
         self, start: Optional[date] = None, end: Optional[date] = None
     ) -> bool:

@@ -60,6 +60,23 @@ class CorporateActionRepository:
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
+    async def get_between(self, start: date, end: date) -> List[CorporateAction]:
+        """
+        All actions with action_date in [start, end], oldest first.
+
+        Inclusive at both ends, unlike ``get_by_conid_in_range`` above, which is
+        deliberately half-open because reconciliation walks forward from a lot's last
+        known state. This one answers "what happened in this window", where excluding
+        the first day would drop an action the caller explicitly asked about.
+        """
+        result = await self.session.execute(
+            select(CorporateAction)
+            .where(and_(CorporateAction.action_date >= start,
+                        CorporateAction.action_date <= end))
+            .order_by(CorporateAction.action_date.asc())
+        )
+        return list(result.scalars().all())
+
     async def count(self) -> int:
         result = await self.session.execute(select(func.count(CorporateAction.id)))
         return int(result.scalar() or 0)

@@ -3,12 +3,19 @@ Portfolio Router
 API endpoints for portfolio value and positions.
 """
 import logging
-from typing import List
+from typing import List, Optional
 from datetime import date, timedelta
 from fastapi import APIRouter, Depends, Query, HTTPException
+from fastapi.responses import PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
+from app.services.activity_service import (
+    ActivityService,
+    DEFAULT_LIMIT,
+    KINDS,
+    MAX_LIMIT,
+)
 from app.services.portfolio_service import PortfolioService
 from app.services.benchmark_service import BenchmarkService, BENCHMARKS
 from app.schemas.portfolio import (
@@ -25,6 +32,10 @@ from app.schemas.portfolio import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Same reasoning as the 5-year cap on value-over-time: the route is anonymous, so the
+# window a caller can ask for has to be bounded somewhere.
+MAX_ACTIVITY_DAYS = 365 * 5
 
 
 @router.get("/value-over-time", response_model=List[PortfolioValuePoint])
@@ -166,6 +177,103 @@ async def get_performance_attribution(
     result = await portfolio_service.get_performance_attribution(start_date, end_date)
 
     return PerformanceAttributionResponse(**result)
+
+
+def _activity_window(start_date: Optional[date], end_date: Optional[date]) -> tuple:
+    """
+    Default and validate the activity window, mirroring the guards on value-over-time.
+
+    The default is one year rather than everything: the ledger is the landing view of a
+    tab, and an unbounded default would make the first paint the most expensive query
+    on the site.
+    """
+    end_date = end_date or date.today()
+    start_date = start_date or (end_date - timedelta(days=365))
+
+    if start_date > end_date:
+        raise HTTPException(
+            status_code=400, detail="start_date must be before or equal to end_date"
+        )
+    if (end_date - start_date).days > MAX_ACTIVITY_DAYS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Date range too large. Maximum allowed is {MAX_ACTIVITY_DAYS} days",
+        )
+    return start_date, end_date
+
+
+def _activity_kinds(kind: Optional[str]) -> Optional[List[str]]:
+    """
+    Parse the `kind` filter. Comma-separated so several can be combined in one
+    querystring, and an unknown value is refused rather than silently ignored — a typo
+    that quietly returns everything is the kind of thing nobody notices.
+    """
+    if not kind:
+        return None
+    wanted = [k.strip() for k in kind.split(",") if k.strip()]
+    unknown = [k for k in wanted if k not in KINDS]
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown kind(s): {', '.join(unknown)}. Valid: {', '.join(KINDS)}",
+        )
+    return wanted or None
+
+
+@router.get("/activity")
+async def get_activity(
+    start_date: date = Query(default=None, description="Window start (defaults to 1 year ago)"),
+    end_date: date = Query(default=None, description="Window end (defaults to today)"),
+    kind: str = Query(default=None, description=f"Comma-separated subset of: {', '.join(KINDS)}"),
+    symbol: str = Query(default=None, description="Exact ticker match"),
+    limit: int = Query(default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+    offset: int = Query(default=0, ge=0),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    The account's transaction ledger: trades, dividends, cash flows and corporate
+    actions in one chronological list, newest first.
+
+    All four tables were ingested and depended on but had no read surface at all — so
+    "what happened on this date" had no answer, and the transfer audit that guards the
+    money-added figure was an ssh command. Cash-flow rows carry `counts_as_money_in`
+    for exactly that.
+    """
+    start_date, end_date = _activity_window(start_date, end_date)
+    return await ActivityService(db).get_activity(
+        start_date=start_date, end_date=end_date,
+        kinds=_activity_kinds(kind), symbol=symbol, limit=limit, offset=offset,
+    )
+
+
+@router.get("/activity.csv", response_class=PlainTextResponse)
+async def get_activity_csv(
+    start_date: date = Query(default=None),
+    end_date: date = Query(default=None),
+    kind: str = Query(default=None),
+    symbol: str = Query(default=None),
+    limit: int = Query(default=MAX_LIMIT, ge=1, le=MAX_LIMIT),
+    offset: int = Query(default=0, ge=0),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    The same ledger as a download. Defaults to the maximum page rather than the UI's,
+    since someone exporting wants the window they asked for, not one screen of it.
+    """
+    start_date, end_date = _activity_window(start_date, end_date)
+    service = ActivityService(db)
+    result = await service.get_activity(
+        start_date=start_date, end_date=end_date,
+        kinds=_activity_kinds(kind), symbol=symbol, limit=limit, offset=offset,
+    )
+    return PlainTextResponse(
+        content=service.to_csv(result),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition":
+                f'attachment; filename="activity_{start_date}_{end_date}.csv"'
+        },
+    )
 
 
 @router.get("/benchmarks", response_model=List[BenchmarkInfo])
