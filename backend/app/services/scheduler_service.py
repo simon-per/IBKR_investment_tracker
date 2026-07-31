@@ -6,11 +6,13 @@ import logging
 from datetime import datetime
 from typing import Optional
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from datetime import date, timedelta
 
+from app.config import settings
 from app.database import AsyncSessionLocal
 from app.single_flight import SYNC_PIPELINE, SyncBusy, single_flight
 from app.services.ibkr_service import IBKRService, FLEX_RETRY_DELAYS_PATIENT
@@ -35,6 +37,21 @@ logger = logging.getLogger(__name__)
 # before the US open, so a warning means something is actually wrong rather than "the
 # market was shut". Five days is roughly one trading week of silence.
 STALE_PRICE_DAYS = 5
+
+# How late a missed run may still be honoured.
+#
+# APScheduler runs in-process with the app, so a `docker compose down` that overlaps a
+# Berlin slot loses that slot outright — which is what happened to the 2026-07-30 08:00
+# full_sync, and why CLAUDE.md tells humans not to push near a slot. With a persistent
+# job store the missed run time survives the restart, and this is the window in which
+# it is still worth running.
+#
+# Thirty minutes is chosen from both ends. A `build --no-cache` rebuild takes a couple
+# of minutes, so it comfortably covers a deploy. And it is short enough that a genuinely
+# long outage does *not* dump four missed slots onto a cold container: anything older is
+# dropped, so only the slot the outage actually straddled is recovered. `coalesce` then
+# collapses repeats of the same job into one.
+MISFIRE_GRACE_SECONDS = 30 * 60
 
 
 def _collect_warnings(job_result: dict, *step_results) -> None:
@@ -732,6 +749,32 @@ class SchedulerService:
         logger.info("=" * 80)
         return self.last_sync_result
 
+    def _add_or_keep(self, job_id: str, func, trigger: CronTrigger, name: str) -> None:
+        """
+        Register a job, **preserving a stored run time when the schedule is unchanged**.
+
+        `add_job(..., replace_existing=True)` looks like the obvious call and is the
+        wrong one here: replacing a job recomputes `next_run_time` from now, so the
+        missed run time a restart was supposed to recover is overwritten on the way in
+        and the persistent store buys nothing. Leaving an identically-triggered job
+        alone keeps that timestamp, which is what lets APScheduler notice the misfire.
+
+        Comparing `str(trigger)` is how a schedule *change* still lands: CronTrigger's
+        repr is its full field set, so editing an hour replaces the job (and its stale
+        run time) while a restart with the same schedule does not.
+        """
+        existing = self.scheduler.get_job(job_id)
+        if existing is not None and str(existing.trigger) == str(trigger):
+            logger.info(f"  {name} — kept, next run: {existing.next_run_time}")
+            return
+
+        if existing is not None:
+            logger.info(f"  {name} — schedule changed, rescheduling")
+
+        self.scheduler.add_job(
+            func, trigger=trigger, id=job_id, name=name, replace_existing=True
+        )
+
     def start(self):
         """
         Start the scheduler with 5 daily syncs (Europe/Berlin):
@@ -740,6 +783,9 @@ class SchedulerService:
         - 15:00: Market data only (7 days) — after European market close
         - 20:00: IBKR only — last chance to land the day's trades
         - 22:00: Market data only (7 days) — after US market close
+
+        Jobs are persisted to `settings.scheduler_jobstore_url` so a restart that
+        overlaps a slot recovers it instead of losing it — see MISFIRE_GRACE_SECONDS.
         """
         if self.scheduler is not None:
             logger.warning("Scheduler is already running")
@@ -747,54 +793,59 @@ class SchedulerService:
 
         logger.info("Starting scheduler service...")
 
-        self.scheduler = AsyncIOScheduler()
+        jobstores = {}
+        if settings.scheduler_jobstore_url:
+            # A persistent store serializes each job, so the target must be importable
+            # by name. That is why the five entry points below are module-level
+            # functions rather than the bound methods they used to be: a bound method
+            # of this instance would drag the live AsyncIOScheduler into the pickle.
+            jobstores['default'] = SQLAlchemyJobStore(url=settings.scheduler_jobstore_url)
 
-        # 08:00 Europe/Berlin — full sync (IBKR + market data)
-        self.scheduler.add_job(
-            self.full_sync_job,
-            trigger=CronTrigger(hour=8, minute=0, timezone='Europe/Berlin'),
-            id='full_sync_job',
-            name='Full IBKR + Market Data Sync (08:00 Europe/Berlin)',
-            replace_existing=True
+        self.scheduler = AsyncIOScheduler(
+            jobstores=jobstores,
+            job_defaults={
+                # One catch-up run, not one per slot the outage covered.
+                'coalesce': True,
+                'misfire_grace_time': MISFIRE_GRACE_SECONDS,
+                # Belt and braces beside single_flight, which is the real guard.
+                'max_instances': 1,
+            },
         )
 
-        # 13:00 Europe/Berlin — IBKR only (second chance if 08:00's statement wasn't ready)
-        self.scheduler.add_job(
-            self.ibkr_only_sync_job,
-            trigger=CronTrigger(hour=13, minute=0, timezone='Europe/Berlin'),
-            id='ibkr_sync_midday',
-            name='IBKR-only Sync (13:00 Europe/Berlin)',
-            replace_existing=True
+        # Paused, so the job store is live for the get_job() lookups in _add_or_keep
+        # (before start() those would only see APScheduler's pending-jobs list) while
+        # nothing can fire mid-registration.
+        self.scheduler.start(paused=True)
+
+        self._add_or_keep(
+            'full_sync_job', full_sync_job_entry,
+            CronTrigger(hour=8, minute=0, timezone='Europe/Berlin'),
+            'Full IBKR + Market Data Sync (08:00 Europe/Berlin)',
+        )
+        # 13:00 and 20:00 are IBKR-only second chances: a transient Code=1001 at 08:00
+        # used to cost a full day of freshness.
+        self._add_or_keep(
+            'ibkr_sync_midday', ibkr_only_sync_job_entry,
+            CronTrigger(hour=13, minute=0, timezone='Europe/Berlin'),
+            'IBKR-only Sync (13:00 Europe/Berlin)',
+        )
+        self._add_or_keep(
+            'ibkr_sync_evening', ibkr_only_sync_job_entry,
+            CronTrigger(hour=20, minute=0, timezone='Europe/Berlin'),
+            'IBKR-only Sync (20:00 Europe/Berlin)',
+        )
+        self._add_or_keep(
+            'market_sync_eu_close', market_data_only_sync_job_entry,
+            CronTrigger(hour=15, minute=0, timezone='Europe/Berlin'),
+            'Market Data Sync after EU Close (15:00 Europe/Berlin)',
+        )
+        self._add_or_keep(
+            'market_sync_us_close', market_data_only_sync_job_entry,
+            CronTrigger(hour=22, minute=0, timezone='Europe/Berlin'),
+            'Market Data Sync after US Close (22:00 Europe/Berlin)',
         )
 
-        # 20:00 Europe/Berlin — IBKR only (last chance to land the day's trades)
-        self.scheduler.add_job(
-            self.ibkr_only_sync_job,
-            trigger=CronTrigger(hour=20, minute=0, timezone='Europe/Berlin'),
-            id='ibkr_sync_evening',
-            name='IBKR-only Sync (20:00 Europe/Berlin)',
-            replace_existing=True
-        )
-
-        # 15:00 Europe/Berlin — market data only (after EU close)
-        self.scheduler.add_job(
-            self.market_data_only_sync_job,
-            trigger=CronTrigger(hour=15, minute=0, timezone='Europe/Berlin'),
-            id='market_sync_eu_close',
-            name='Market Data Sync after EU Close (15:00 Europe/Berlin)',
-            replace_existing=True
-        )
-
-        # 22:00 Europe/Berlin — market data only (after US close)
-        self.scheduler.add_job(
-            self.market_data_only_sync_job,
-            trigger=CronTrigger(hour=22, minute=0, timezone='Europe/Berlin'),
-            id='market_sync_us_close',
-            name='Market Data Sync after US Close (22:00 Europe/Berlin)',
-            replace_existing=True
-        )
-
-        self.scheduler.start()
+        self.scheduler.resume()
 
         logger.info("Scheduler started successfully")
         for job in self.scheduler.get_jobs():
@@ -843,3 +894,27 @@ def get_scheduler() -> SchedulerService:
     if _scheduler_service is None:
         _scheduler_service = SchedulerService()
     return _scheduler_service
+
+
+# ── Job entry points ──────────────────────────────────────────────────────────
+#
+# The scheduled jobs used to be registered as bound methods (`self.full_sync_job`),
+# which an in-memory job store is happy to hold onto. A persistent store serializes
+# each job instead, and a bound method would drag the whole SchedulerService — the live
+# AsyncIOScheduler included — into the pickle.
+#
+# Module-level functions serialize as `module:name` references, so these thin wrappers
+# resolve the singleton at fire time. They are also the reason the scheduler survives a
+# code change: a stored reference is re-imported, not un-pickled from old bytes.
+
+
+async def full_sync_job_entry() -> dict:
+    return await get_scheduler().full_sync_job()
+
+
+async def ibkr_only_sync_job_entry() -> dict:
+    return await get_scheduler().ibkr_only_sync_job()
+
+
+async def market_data_only_sync_job_entry() -> dict:
+    return await get_scheduler().market_data_only_sync_job()

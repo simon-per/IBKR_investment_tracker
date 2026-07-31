@@ -24,10 +24,17 @@ import app.models  # noqa: F401  register all mappers
 from app.models.market_price import MarketPrice
 from app.models.security import Security
 from app.models.taxlot import TaxLot
+from apscheduler.triggers.cron import CronTrigger
+
+from app.config import settings
 from app.services.scheduler_service import (
+    MISFIRE_GRACE_SECONDS,
     STALE_PRICE_DAYS,
     SchedulerService,
     _collect_warnings,
+    full_sync_job_entry,
+    ibkr_only_sync_job_entry,
+    market_data_only_sync_job_entry,
 )
 
 
@@ -243,8 +250,16 @@ async def test_an_old_price_alongside_a_recent_one_is_not_stale(price_db):
     assert await SchedulerService().find_stale_priced_securities(price_db) == []
 
 
+@pytest.fixture()
+def jobstore_url(tmp_path, monkeypatch):
+    """A throwaway persistent store per test, so nothing touches the real one."""
+    url = f"sqlite:///{tmp_path / 'jobs.db'}"
+    monkeypatch.setattr(settings, "scheduler_jobstore_url", url, raising=False)
+    return url
+
+
 @pytest.mark.asyncio
-async def test_scheduler_registers_five_jobs_with_expected_hours():
+async def test_scheduler_registers_five_jobs_with_expected_hours(jobstore_url):
     # async so AsyncIOScheduler has a running loop to attach to (it only reports
     # itself as running inside one, and shutdown() raises otherwise).
     svc = SchedulerService()
@@ -262,6 +277,113 @@ async def test_scheduler_registers_five_jobs_with_expected_hours():
         assert "hour='13'" in hours['ibkr_sync_midday']
         assert "hour='20'" in hours['ibkr_sync_evening']
         assert "hour='8'" in hours['full_sync_job']
+    finally:
+        svc.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_missed_slot_is_still_worth_running_for_half_an_hour(jobstore_url):
+    """
+    A deploy overlapping a Berlin slot used to lose that sync outright — the 08:00
+    full_sync on 2026-07-30 went that way. The grace window has to cover a
+    `build --no-cache` rebuild and no more: a genuinely long outage must not dump four
+    stale slots onto a cold container.
+    """
+    svc = SchedulerService()
+    try:
+        svc.start()
+        for job in svc.scheduler.get_jobs():
+            assert job.misfire_grace_time == MISFIRE_GRACE_SECONDS
+            # One catch-up run per job, not one per slot the outage covered.
+            assert job.coalesce is True
+            assert job.max_instances == 1
+    finally:
+        svc.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_restart_preserves_the_run_time_it_is_meant_to_recover(jobstore_url):
+    """
+    The trap that makes a persistent store useless: `add_job(replace_existing=True)`
+    recomputes next_run_time from now, so the missed timestamp is overwritten on the way
+    in and the misfire is never noticed. An unchanged schedule must leave it alone.
+    """
+    first = SchedulerService()
+    first.start()
+    before = {j.id: j.next_run_time for j in first.scheduler.get_jobs()}
+    first.shutdown()
+
+    second = SchedulerService()
+    try:
+        second.start()
+        after = {j.id: j.next_run_time for j in second.scheduler.get_jobs()}
+    finally:
+        second.shutdown()
+
+    assert after == before
+
+
+@pytest.mark.asyncio
+async def test_a_schedule_change_still_takes_effect(jobstore_url, monkeypatch):
+    """
+    The other half: keeping a stored job must not mean a stored job can never be
+    rescheduled. Editing an hour has to replace it, stale run time and all.
+    """
+    first = SchedulerService()
+    first.start()
+    original = first.scheduler.get_job('full_sync_job').next_run_time
+    first.shutdown()
+
+    second = SchedulerService()
+    try:
+        # Same id, a different hour: the trigger repr differs, so it is replaced.
+        real_add_or_keep = SchedulerService._add_or_keep
+
+        def shifted(self, job_id, func, trigger, name):
+            if job_id == 'full_sync_job':
+                trigger = CronTrigger(hour=9, minute=0, timezone='Europe/Berlin')
+            return real_add_or_keep(self, job_id, func, trigger, name)
+
+        monkeypatch.setattr(SchedulerService, "_add_or_keep", shifted)
+        second.start()
+        job = second.scheduler.get_job('full_sync_job')
+        assert "hour='9'" in str(job.trigger)
+        assert job.next_run_time != original
+    finally:
+        second.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_jobs_are_serializable_into_the_persistent_store(jobstore_url):
+    """
+    The registered targets must be importable by name. They were bound methods, which
+    an in-memory store holds happily and a persistent one cannot: pickling
+    `self.full_sync_job` drags the live AsyncIOScheduler in with it. A store round-trip
+    through a *fresh* service proves the references survive a process boundary.
+    """
+    first = SchedulerService()
+    first.start()
+    first.shutdown()
+
+    second = SchedulerService()
+    try:
+        second.start()
+        funcs = {job.id: job.func for job in second.scheduler.get_jobs()}
+        assert funcs['full_sync_job'] is full_sync_job_entry
+        assert funcs['ibkr_sync_midday'] is ibkr_only_sync_job_entry
+        assert funcs['market_sync_us_close'] is market_data_only_sync_job_entry
+    finally:
+        second.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_an_empty_jobstore_url_keeps_the_scheduler_in_memory(monkeypatch):
+    """The escape hatch, so a read-only or ephemeral filesystem can still run."""
+    monkeypatch.setattr(settings, "scheduler_jobstore_url", "", raising=False)
+    svc = SchedulerService()
+    try:
+        svc.start()
+        assert len(svc.scheduler.get_jobs()) == 5
     finally:
         svc.shutdown()
 

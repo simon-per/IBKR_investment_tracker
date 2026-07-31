@@ -10,6 +10,10 @@ failure would move around as tests were reordered.
 So every test runs with the limiter off and write auth off, i.e. the behaviour the
 suite was written against. `tests/test_api_hardening.py` re-enables them explicitly,
 which is the only place their behaviour is the thing under test.
+
+The scheduler's job store is neutralised for the same reason: its default path is
+relative to the working directory, so a test that starts a scheduler would drop a
+`scheduler_jobs.db` into the repo and carry state into the next run.
 """
 import pytest
 
@@ -18,9 +22,10 @@ from app.config import settings
 
 
 @pytest.fixture(autouse=True)
-def _neutral_middleware_state(monkeypatch):
+def _neutral_process_state(monkeypatch):
     monkeypatch.setattr(settings, "rate_limit_per_minute", 0, raising=False)
     monkeypatch.setattr(settings, "api_admin_token", "", raising=False)
+    monkeypatch.setattr(settings, "scheduler_jobstore_url", "", raising=False)
     rate_limit.reset()
     yield
     rate_limit.reset()
