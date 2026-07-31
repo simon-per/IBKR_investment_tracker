@@ -52,6 +52,16 @@ async def db():
 
 async def seed(session: AsyncSession, base_currency: str = "EUR") -> None:
     session.add(AppSetting(key="base_currency", value=base_currency))
+
+    # `trades` and `corporate_actions` store money in the trade's OWN currency — there
+    # is no _eur column on either — so every non-EUR row needs a native->EUR rate before
+    # the base-currency projection. A flat 0.5 makes the two steps individually visible
+    # in the assertions below.
+    d = WINDOW_START - timedelta(days=5)
+    while d <= TODAY:
+        session.add(ExchangeRate(date=d, from_currency="USD", to_currency="EUR",
+                                 rate=Decimal("0.5"), source="test"))
+        d += timedelta(days=1)
     session.add(Security(id=1, isin="US0378331005", symbol="AAPL", description="Apple",
                          currency="USD", conid=103, asset_category="STK", exchange="NASDAQ"))
     session.add(Security(id=2, isin="NL0010273215", symbol="ASML", description="ASML",
@@ -171,12 +181,83 @@ async def test_a_trades_amount_is_its_net_cash_effect(db):
     await seed(db)
     trades = {r["ib_key"]: r for r in (await fetch(db))["items"] if r["kind"] == TRADE}
 
-    # proceeds already carry IBKR's sign, commission is separately negative.
-    assert trades["T-BUY"]["amount_base"] == -1001.0
-    assert trades["T-SELL"]["amount_base"] == 1199.0
-    assert trades["T-SELL"]["realized_pnl_base"] == 199.0
+    # proceeds already carry IBKR's sign, commission is separately negative — and both
+    # are USD here, so they convert at 0.5 before the (identity) EUR base projection.
+    assert trades["T-BUY"]["amount_base"] == pytest.approx(-1001.0 * 0.5)
+    assert trades["T-SELL"]["amount_base"] == pytest.approx(1199.0 * 0.5)
+    assert trades["T-SELL"]["realized_pnl_base"] == pytest.approx(199.0 * 0.5)
     # A buy realizes nothing; that is absent, not zero.
     assert trades["T-BUY"]["realized_pnl_base"] is None
+    # A EUR trade needs no conversion at all.
+    assert trades["T-ORPHAN"]["amount_base"] == pytest.approx(49.0)
+
+
+@pytest.mark.asyncio
+async def test_a_native_currency_amount_is_converted_before_it_is_projected(db):
+    """
+    The bug this caught in production. `trades.proceeds` and `realized_pnl` are in the
+    trade's OWN currency — unlike `cash_flows.amount_eur`, which ingest pre-converts —
+    so applying only the EUR->base factor both skips native->EUR and then scales a
+    number that was never EUR. A CAD 30.27 realized gain was reported as CHF 27.85 (the
+    EUR->CHF factor) instead of roughly CHF 18.
+
+    Two independent factors here, so a single-step conversion cannot pass by accident:
+    USD->EUR at 0.5 and EUR->CHF at 2.0.
+    """
+    await seed(db, base_currency="CHF")
+    d = WINDOW_START - timedelta(days=5)
+    while d <= TODAY:
+        db.add(ExchangeRate(date=d, from_currency="EUR", to_currency="CHF",
+                            rate=Decimal("2.0"), source="test"))
+        d += timedelta(days=1)
+    await db.commit()
+
+    trades = {r["ib_key"]: r for r in (await fetch(db))["items"] if r["kind"] == TRADE}
+
+    # 1199 USD -> 599.5 EUR -> 1199 CHF. Numerically back where it started, which is
+    # exactly why the factors were chosen: the buggy one-step path gives 2398.
+    assert trades["T-SELL"]["amount_base"] == pytest.approx(1199.0)
+    assert trades["T-SELL"]["realized_pnl_base"] == pytest.approx(199.0)
+    # The EUR trade only takes the second step.
+    assert trades["T-ORPHAN"]["amount_base"] == pytest.approx(49.0 * 2.0)
+
+
+@pytest.mark.asyncio
+async def test_an_unconvertible_amount_is_blank_rather_than_mis_scaled(db):
+    """
+    No rate for the pair: the row still appears with the figure absent. Dropping it
+    would hide a trade from the ledger, and passing the native number through would
+    report a TWD figure as CHF — the shape that once made a sale read ~35x high.
+    """
+    await seed(db)
+    db.add(Trade(
+        ib_key="T-TWD", conid="777", security_id=None, symbol="2330",
+        trade_date=TODAY - timedelta(days=10), buy_sell="SELL",
+        quantity=Decimal("-12"), price=Decimal("1000"), proceeds=Decimal("12000"),
+        commission=Decimal("-20"), currency="TWD", realized_pnl=Decimal("500"),
+    ))
+    await db.commit()
+
+    row = next(r for r in (await fetch(db))["items"] if r["ib_key"] == "T-TWD")
+    assert row["amount_base"] is None
+    assert row["realized_pnl_base"] is None
+    # But the non-money columns still carry what is known.
+    assert row["quantity"] == -12.0 and row["currency"] == "TWD"
+
+
+@pytest.mark.asyncio
+async def test_a_buy_realizes_nothing_and_says_so(db):
+    """
+    IBKR sends fifoPnlRealized=0 on every BUY. Rendering that as 0.00 asserts a realized
+    result where there is none — the same rule that keeps a corporate action's price
+    blank. On this account it was 67 rows of noise against 4 real ones.
+    """
+    await seed(db)
+    trades = [r for r in (await fetch(db))["items"] if r["kind"] == TRADE]
+
+    buys = [r for r in trades if r["subtype"] == "BUY"]
+    assert buys and all(r["realized_pnl_base"] is None for r in buys)
+    assert any(r["realized_pnl_base"] is not None for r in trades if r["subtype"] == "SELL")
 
 
 @pytest.mark.asyncio
@@ -317,7 +398,7 @@ async def test_amounts_are_projected_into_the_base_currency(db):
     **its own date** — a two-year-old trade must not be restated at today's rate.
     """
     await seed(db, base_currency="CHF")
-    d = WINDOW_START
+    d = WINDOW_START - timedelta(days=5)
     while d <= TODAY:
         # A deliberately moving rate: a single factor would hide a date mix-up.
         rate = "0.90" if d < TODAY - timedelta(days=50) else "1.10"
@@ -327,11 +408,14 @@ async def test_amounts_are_projected_into_the_base_currency(db):
     await db.commit()
 
     rows = {r["ib_key"]: r for r in (await fetch(db))["items"]}
-    # Deposit sits 90 days back, in the 0.90 era.
+    # The deposit sits 90 days back, in the 0.90 era. amount_eur is pre-converted at
+    # ingest, so this one takes the EUR->base step only.
     assert rows["CF-DEP"]["amount_base"] == pytest.approx(2000 * 0.90)
-    # The sale sits 40 days back, in the 1.10 era.
-    assert rows["T-SELL"]["amount_base"] == pytest.approx(1199 * 1.10)
-    assert rows["T-SELL"]["realized_pnl_base"] == pytest.approx(199 * 1.10)
+    # The sale sits 40 days back, in the 1.10 era, and is USD — both steps.
+    assert rows["T-SELL"]["amount_base"] == pytest.approx(1199 * 0.5 * 1.10)
+    assert rows["T-SELL"]["realized_pnl_base"] == pytest.approx(199 * 0.5 * 1.10)
+    # The 200-day-old transfer picks up the older rate, not today's.
+    assert rows["CF-XFER"]["amount_base"] == pytest.approx(0)
 
 
 # ── CSV ───────────────────────────────────────────────────────────────────────

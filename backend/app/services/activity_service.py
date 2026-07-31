@@ -37,6 +37,7 @@ from app.repositories.cash_flow_repository import CashFlowRepository
 from app.repositories.corporate_action_repository import CorporateActionRepository
 from app.repositories.dividend_repository import DividendRepository
 from app.repositories.trade_repository import TradeRepository
+from app.services.currency_service import CurrencyService
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,7 @@ def _csv_num(value: Optional[float]) -> str:
 class ActivityService:
     def __init__(self, db: AsyncSession):
         self.db = db
+        self.currency_service = CurrencyService(db)
 
     async def get_activity(
         self,
@@ -151,6 +153,49 @@ class ActivityService:
             "end_date": end_date.isoformat(),
         }
 
+    async def _to_base(
+        self, amount: Optional[Decimal], currency: Optional[str], on_date: date, base_fx
+    ) -> Optional[Decimal]:
+        """
+        A **native-currency** amount projected into the base currency, in two steps.
+
+        `trades` and `corporate_actions` store money in the trade's own currency — there
+        is no `_eur` column on either, unlike `cash_flows.amount_eur` and
+        `dividend_payments.*_eur`, which the ingest pipeline pre-converts. So a single
+        `base_fx.convert()` here is wrong twice over: it skips native→EUR entirely and
+        then applies EUR→base to a number that was never EUR. Caught against production
+        data, where a CAD 30.27 realized gain was reported as CHF 27.85 (the EUR→CHF
+        factor) instead of roughly CHF 18. `_realized_from_trades` already does it in
+        these two steps; this matches it.
+
+        Returns None when no rate is available, so the row still appears with the figure
+        blank rather than being dropped or silently mis-scaled — the same rule the tax
+        report follows.
+        """
+        if amount is None:
+            return None
+        # Zero is zero in every currency, and demanding a rate would blank the
+        # commission-free and cash-neutral rows.
+        if not amount:
+            return Decimal("0")
+
+        eur = amount
+        if currency and currency != "EUR":
+            try:
+                eur = await self.currency_service.convert_to_eur(
+                    amount=amount, from_currency=currency, target_date=on_date
+                )
+            # convert_to_eur raises ValueError when neither provider covers the pair,
+            # but the read path must survive anything: this is a ledger, and one
+            # unconvertible row must not 500 the whole page.
+            except Exception as e:
+                logger.warning(
+                    "Activity: no %s->EUR rate for %s (%s); leaving the amount blank",
+                    currency, on_date, e,
+                )
+                return None
+        return base_fx.convert(eur, on_date)
+
     async def _trades(self, start: date, end: date, base_fx) -> List[ActivityRow]:
         trades = await TradeRepository(self.db).get_between(start, end)
         out = []
@@ -160,6 +205,11 @@ class ActivityService:
             # net cash effect is the sum.
             proceeds = t.proceeds or Decimal("0")
             commission = t.commission or Decimal("0")
+            # A BUY realizes nothing. IBKR still sends fifoPnlRealized=0 on every buy,
+            # and rendering that as 0.00 asserts a realized result where there is none —
+            # the same rule that keeps a corporate action's price blank.
+            realized = t.realized_pnl if (t.buy_sell or "").upper() == "SELL" else None
+
             out.append(ActivityRow(
                 date=t.trade_date.isoformat(),
                 kind=TRADE,
@@ -169,11 +219,12 @@ class ActivityService:
                 quantity=_f(t.quantity),
                 price=_f(t.price),
                 currency=t.currency,
-                amount_base=_f(base_fx.convert(proceeds + commission, t.trade_date)),
-                realized_pnl_base=_f(
-                    base_fx.convert(t.realized_pnl, t.trade_date)
-                    if t.realized_pnl is not None else None
-                ),
+                amount_base=_f(await self._to_base(
+                    proceeds + commission, t.currency, t.trade_date, base_fx
+                )),
+                realized_pnl_base=_f(await self._to_base(
+                    realized, t.currency, t.trade_date, base_fx
+                )),
                 counts_as_money_in=None,
                 source=None,
                 ib_key=t.ib_key,
@@ -220,11 +271,11 @@ class ActivityService:
                 quantity=_f(a.quantity),
                 price=None,
                 currency=a.currency,
-                # Usually zero — a split moves no cash. Non-zero for cash-in-lieu.
-                amount_base=_f(
-                    base_fx.convert(a.proceeds, a.action_date)
-                    if a.proceeds is not None else None
-                ),
+                # Usually zero — a split moves no cash. Non-zero for cash-in-lieu, and
+                # native-currency like trades, so it takes the same two-step conversion.
+                amount_base=_f(await self._to_base(
+                    a.proceeds, a.currency, a.action_date, base_fx
+                )),
                 realized_pnl_base=None,
                 counts_as_money_in=None,
                 source=None,
