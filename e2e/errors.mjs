@@ -49,5 +49,31 @@ const fund = await page.getByRole('tabpanel').innerText()
 log(/didn't respond/.test(fund), 'Fundamentals reports the failure')
 log(!/Click "Sync Now"/.test(fund), 'Fundamentals does not tell the user to run a sync that cannot work')
 
+// The rebalance panel is the one surface whose state survives the outage: targets
+// live in localStorage, so a returning user has them while the positions they
+// apply to are missing. That combination drew a whole plan out of the failure —
+// every target rendered as an "unheld" row reading "Not currently held", under a
+// header claiming 0 positions outside the band. Both are confident falsehoods
+// about the portfolio, and neither is reachable without a saved target, which is
+// why the checks above never caught it.
+await page.evaluate(() =>
+  localStorage.setItem('allocationTargets', JSON.stringify({ 1: 30, 2: 25, 3: 20 })),
+)
+await page.reload({ waitUntil: 'domcontentloaded' })
+await page.waitForTimeout(12000)
+await page.getByRole('tab', { name: 'Allocation' }).click()
+await page.waitForTimeout(9000)
+
+const alloc = await page.getByRole('tabpanel').innerText()
+log(/Couldn't load positions/.test(alloc), 'the rebalance panel reports the failure')
+log(
+  !/Not currently held/.test(alloc),
+  'the rebalance panel does not call held positions "not currently held"',
+)
+log(
+  !/position\(s\) outside the/.test(alloc) && !/Nothing to do/.test(alloc),
+  'the rebalance panel does not report an all-clear it cannot know',
+)
+
 done()
 await browser.close()

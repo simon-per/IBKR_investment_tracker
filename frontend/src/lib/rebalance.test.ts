@@ -182,6 +182,29 @@ describe('computeRebalancePlan', () => {
     })
   })
 
+  describe('judgedCount separates "nothing to do" from "nothing to judge"', () => {
+    it('counts the rows that have both a target and a weight', () => {
+      const plan = computeRebalancePlan(equalFour, { 1: 25, 2: 25 })
+      expect(plan.judgedCount).toBe(2)
+    })
+
+    it('is zero when no position could be weighed, even with targets set', () => {
+      // The outage shape: targets saved, no positions loaded. Counting only rows
+      // *outside* the band reports 0 here, which reads as an all-clear.
+      const plan = computeRebalancePlan([], { 1: 30, 2: 25, 3: 20 })
+      expect(plan.judgedCount).toBe(0)
+      expect(plan.balanced).toBe(false)
+      expect(plan.rows.filter((r) => r.withinBand === false)).toEqual([])
+    })
+
+    it('is zero when every target sits on an unpriced position', () => {
+      // Same reading, with a working backend: nothing is judgeable.
+      const plan = computeRebalancePlan([pos(1, 'GHOST', 0, null)], { 1: 100 })
+      expect(plan.judgedCount).toBe(0)
+      expect(plan.balanced).toBe(false)
+    })
+  })
+
   describe('degenerate inputs', () => {
     it('is not balanced when nothing has a target', () => {
       // Vacuous truth would render "nothing to do" on an unconfigured portfolio.

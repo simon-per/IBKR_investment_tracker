@@ -130,6 +130,62 @@ describe('RebalanceCard', () => {
     expect(screen.getByText(/Targets sum to 50.0%, not 100%/)).toBeTruthy()
   })
 
+  describe('when positions could not be loaded', () => {
+    // Regression: with the backend down and targets saved, the panel drew a whole
+    // plan out of the outage — every target became an "unheld" row reading "Not
+    // currently held", under a header claiming 0 positions outside the band. Two
+    // confident falsehoods about the portfolio.
+    beforeEach(() => {
+      localStorage.setItem('allocationTargets', JSON.stringify({ 1: 30, 2: 25, 3: 20 }))
+    })
+
+    function renderUnloaded() {
+      return withProviders(<RebalanceCard positions={undefined} />)
+    }
+
+    it('says so instead of claiming nothing is outside the band', () => {
+      renderUnloaded()
+      expect(screen.getByText(/Couldn't load positions/)).toBeTruthy()
+      expect(screen.queryByText(/outside the/)).toBeNull()
+      expect(screen.queryByText(/Nothing to do/)).toBeNull()
+    })
+
+    it('does not describe held positions as not currently held', () => {
+      renderUnloaded()
+      expect(screen.queryByText('Not currently held')).toBeNull()
+    })
+
+    it('renders no table at all rather than one built from an empty list', () => {
+      const { container } = renderUnloaded()
+      expect(container.querySelector('table')).toBeNull()
+    })
+
+    it('reassures that the saved targets survive the outage', () => {
+      renderUnloaded()
+      expect(screen.getByText(/saved targets are untouched/)).toBeTruthy()
+      expect(readTargets()).toEqual({ 1: 30, 2: 25, 3: 20 })
+    })
+
+    it('treats an explicit query error the same as absent data', () => {
+      withProviders(<RebalanceCard positions={[]} isError />)
+      expect(screen.getByText(/Couldn't load positions/)).toBeTruthy()
+    })
+
+    it('distinguishes an empty portfolio from one that failed to load', () => {
+      // An empty array is "none held", which is a real answer and not an error.
+      withProviders(<RebalanceCard positions={[]} />)
+      expect(screen.queryByText(/Couldn't load positions/)).toBeNull()
+    })
+  })
+
+  it('says nothing could be compared when no target is judgeable', () => {
+    // Positions loaded fine, but every target sits on an unpriced holding — so
+    // "0 outside the band" would again read as an all-clear.
+    localStorage.setItem('allocationTargets', JSON.stringify({ 1: 100 }))
+    renderCard([pos(1, 'GHOST', 0, null)])
+    expect(screen.getByText(/No target could be compared/)).toBeTruthy()
+  })
+
   it('reports nothing to do when every target is inside the band', () => {
     localStorage.setItem('allocationTargets', JSON.stringify({ 1: 25, 2: 25, 3: 25, 4: 25 }))
     renderCard()

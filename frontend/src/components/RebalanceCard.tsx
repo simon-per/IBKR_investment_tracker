@@ -64,9 +64,10 @@ function driftClass(row: DriftRow): string {
 interface RebalanceCardProps {
   positions: DriftInput[] | undefined
   isLoading?: boolean
+  isError?: boolean
 }
 
-export function RebalanceCard({ positions, isLoading }: RebalanceCardProps) {
+export function RebalanceCard({ positions, isLoading, isError }: RebalanceCardProps) {
   const curSym = useCurrencySymbol()
   const [targets, setTargets] = useState<TargetMap>(() => readTargets())
   const [bandPp, setBandPp] = useState(() => {
@@ -122,12 +123,26 @@ export function RebalanceCard({ positions, isLoading }: RebalanceCardProps) {
 
   const shortfall = targetShortfallPp(plan)
   const hasTargets = Object.keys(targets).length > 0
+  /**
+   * `undefined` is "not loaded", not "none held" — an empty array is the latter.
+   * Without this the panel drew a whole plan out of an outage: every saved target
+   * became an *unheld* row reading "Not currently held", under a header claiming
+   * 0 positions outside the band. Two confident falsehoods about the portfolio,
+   * which is the failure `e2e/errors.mjs` exists to catch.
+   */
+  const unavailable = isError || positions === undefined
 
-  const summary = !hasTargets
-    ? 'No targets set — enter a weight against any position to start.'
-    : plan.balanced
-      ? `Every target is within ${bandPp} pp. Nothing to do.`
-      : `${plan.rows.filter((r) => r.withinBand === false).length} position(s) outside the ${bandPp} pp band.`
+  const summary = unavailable
+    ? "Couldn't load positions, so drift can't be measured."
+    : !hasTargets
+      ? 'No targets set — enter a weight against any position to start.'
+      : plan.balanced
+        ? `Every target is within ${bandPp} pp. Nothing to do.`
+        : plan.judgedCount === 0
+          // Not "0 outside the band": nothing could be compared at all, which is a
+          // different statement and must not read as an all-clear.
+          ? 'No target could be compared against a current weight yet.'
+          : `${plan.rows.filter((r) => r.withinBand === false).length} position(s) outside the ${bandPp} pp band.`
 
   return (
     <Card>
@@ -142,6 +157,14 @@ export function RebalanceCard({ positions, isLoading }: RebalanceCardProps) {
         <CardContent id="rebalance-panel" className="space-y-4">
           {isLoading ? (
             <div className="h-24 bg-muted animate-pulse rounded" />
+          ) : unavailable ? (
+            // No table at all. Rendering one from an empty position list is what
+            // produced the "Not currently held" rows.
+            <p className="text-sm text-red-800 dark:text-red-200">
+              Couldn't load your positions — the backend didn't respond, so current weights
+              and drift are unavailable. Your saved targets are untouched. It retries
+              automatically.
+            </p>
           ) : (
             <>
               <div className="flex flex-wrap items-center gap-4 text-sm">

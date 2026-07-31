@@ -63,6 +63,15 @@ export interface RebalancePlan {
   unmanagedPct: number
   /** Every managed row inside its band. True when there is nothing to do. */
   balanced: boolean
+  /**
+   * How many rows could be judged at all — a target *and* a current weight.
+   *
+   * Zero is not the same as balanced, and conflating them reads as an all-clear:
+   * a caller that only counts rows outside the band reports "0 outside" when in
+   * fact nothing could be compared, which is what a portfolio whose positions
+   * have not loaded looks like.
+   */
+  judgedCount: number
   /** Rows excluded from advice because the portfolio cannot value them. */
   unpricedCount: number
 }
@@ -157,6 +166,7 @@ export function computeRebalancePlan(
     // Vacuously true with nothing targeted would read as "nothing to do" on a
     // portfolio nobody has set up yet, so an empty plan is not balanced.
     balanced: judged.length > 0 && judged.every((r) => r.withinBand),
+    judgedCount: judged.length,
     unpricedCount: rows.filter((r) => r.unpriced).length,
   }
 }

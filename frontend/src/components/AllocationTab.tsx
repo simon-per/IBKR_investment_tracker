@@ -415,7 +415,7 @@ export function AllocationTab() {
 
   // The same key the Dashboard uses, so this is a cache hit rather than a
   // second request for data already on the page.
-  const { data: positions, isLoading: positionsLoading } = useQuery({
+  const { data: positions, isLoading: positionsLoading, isError: positionsError } = useQuery({
     queryKey: ['portfolio', 'positions'],
     queryFn: () => api.getPositions(),
   })
@@ -543,7 +543,11 @@ export function AllocationTab() {
         />
       </div>
 
-      <RebalanceCard positions={positions} isLoading={positionsLoading} />
+      <RebalanceCard
+        positions={positions}
+        isLoading={positionsLoading}
+        isError={positionsError}
+      />
     </div>
   )
 }
