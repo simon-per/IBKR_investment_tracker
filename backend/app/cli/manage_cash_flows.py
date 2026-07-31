@@ -29,7 +29,7 @@ import argparse
 import asyncio
 import logging
 import sys
-from datetime import datetime
+from app.clock import utcnow
 from decimal import Decimal
 from typing import Dict, Optional, Tuple
 
@@ -139,7 +139,7 @@ async def cmd_reclassify(
 
 
 async def run(args) -> int:
-    started_at = datetime.now()
+    started_at = utcnow()
 
     async with AsyncSessionLocal() as db:
         try:

@@ -1,5 +1,6 @@
 import logging
 from datetime import datetime, timedelta, timezone
+from app.clock import utcnow
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query
@@ -82,7 +83,7 @@ async def get_dividend_summary(
 
     # Auto-refresh when empty or stale, throttled so we don't enqueue on every load.
     if not _sync_in_progress and _is_summary_stale(summary):
-        now = datetime.now()
+        now = utcnow()
         throttled = _last_auto_sync is not None and (now - _last_auto_sync) < _AUTO_SYNC_MIN_INTERVAL
         if not throttled:
             _last_auto_sync = now

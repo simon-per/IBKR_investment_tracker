@@ -39,7 +39,7 @@ import argparse
 import asyncio
 import logging
 import sys
-from datetime import datetime
+from app.clock import utcnow
 from typing import Optional
 
 from sqlalchemy import select
@@ -94,7 +94,7 @@ async def purge(
     security_id: Optional[int] = None,
     dry_run: bool = False,
 ) -> int:
-    started_at = datetime.now()
+    started_at = utcnow()
 
     async with AsyncSessionLocal() as db:
         try:

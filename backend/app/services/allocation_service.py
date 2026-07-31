@@ -4,8 +4,9 @@ Allocation service for fetching and caching sector/geographic data for securitie
 import asyncio
 import logging
 import random
-from datetime import datetime, timedelta
-from typing import Optional, Dict, List
+from datetime import timedelta
+from app.clock import utcnow
+from typing import Optional, Dict
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 import yfinance as yf
@@ -117,7 +118,7 @@ class AllocationService:
         securities = list(result.scalars().all())
 
         # Filter securities that need updates
-        cutoff_date = datetime.now() - timedelta(days=7)
+        cutoff_date = utcnow() - timedelta(days=7)
         securities_to_update = []
 
         for security in securities:
@@ -153,7 +154,7 @@ class AllocationService:
                 security.sector = result.get('sector')
                 security.industry = result.get('industry')
                 security.country = result.get('country')
-                security.allocation_last_updated = datetime.now()
+                security.allocation_last_updated = utcnow()
                 updated_count += 1
             else:
                 error_count += 1

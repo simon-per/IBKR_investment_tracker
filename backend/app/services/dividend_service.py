@@ -4,7 +4,8 @@ Fetches dividend ex-dates from yfinance, computes income from tax lots,
 converts to EUR, and provides monthly summary data.
 """
 from typing import Dict, List, Optional
-from datetime import datetime, timedelta, date
+from datetime import timedelta, date
+from app.clock import utcnow
 from decimal import Decimal
 from collections import defaultdict
 import logging
@@ -12,7 +13,7 @@ import random
 import asyncio
 import yfinance as yf
 
-from sqlalchemy import select, and_, func
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.security import Security
@@ -109,7 +110,7 @@ class DividendService:
             try:
                 # Staleness check: skip if we fetched dividends < 7 days ago
                 last_fetch = await self.repo.get_last_fetch_time(security.id)
-                if last_fetch and (datetime.now() - last_fetch) < timedelta(days=7):
+                if last_fetch and (utcnow() - last_fetch) < timedelta(days=7):
                     skipped += 1
                     continue
 
@@ -212,7 +213,7 @@ class DividendService:
                     dp.gross_amount_eur = Decimal("0")
                     dp.withholding_tax_eur = Decimal("0")
                     dp.net_amount_eur = Decimal("0")
-                    dp.last_computed = datetime.now()
+                    dp.last_computed = utcnow()
                     computed += 1
                     continue
 
@@ -239,7 +240,7 @@ class DividendService:
                 dp.net_amount_eur = gross_eur
                 if dp.source is None:
                     dp.source = "yfinance_estimate"
-                dp.last_computed = datetime.now()
+                dp.last_computed = utcnow()
                 computed += 1
 
             except Exception as e:
@@ -295,7 +296,7 @@ class DividendService:
                 g["wht"] += ct["amount"]  # IBKR reports withholding as a negative amount
 
         saved = 0
-        now = datetime.now()
+        now = utcnow()
         for (security_id, pay_date), g in grouped.items():
             gross = g["gross"]
             if gross <= 0:
@@ -565,7 +566,7 @@ class DividendService:
         total_gross = Decimal("0")
         total_wht = Decimal("0")
 
-        now = datetime.now()
+        now = utcnow()
         ytd_net = Decimal("0")
 
         for p in payments:

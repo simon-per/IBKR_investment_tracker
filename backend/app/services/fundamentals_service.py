@@ -1,5 +1,6 @@
 from typing import List, Dict, Optional
-from datetime import datetime, timedelta
+from datetime import datetime
+from app.clock import utcnow
 import logging
 import yfinance as yf
 import random
@@ -11,8 +12,6 @@ from sqlalchemy import select
 from app.repositories.fundamentals_repository import FundamentalsRepository
 from app.services.ttm_growth import ttm_growth_from_quarterly
 from app.models.security import Security
-from app.models.fundamental_metrics import FundamentalMetrics
-from app.models.earnings_event import EarningsEvent
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +149,7 @@ class FundamentalsService:
             logger.info(f"No earnings dates for {security.symbol}")
             return []
 
-        now = datetime.now()
+        now = utcnow()
         events = []
 
         for date_idx, row in earnings_dates.iterrows():

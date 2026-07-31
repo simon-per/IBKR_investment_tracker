@@ -2,6 +2,7 @@
 API endpoints for portfolio allocation data (sector, geography, asset type).
 """
 from fastapi import APIRouter, Depends, HTTPException
+from app.clock import utcnow
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -51,7 +52,7 @@ async def get_allocation_status(db: AsyncSession = Depends(get_db)):
     """
     from sqlalchemy import select, func
     from app.models.security import Security
-    from datetime import datetime, timedelta
+    from datetime import timedelta
 
     # Count securities with/without allocation data
     result = await db.execute(select(func.count(Security.id)))
@@ -63,7 +64,7 @@ async def get_allocation_status(db: AsyncSession = Depends(get_db)):
     securities_with_data = result.scalar()
 
     # Count stale data (>7 days old)
-    cutoff_date = datetime.now() - timedelta(days=7)
+    cutoff_date = utcnow() - timedelta(days=7)
     result = await db.execute(
         select(func.count(Security.id)).where(
             Security.allocation_last_updated < cutoff_date

@@ -1,5 +1,6 @@
 from typing import List, Optional
-from datetime import datetime, timedelta
+from datetime import timedelta
+from app.clock import utcnow
 from sqlalchemy import select, and_
 from sqlalchemy.orm import joinedload
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,7 +28,7 @@ class FundamentalsRepository:
         return list(result.scalars().all())
 
     async def get_stale_metrics(self, days_old: int = 7) -> List[FundamentalMetrics]:
-        cutoff_date = datetime.now() - timedelta(days=days_old)
+        cutoff_date = utcnow() - timedelta(days=days_old)
         result = await self.session.execute(
             select(FundamentalMetrics).where(FundamentalMetrics.last_updated < cutoff_date)
         )
@@ -40,12 +41,12 @@ class FundamentalsRepository:
             for key, value in data.items():
                 if hasattr(existing, key):
                     setattr(existing, key, value)
-            existing.last_updated = datetime.now()
+            existing.last_updated = utcnow()
             await self.session.flush()
             await self.session.refresh(existing)
             return existing
         else:
-            data['last_updated'] = datetime.now()
+            data['last_updated'] = utcnow()
             metrics = FundamentalMetrics(**data)
             self.session.add(metrics)
             await self.session.flush()
@@ -88,7 +89,7 @@ class FundamentalsRepository:
             return event
 
     async def get_upcoming_earnings(self, days_ahead: int = 90) -> List[EarningsEvent]:
-        now = datetime.now()
+        now = utcnow()
         cutoff = now + timedelta(days=days_ahead)
         result = await self.session.execute(
             select(EarningsEvent)
@@ -104,7 +105,7 @@ class FundamentalsRepository:
         return list(result.unique().scalars().all())
 
     async def get_recent_earnings(self, days_back: int = 365) -> List[EarningsEvent]:
-        now = datetime.now()
+        now = utcnow()
         cutoff = now - timedelta(days=days_back)
         result = await self.session.execute(
             select(EarningsEvent)

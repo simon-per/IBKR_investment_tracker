@@ -1,5 +1,6 @@
 from typing import Dict, Optional, List
-from datetime import datetime, timedelta
+from datetime import timedelta
+from app.clock import utcnow
 import logging
 import yfinance as yf
 import random
@@ -197,7 +198,7 @@ class WatchlistService:
 
         # Skip if cache is fresh
         if not force and item.last_synced:
-            age = datetime.now() - item.last_synced
+            age = utcnow() - item.last_synced
             if age < timedelta(hours=self.CACHE_TTL_HOURS):
                 logger.debug(f"{yahoo_ticker} is fresh ({age} old), skipping")
                 return {}
@@ -260,7 +261,7 @@ class WatchlistService:
             "analyst_target": self._safe_float(info.get("targetMeanPrice")),
             "analyst_rating": info.get("recommendationKey"),
             "analyst_count": self._safe_int(info.get("numberOfAnalystOpinions")),
-            "last_synced": datetime.now(),
+            "last_synced": utcnow(),
         }
 
         # Fallback 1 (preferred): P/E / Fwd EPS growth %

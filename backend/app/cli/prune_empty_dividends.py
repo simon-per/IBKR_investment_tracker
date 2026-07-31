@@ -35,7 +35,8 @@ import argparse
 import asyncio
 import logging
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
+from app.clock import utcnow
 from typing import Optional
 
 from sqlalchemy import delete, func, select
@@ -82,7 +83,7 @@ def _is_empty(p: DividendPayment, keep_from: Optional[date] = None) -> bool:
 
 
 async def prune(dry_run: bool) -> int:
-    started_at = datetime.now()
+    started_at = utcnow()
 
     async with AsyncSessionLocal() as db:
         try:

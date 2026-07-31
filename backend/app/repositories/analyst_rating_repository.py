@@ -3,7 +3,8 @@ AnalystRating Repository
 Handles database operations for analyst ratings.
 """
 from typing import List, Optional
-from datetime import datetime, timedelta
+from datetime import timedelta
+from app.clock import utcnow
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -58,13 +59,13 @@ class AnalystRatingRepository:
                 if hasattr(existing, key):
                     setattr(existing, key, value)
             # Always update last_updated timestamp
-            existing.last_updated = datetime.now()
+            existing.last_updated = utcnow()
             await self.session.flush()
             await self.session.refresh(existing)
             return existing
         else:
             # Create new
-            rating_data['last_updated'] = datetime.now()
+            rating_data['last_updated'] = utcnow()
             return await self.create(rating_data)
 
     async def bulk_upsert(self, ratings_data: List[dict]) -> int:
@@ -92,7 +93,7 @@ class AnalystRatingRepository:
         Get ratings that haven't been updated in the specified number of days.
         Useful for determining which ratings need to be refreshed.
         """
-        cutoff_date = datetime.now() - timedelta(days=days_old)
+        cutoff_date = utcnow() - timedelta(days=days_old)
         result = await self.session.execute(
             select(AnalystRating).where(AnalystRating.last_updated < cutoff_date)
         )

@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Dict
 from datetime import datetime
+from app.clock import utcnow
 
 from app.database import get_db
 from app.redact import redact_secrets
@@ -38,7 +39,7 @@ async def sync_ibkr_data(db: AsyncSession = Depends(get_db)):
     Returns:
         Summary of synced data including counts
     """
-    started_at = datetime.now()
+    started_at = utcnow()
     try:
         # Shared pipeline gate + cooldown: this route is public and one Flex
         # round is several requests against a 10/min token budget.

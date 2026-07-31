@@ -27,7 +27,7 @@ import argparse
 import asyncio
 import logging
 import sys
-from datetime import datetime
+from app.clock import utcnow
 from pathlib import Path
 
 from app.database import AsyncSessionLocal
@@ -41,7 +41,7 @@ SYNC_TYPE = "ibkr_manual_xml"
 
 
 async def ingest(path: Path, dry_run: bool = False) -> int:
-    started_at = datetime.now()
+    started_at = utcnow()
     xml_bytes = path.read_bytes()
     print(f"Read {len(xml_bytes):,} bytes from {path}")
 

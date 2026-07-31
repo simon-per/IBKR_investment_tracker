@@ -1,6 +1,7 @@
 import logging
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timezone
+from app.clock import utcnow
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -61,7 +62,7 @@ class SyncRunRepository:
                 details=redact_secrets(details),
                 warnings=redact_secrets(warnings) or None,
                 started_at=started_at,
-                finished_at=datetime.now(),
+                finished_at=utcnow(),
             )
             self.session.add(run)
             await self.session.commit()

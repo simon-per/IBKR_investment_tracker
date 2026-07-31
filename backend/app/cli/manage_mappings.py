@@ -28,7 +28,7 @@ import argparse
 import asyncio
 import logging
 import sys
-from datetime import datetime
+from app.clock import utcnow
 from types import SimpleNamespace
 from typing import Optional, Tuple
 
@@ -123,7 +123,7 @@ async def cmd_list(db) -> int:
         div_age = "-"
         newest = newest_estimate.get(security.id) if security else None
         if newest is not None:
-            div_age = f"{(datetime.now() - newest).days}d"
+            div_age = f"{(utcnow() - newest).days}d"
             if m.updated_at and newest < m.updated_at:
                 flag += "  <-- DIVIDENDS PREDATE MAPPING"
                 predating.append((m, newest))
@@ -305,7 +305,7 @@ async def cmd_disable(
 
 
 async def run(args) -> int:
-    started_at = datetime.now()
+    started_at = utcnow()
 
     async with AsyncSessionLocal() as db:
         try:

@@ -1,4 +1,5 @@
 import logging
+from app.clock import utcnow
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -119,7 +120,7 @@ async def get_fundamentals_status(db: AsyncSession = Depends(get_db)):
     from app.models.fundamental_metrics import FundamentalMetrics
     from app.models.earnings_event import EarningsEvent
     from app.models.security import Security
-    from datetime import datetime, timedelta
+    from datetime import timedelta
 
     # Count total securities
     total_result = await db.execute(select(func.count(Security.id)))
@@ -130,7 +131,7 @@ async def get_fundamentals_status(db: AsyncSession = Depends(get_db)):
     total_metrics = metrics_result.scalar() or 0
 
     # Count stale metrics
-    seven_days_ago = datetime.now() - timedelta(days=7)
+    seven_days_ago = utcnow() - timedelta(days=7)
     stale_result = await db.execute(
         select(func.count(FundamentalMetrics.id))
         .where(FundamentalMetrics.last_updated < seven_days_ago)

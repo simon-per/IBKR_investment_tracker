@@ -3,6 +3,7 @@ Analyst Ratings Router
 API endpoints for syncing and retrieving analyst ratings.
 """
 from fastapi import APIRouter, Depends, HTTPException
+from app.clock import utcnow
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -101,14 +102,14 @@ async def get_analyst_ratings_status(db: AsyncSession = Depends(get_db)):
     """
     from sqlalchemy import select, func
     from app.models.analyst_rating import AnalystRating
-    from datetime import datetime, timedelta
+    from datetime import timedelta
 
     # Get total count
     result = await db.execute(select(func.count(AnalystRating.id)))
     total_ratings = result.scalar() or 0
 
     # Get count of stale ratings (older than 3 days)
-    three_days_ago = datetime.now() - timedelta(days=3)
+    three_days_ago = utcnow() - timedelta(days=3)
     result = await db.execute(
         select(func.count(AnalystRating.id))
         .where(AnalystRating.last_updated < three_days_ago)

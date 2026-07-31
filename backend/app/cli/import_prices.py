@@ -41,7 +41,8 @@ import asyncio
 import json
 import logging
 import sys
-from datetime import date, datetime
+from datetime import date
+from app.clock import utcnow
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -141,7 +142,7 @@ async def _resolve_security(db, target: Dict, security_id_override: Optional[int
 async def import_prices(
     path: Path, dry_run: bool = False, security_id: Optional[int] = None
 ) -> int:
-    started_at = datetime.now()
+    started_at = utcnow()
 
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
