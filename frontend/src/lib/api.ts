@@ -631,6 +631,42 @@ export class UnauthorizedError extends Error {
   }
 }
 
+/**
+ * Turn an error body into something worth showing a person.
+ *
+ * FastAPI answers a *validation* failure (422) with `detail` as an **array of
+ * objects**, not a string — `[{loc: ["query","year"], msg: "Input should be a
+ * valid integer", ...}]`. Passing that straight to `new Error()` stringifies it
+ * to `[object Object]`, which is what the user saw. Ordinary `HTTPException`s
+ * (400, 404, 409) do send a string, so only the validation shape needed handling.
+ *
+ * The `loc` prefix names the container rather than the field — `query`, `body`,
+ * `path` — so it is dropped: "year: Input should be a valid integer" is the part
+ * that helps.
+ */
+export function describeErrorBody(body: unknown, status: number, statusText: string): string {
+  const detail = (body as { detail?: unknown } | null | undefined)?.detail;
+
+  if (typeof detail === 'string' && detail.trim()) return detail;
+
+  if (Array.isArray(detail)) {
+    const parts = detail
+      .map((entry) => {
+        const item = entry as { loc?: unknown; msg?: unknown };
+        const field = Array.isArray(item?.loc)
+          ? item.loc.filter((p) => p !== 'query' && p !== 'body' && p !== 'path').join('.')
+          : '';
+        const msg = typeof item?.msg === 'string' ? item.msg : '';
+        if (field && msg) return `${field}: ${msg}`;
+        return msg || field;
+      })
+      .filter(Boolean);
+    if (parts.length) return parts.join('; ');
+  }
+
+  return `HTTP ${status}: ${statusText}`;
+}
+
 class ApiClient {
   private baseUrl: string;
 
@@ -655,8 +691,8 @@ class ApiClient {
       });
 
       if (!response.ok) {
-        const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
-        const detail = error.detail || `HTTP ${response.status}: ${response.statusText}`;
+        const error = await response.json().catch(() => null);
+        const detail = describeErrorBody(error, response.status, response.statusText);
         if (response.status === 401) {
           // Distinguished so the UI can point at the admin key rather than showing a
           // raw HTTP error for what is really "you haven't unlocked writes".
