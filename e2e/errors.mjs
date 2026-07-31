@@ -22,6 +22,16 @@ const perf = await page.getByRole('tabpanel').innerText()
 log(/didn't respond/.test(perf), 'Performance shows an explicit backend-error message')
 log(!/No portfolio data yet/.test(perf), 'does NOT show the "sync to get started" empty state')
 
+// `/api/settings` is fetched with `staleTime: Infinity`, so a failed fetch is sticky
+// for the session. Without a warning the header labels every figure `€` while the
+// numbers behind them are whatever the account actually uses — right figures, wrong
+// label, and nothing on screen inviting doubt.
+const alerts = (await page.getByRole('alert').allInnerTexts()).join(' | ')
+log(
+  /Couldn't read your display currency/.test(alerts),
+  'the header says the display currency is assumed, not certain',
+)
+
 for (const name of ['Monthly Returns', 'Monthly Deployment', 'Dividend Income', 'Performance Attribution']) {
   const btn = page.getByRole('button', { name: new RegExp(name) }).first()
   if ((await btn.count()) === 0) { log(false, `${name}: header missing`); continue }
