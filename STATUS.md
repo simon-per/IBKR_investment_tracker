@@ -299,11 +299,43 @@ Four rules there are load-bearing and should not be "simplified":
 Also: an empty plan is deliberately **not** "balanced" — vacuous truth would render *nothing to do* on
 a portfolio nobody has configured yet.
 
+**`SOXQ` was missing from the ETF look-through table, and that hid it from two treemaps.**
+`is_known_etf` gates the whole sector/geography distribution in `get_portfolio_allocation`, so with no
+`app/etf_mappings.py` entry the position fell through to `security.asset_type` (column default
+`"Stock"`) and to `security.sector`/`security.country`, which Yahoo leaves empty for a fund. A holding
+bought 2026-07-27 appeared in **neither** the sector nor the geographic breakdown and was counted as a
+stock in the asset-type one. **No sync could have repaired it** — the missing data is a mapping, not a
+fetch — so the tab's "securities missing allocation data" warning could not lead anywhere. Every other
+ETF this account holds was already mapped; SOXQ was the only gap.
+
+Its percentages are approximate, as the whole file is, and **worth one look**: the sector (100%
+Technology) is unambiguous for a pure semiconductor fund, but the geographic split is an estimate
+skewed more US than SMH's because the PHLX SOX index is limited to US-listed names.
+
+`tests/test_etf_mappings.py` now guards the table, which nothing did — each row's sector and
+geographic weights must sum to 100, because they are multiplied by the position's own weight and a
+column summing to 90 silently scales that ETF's entire contribution to 0.9 with nothing looking wrong
+on screen. All eight pre-existing rows already passed.
+
+**The cash-flow CLI had no tests at all.** `manage_cash_flows.py` was the only one in the family
+without a file (mappings, price-import, prune and purge all have one) while guarding the highest-risk
+number in contributions. Now 18 tests, 0% → 97%, pinning the money-added boundary rather than the
+printing. **The CLI itself is correct** — no defect found. Backend suite 467 → 523.
+
+Coverage-led hunting is what found both of these; `pytest-cov` is already installed and the backend
+sits at ~70%. `taxlot_repository` (58%) and `benchmark_service` (40%) are the next pure-computation
+gaps.
+
 Four things were checked and are **not** bugs, recorded so nobody re-chases them: `ActivityTab`'s
 `amount_base ?? 0` (unreachable — `BaseFx.convert` never returns `None`), `DividendKpiCards`'
 `prev_net_eur ?? 0` (over-permissive TS type; the backend always emits a float),
 `PortfolioValuePoint.external_flow_eur`'s `0.0` model default (the service supplies it on every row),
-and the first timeline row's flow (already fixed by the pre-window seeding loop).
+and the first timeline row's flow (already fixed by the pre-window seeding loop). Four more from the
+coverage pass: the success-path `SyncRunRepository.record()` sitting outside the `try` is the same in
+**all five** CLIs, so it is a deliberate pattern rather than a bug in one; `expire_on_commit=False`
+makes reading a row's attributes after `commit()` safe; `security.asset_type` and
+`security.asset_category` are both real columns (Stock/ETF vs STK/OPT); and `_add_to_category`
+merging by symbol is what correctly combines a dual-listed ASML's two rows inside one category.
 
 ## Worth doing next
 
