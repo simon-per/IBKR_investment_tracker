@@ -160,6 +160,17 @@ per-entity repository CRUD are noise; a *service* helper appearing twice is not.
 resolving a ticker agrees with the price path") rather than the instance, so the next service to roll
 its own is caught the same way.
 
+**The lesson is not "never duplicate", though.** `lib/dividendGrowth.ts` deliberately reimplements the
+server's year-over-year arithmetic — it cannot be extracted, since it lives across the language
+boundary — and it has **not** drifted: adjacency, the zero-base refusal, the 1-decimal rounding and
+the `yoy_vs_partial` gating all still match `DividendService._pct` and the annual-row loop exactly.
+The difference is that both ends *write the rules down*: the client's docstring names the two it
+copies, and the server's comment says why adjacency matters. A duplicate survives when the reasoning
+travels with it; the eight above all lost their reasoning on one side. (Its one divergence is
+invisible: Python rounds halves to even and JS rounds them up, so a growth landing exactly on a
+half-tenth differs by 0.1 pp — and the two are never on screen together, because the client value
+*replaces* the server's when the Forecast toggle is off.)
+
 ---
 
 ## Tech stack
