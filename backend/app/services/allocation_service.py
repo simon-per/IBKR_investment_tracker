@@ -12,7 +12,6 @@ from sqlalchemy import select
 import yfinance as yf
 
 from app.models.security import Security
-from app.repositories.ticker_mapping_repository import TickerMappingRepository
 from app.etf_mappings import get_etf_allocation, is_known_etf
 
 logger = logging.getLogger(__name__)
@@ -23,22 +22,29 @@ class AllocationService:
 
     def __init__(self, db: AsyncSession):
         self.db = db
-        self.ticker_repo = TickerMappingRepository(db)
 
     async def _get_yahoo_ticker(self, security: Security) -> Optional[str]:
-        """Get the appropriate Yahoo Finance ticker for a security"""
-        # Check ticker mappings first
-        mapping = await self.ticker_repo.get_mapping(security.symbol, security.exchange or "")
-        if mapping:
-            return mapping.yahoo_ticker
+        """
+        The same resolution the price path uses — mapping, then exchange suffix.
 
-        # For US exchanges, use symbol as-is
-        if security.exchange in ['NASDAQ', 'NYSE', 'AMEX']:
-            return security.symbol
+        This used to be its own implementation, and a much weaker one: it checked
+        `ticker_mappings`, returned the bare symbol for NASDAQ/NYSE/AMEX, and
+        **None for everything else**. So it ignored `EXCHANGE_SUFFIXES` entirely,
+        omitted ARCA and BATS from its US list, and could not do the TSE
+        Tokyo-versus-Toronto disambiguation that the SBI repair turned on.
 
-        # For other exchanges, we'd need proper ticker mapping
-        # This should already be set up from market data sync
-        return None
+        The consequence was quiet and large. A mapping row is only auto-saved when
+        a *variation* succeeds — i.e. when the primary suffix-derived ticker
+        failed — so a XETRA holding priced fine as `AMZ.DE` never gets a row, and
+        this returned None for it. Every non-US security whose primary ticker works
+        was therefore unresolvable here and got **no sector and no country**,
+        permanently, while sitting in the "missing allocation data" count.
+
+        `FundamentalsService`, `DividendService` and `AnalystRatingService` all
+        already delegate; this was the one that did not.
+        """
+        from app.services.market_data_service import MarketDataService
+        return await MarketDataService(self.db)._get_yahoo_ticker(security)
 
     async def fetch_allocation_for_security(self, security: Security) -> Dict:
         """
