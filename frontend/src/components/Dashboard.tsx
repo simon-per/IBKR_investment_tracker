@@ -21,6 +21,7 @@ import { WatchlistTab } from './WatchlistTab'
 import { TaxTab } from './TaxTab'
 import { DividendsTab } from './DividendsTab'
 import { ThemeToggle } from './ThemeToggle'
+import { AdminKeyButton } from './AdminKeyButton'
 import { BenchmarkPicker, BENCHMARK_COLORS } from './BenchmarkPicker'
 import { useBaseCurrency, useCurrencySymbol } from '@/lib/CurrencyContext'
 import { concentrationPct, maxDrawdownPct, sharpeRatio } from '@/lib/portfolioKpis'
@@ -137,6 +138,15 @@ export function Dashboard() {
     queryKey: ['scheduler', 'status'],
     queryFn: () => api.getSchedulerStatus(),
     refetchInterval: 60_000,
+  })
+
+  // Which build is live, whether the scheduler is armed, and whether writes are
+  // protected. Rendered in the footer so "did my deploy land" is answerable from the
+  // browser instead of over ssh. Refetched on mount only — it changes on deploy.
+  const { data: health } = useQuery({
+    queryKey: ['health'],
+    queryFn: () => api.healthCheck(),
+    staleTime: Infinity,
   })
 
   // Calculate performance metrics for selected timeframe
@@ -307,6 +317,7 @@ export function Dashboard() {
                 </span>
               )}
               <ThemeToggle />
+              <AdminKeyButton writeAuthEnabled={health?.write_auth_enabled} />
               <Button
                 onClick={handleSync}
                 disabled={syncMutation.isPending}
@@ -514,6 +525,32 @@ export function Dashboard() {
           </TabsContent>
         </Tabs>
       </div>
+
+      {/* Build identity. /health used to return only {"status":"healthy"}, so
+          confirming a deploy had landed — or that the scheduler was armed at all —
+          meant ssh'ing to the box. */}
+      {health && (
+        <footer className="border-t">
+          <div className="w-full px-4 py-3 text-xs text-muted-foreground">
+            <span>Portfolio Analyzer v{health.version}</span>
+            {health.commit && health.commit !== 'unknown' && (
+              <span className="ml-2 font-mono">{health.commit.slice(0, 7)}</span>
+            )}
+            {/* Both call out a *disabled* safeguard, never a working one: a scheduler
+                that has quietly stopped looks exactly like a healthy site. */}
+            {!health.scheduler_enabled && (
+              <span className="ml-3 text-amber-700 dark:text-amber-400">
+                · scheduler disabled — no automatic syncs
+              </span>
+            )}
+            {!health.write_auth_enabled && (
+              <span className="ml-3 text-amber-700 dark:text-amber-400">
+                · write API unauthenticated
+              </span>
+            )}
+          </div>
+        </footer>
+      )}
     </div>
   )
 }

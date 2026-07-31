@@ -33,6 +33,27 @@ class Settings(BaseSettings):
     # (see the two rules at the top of CLAUDE.md).
     scheduler_enabled: bool = True
 
+    # Shared secret required on POST/PUT/PATCH/DELETE under /api/ (see app/auth.py).
+    # Empty (the default) disables the check entirely, so an existing deployment keeps
+    # working until this is set deliberately — enabling it is a decision, not something
+    # a deploy does to a running site. Startup warns loudly while it is unset.
+    api_admin_token: str = ""
+
+    # Requests per minute per client IP across /api/ (see app/rate_limit.py). Generous:
+    # one dashboard load issues a dozen or so. 0 disables the limiter.
+    rate_limit_per_minute: int = 120
+
+    # Identifies the running build on /health, so "did my deploy land" is answerable
+    # from the browser. Set by deploy.sh / ops/auto-deploy.sh from the deployed sha.
+    git_commit: str = "unknown"
+    app_version: str = "1.0.0"
+
+    # Where APScheduler persists its jobs (see scheduler_service). A SEPARATE file from
+    # portfolio.db: APScheduler's store is synchronous SQLAlchemy while the app is
+    # aiosqlite in WAL mode, and pointing both at one file invites lock contention on
+    # the database that holds the actual portfolio.
+    scheduler_jobstore_url: str = "sqlite:///./scheduler_jobs.db"
+
     model_config = SettingsConfigDict(
         env_file=str(ENV_FILE),
         env_file_encoding="utf-8",

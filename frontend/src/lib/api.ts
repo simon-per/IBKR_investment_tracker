@@ -530,6 +530,53 @@ export interface TaxReport {
   warnings?: string[];
 }
 
+/** `/health`. Identifies the running build so a deploy can be confirmed from the UI. */
+export interface HealthResponse {
+  status: string;
+  version: string;
+  commit: string;
+  scheduler_enabled: boolean;
+  write_auth_enabled: boolean;
+  request_id?: string | null;
+}
+
+/**
+ * Where the admin key lives. localStorage, not a cookie: the key only ever authorises
+ * writes, and a cookie would be attached to cross-site requests automatically, which is
+ * precisely what a header-based scheme avoids.
+ *
+ * It is a shared secret for a single-tenant deployment, not a per-user credential —
+ * anyone with the key has the same access, so it is stored per browser and never sent
+ * anywhere but this API.
+ */
+export const API_KEY_STORAGE_KEY = 'ibkr-api-key';
+
+export function getApiKey(): string {
+  try {
+    return localStorage.getItem(API_KEY_STORAGE_KEY) ?? '';
+  } catch {
+    // Private-mode Safari and some embedded webviews throw on access.
+    return '';
+  }
+}
+
+export function setApiKey(key: string): void {
+  try {
+    if (key) localStorage.setItem(API_KEY_STORAGE_KEY, key);
+    else localStorage.removeItem(API_KEY_STORAGE_KEY);
+  } catch {
+    /* nothing we can do; the request will simply be refused */
+  }
+}
+
+/** Thrown for a 401 so callers can tell "not allowed" from "went wrong". */
+export class UnauthorizedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'UnauthorizedError';
+  }
+}
+
 class ApiClient {
   private baseUrl: string;
 
@@ -539,19 +586,33 @@ class ApiClient {
 
   private async request<T>(endpoint: string, options?: RequestInit): Promise<T> {
     const url = `${this.baseUrl}${endpoint}`;
+    const apiKey = getApiKey();
 
     try {
       const response = await fetch(url, {
         ...options,
         headers: {
           'Content-Type': 'application/json',
+          // Sent on every request rather than only the mutating ones: the client does
+          // not model which routes are gated, and the backend ignores it on reads.
+          ...(apiKey ? { 'X-API-Key': apiKey } : {}),
           ...options?.headers,
         },
       });
 
       if (!response.ok) {
         const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
-        throw new Error(error.detail || `HTTP ${response.status}: ${response.statusText}`);
+        const detail = error.detail || `HTTP ${response.status}: ${response.statusText}`;
+        if (response.status === 401) {
+          // Distinguished so the UI can point at the admin key rather than showing a
+          // raw HTTP error for what is really "you haven't unlocked writes".
+          throw new UnauthorizedError(
+            apiKey
+              ? 'The saved admin key was rejected. Update it to make changes.'
+              : 'This action needs the admin key. Add it via the lock button.'
+          );
+        }
+        throw new Error(detail);
       }
 
       return response.json();
@@ -758,8 +819,8 @@ class ApiClient {
   }
 
   // Health check
-  async healthCheck(): Promise<{ status: string }> {
-    return this.request<{ status: string }>('/health');
+  async healthCheck(): Promise<HealthResponse> {
+    return this.request<HealthResponse>('/health');
   }
 }
 

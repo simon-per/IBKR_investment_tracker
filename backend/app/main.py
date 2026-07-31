@@ -1,11 +1,14 @@
 import logging
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
+from app.auth import log_write_auth_state, write_auth_enabled, write_auth_middleware
 from app.config import settings
 from app.database import init_db
+from app.observability import request_id_middleware, unhandled_exception_handler
+from app.rate_limit import rate_limit_middleware
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +52,10 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.info(f"Warning: Could not seed base currency: {str(e)}")
             await db.rollback()
+
+    # Say plainly whether the write API is protected. An unprotected one that nobody
+    # notices is exactly the failure app/auth.py exists to prevent.
+    log_write_auth_state()
 
     # Start the scheduler for daily automatic syncs.
     #
@@ -95,20 +102,46 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# `add_middleware` builds the stack outermost-LAST, so these run in reverse of the
+# order written: request id first (every log line and every response, including the
+# ones the layers below reject, carries it), then the rate limit (cheap, and it should
+# shed load before any real work), then write auth.
+app.middleware("http")(write_auth_middleware)
+app.middleware("http")(rate_limit_middleware)
+app.middleware("http")(request_id_middleware)
+
+# Nothing escapes as an unlabelled 500 with a possibly-token-bearing message.
+app.add_exception_handler(Exception, unhandled_exception_handler)
+
 
 # Health check endpoint
 @app.get("/")
 async def root():
     return {
         "message": "IBKR Portfolio Analyzer API",
-        "version": "1.0.0",
+        "version": settings.app_version,
         "status": "running"
     }
 
 
 @app.get("/health")
-async def health_check():
-    return {"status": "healthy"}
+async def health_check(request: Request):
+    """
+    Liveness plus enough identity to answer "which build is live, and is it armed?"
+    from a browser. Previously `{"status": "healthy"}` alone, so confirming a deploy
+    had landed — or that the scheduler was actually running — needed ssh.
+
+    Deliberately unauthenticated and un-throttled: the deploy script and any uptime
+    check poll it, and it exposes no portfolio data.
+    """
+    return {
+        "status": "healthy",
+        "version": settings.app_version,
+        "commit": settings.git_commit,
+        "scheduler_enabled": settings.scheduler_enabled,
+        "write_auth_enabled": write_auth_enabled(),
+        "request_id": getattr(request.state, "request_id", None),
+    }
 
 
 # Import and include routers

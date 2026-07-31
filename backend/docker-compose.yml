@@ -5,9 +5,27 @@ services:
       - "127.0.0.1:8000:8000"
     volumes:
       - ./portfolio.db:/app/portfolio.db
+      # APScheduler's job store. A separate file from portfolio.db because the store is
+      # synchronous SQLAlchemy while the app is aiosqlite in WAL mode, and pointing both
+      # at one file invites lock contention on the database holding the actual portfolio.
+      # It has to outlive the container: persisting jobs is pointless if the rebuild that
+      # loses a sync slot in the first place also discards them.
+      - ./scheduler_jobs.db:/app/scheduler_jobs.db
     env_file:
       - .env
+    environment:
+      # Reported by /health and shown in the app footer. deploy.sh exports it from the
+      # deployed sha; "unknown" locally, where there is nothing to identify.
+      GIT_COMMIT: ${GIT_COMMIT:-unknown}
     restart: unless-stopped
+    healthcheck:
+      # Lets `docker compose ps` tell "running" from "actually serving": the container
+      # is up while alembic is still migrating on start.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health').read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
 
   portfolio-frontend:
     image: nginx:alpine

@@ -50,6 +50,16 @@ cd "$REPO_DIR/backend"
 # the app auto-creates the schema; to keep your data, restore the backup db here first.
 [ -f portfolio.db ] || touch portfolio.db
 
+# Same trap for the scheduler's job store, which is bind-mounted so persisted jobs
+# survive the rebuild — the whole point of persisting them.
+[ -f scheduler_jobs.db ] || touch scheduler_jobs.db
+
+# Stamps the running build so /health and the app footer can identify it, which is how
+# "did my deploy land" gets answered from a browser rather than over ssh.
+GIT_COMMIT="$(cd "$REPO_DIR" && git rev-parse HEAD 2>/dev/null || echo unknown)"
+export GIT_COMMIT
+echo "Deploying commit: $GIT_COMMIT"
+
 docker compose down
 docker compose build --no-cache
 docker compose up -d
