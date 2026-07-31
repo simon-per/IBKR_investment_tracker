@@ -16,11 +16,17 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 
 ## Needs a human
 
-- **Nothing from 2026-07-31 has been pushed.** Nineteen commits sit on local `main` (see *Shipped
-  locally* below). Pushing auto-deploys within 10 minutes, so land it **outside** a Berlin sync slot
+- **Nothing from 2026-07-31 has been pushed** — `git push` is **refused to an agent by the permission
+  classifier**, so this is a human step, not an oversight. Twenty-two commits sit on local `main` (see
+  *Shipped locally* below); the tree is clean and both suites are green, so it is one command:
+
+      git push origin main
+
+  Pushing auto-deploys within 10 minutes, so land it **outside** a Berlin sync slot
   (08/13/15/20/22:00). The new persistent job store recovers a slot missed by under 30 min once it is
-  live — but it is not live until this deploy lands, so the first one still has to be timed by hand.
-  *Worth doing next* item 1 would prevent the overlap outright.
+  live — but it is not live until this deploy lands, so **this first one still has to be timed by
+  hand**; afterwards the timing stops mattering. *Worth doing next* item 1 would prevent the overlap
+  outright. Confirm it landed from the browser: the footer reports the running commit.
 - **Turn on the write API auth.** `app/auth.py` gates every `POST/PUT/PATCH/DELETE` under `/api/`,
   but it is **inert until `API_ADMIN_TOKEN` is set** — deliberately, so shipping it could not 401 the
   running site. Until then `/api/` is what it has always been: anyone who can reach the host can
@@ -84,8 +90,31 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 
 ## Shipped locally 2026-07-31 — NOT deployed
 
-Nineteen commits on local `main`, none pushed. Suites: backend 357 → 442, frontend 45 → 85, `tsc -b`
-and `npm run build` clean.
+Twenty-two commits on local `main`, none pushed. Suites: backend 357 → 446, frontend 45 → 91,
+`tsc -b` and `npm run build` clean.
+
+**The bundle is now code-split**, which changed the shape of a deploy for users. It was one 891 kB /
+264 kB-gzipped chunk; it is now four eager files (app 52 kB gz, react 57, charts 119, query 15) plus
+one per deferred tab. Two separate wins: the seven non-default tabs no longer load at first paint,
+and — the bigger one, given the VPS redeploys within 10 minutes of any push — **the chunk that
+re-hashes on every deploy fell from 264 kB gzipped to 52 kB**, because vendor code now sits in files
+that only change when a dependency does. nginx already serves `/assets/` `immutable` for a year, so
+that caching is real rather than theoretical. Recharts stays eager on purpose: three components on
+the *default* Performance tab use it, so deferring it would only move the wait.
+
+`ui/LazyTabPanel.tsx` exists because splitting introduced a failure the eager imports could not
+have. Chunks are content-hashed and the VPS redeploys constantly, so a browser holding the page
+across a deploy requests a filename that no longer exists — unhandled, that rejection reaches the
+app-level boundary in `App.tsx` and blanks the whole dashboard, which is strictly worse than before
+the split. The panel-scoped boundary recognises the wording Vite/webpack/Safari each use for it,
+says a new version shipped, and offers the reload that fixes it (`index.html` is `no-cache`, so a
+reload genuinely resolves it). A non-chunk error still shows its real message — mislabelling a
+genuine bug as a deploy race would have users reloading forever.
+
+Verified in a real browser against the built output under the production CSP, since chunk boundaries
+are a property of the build that no unit test can observe: 4 chunks at first paint, none of the
+seven deferred ones; each tab fetching its own chunk on click, all 200; every panel mounting; zero
+CSP violations.
 
 **Verified against a production DB snapshot and in a real browser** (Playwright, out-of-tree), not
 just through the test client. That is worth stating because it found three defects the whole green
@@ -167,16 +196,10 @@ Rough priority. Item 1 is written but not installed; the rest are not started.
    would tax every 10-minute deploy. Needs a separate package or a skipped-download flag.
    (`@testing-library/react` + `jsdom` *did* go in on 2026-07-31 — a few MB, which is affordable.)
    The checks worth keeping: the tab/collapsible/sort keyboard sweep, the eight-tab console-error
-   sweep, and the backend-stopped pass that asserts no surface falls back to an empty-data message.
-4. **The bundle is 891 kB / 264 kB gzipped in one chunk**, and Vite warns on every build. Recharts is
-   most of it, but **splitting it off wins less than it looks**: six components import it and three of
-   them (`PortfolioValueChart`, `PerformanceAttribution`, `MonthlyDeploymentCard`) are on the *default*
-   Performance tab, so it is needed at first paint anyway. The realistic cut is a `React.lazy` split of
-   the other seven tabs. Not urgent on a desktop-first single-user app, and deliberately not attempted
-   immediately before a deploy.
-5. **`/api/dividends/summary` still has no `response_model`.** Nothing but `tests/test_api_smoke.py`
-   stops a field rename silently blanking the Performance tab's provenance footnote.
-6. **Fold `PRE_OWNERSHIP_HISTORY_YEARS` pruning into a scheduled job.** `prune_empty_dividends.py`
+   sweep, the backend-stopped pass that asserts no surface falls back to an empty-data message, and
+   `lazychunks.mjs` (below) which is the only thing that verifies the code-split end to end — chunk
+   boundaries are a build-output property, so no unit test can see them.
+3. **Fold `PRE_OWNERSHIP_HISTORY_YEARS` pruning into a scheduled job.** `prune_empty_dividends.py`
    is a manual CLI; the ingest window now prevents new junk, so this is cleanup-only and low value.
 
 ## Local development traps
@@ -228,13 +251,14 @@ detail; this exists so the next session knows what just moved without reading it
 confirmed) and gets deleted once nothing in it is outstanding: these lines are permanent, so don't
 "tidy up" the overlap by deleting the wrong one.
 
-- **2026-07-31** — enterprise-readiness pass, nineteen commits: shared TTM growth,
+- **2026-07-31** — enterprise-readiness pass, twenty-two commits: shared TTM growth,
   locale-independent chart dates, inception read from the data, keyboard/ARIA across the tab strip and
   every collapsible and sortable header, four more explicit error states, optional write auth +
   per-IP rate limit + request ids + `/health` build identity, the Activity ledger over the four
   unread tables, a persistent scheduler job store, delta-chip and scroll-affordance consolidation,
-  real product chrome. Suites 357 → 442 backend, 45 → 85 frontend; verified against a prod snapshot
-  and in a real browser, which found three defects the green suite did not.
+  real product chrome, a completed `/api/dividends/summary` contract, and a code-split bundle. Suites
+  357 → 446 backend, 45 → 91 frontend; verified against a prod snapshot and in a real browser, which
+  found three defects the green suite did not.
 - **2026-07-30** — two batches: five audit fixes (Yahoo gating, `openDateTime` off ibflex, SELL beats
   the cost-conserved heuristic, tax-report honesty, dividend card net), then the SBI dividend bug —
   poisoned estimates purged on prod, mapping changes now retire the rows they produced, source-aware

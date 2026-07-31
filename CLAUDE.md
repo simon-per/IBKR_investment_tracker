@@ -125,6 +125,23 @@ Vitest runs in `node` by default; component tests opt into jsdom per file with a
 `// @vitest-environment jsdom` docblock, because the pure `lib/` tests are the large majority and
 paying jsdom's startup for all of them is the wrong default.
 
+**The bundle is code-split, and two of the boundaries are deliberate.** The seven non-default tabs
+are `React.lazy` in `Dashboard.tsx` (safe because `TabsContent` returns `null` while inactive, so a
+panel is not mounted until selected). **Recharts stays eager** — `PortfolioValueChart`,
+`PerformanceAttribution` and `MonthlyDeploymentCard` are all on the default Performance tab, so
+deferring it would only move the wait; don't "optimise" it into a lazy chunk. `manualChunks` in
+`vite.config.ts` splits `react` / `charts` / `query` mainly for **caching**: the VPS redeploys within
+10 minutes of any push and nginx serves `/assets/` `immutable`, so keeping vendor code out of the
+app chunk took the per-deploy re-download from 264 kB gzipped to ~52 kB. List chunk members by the
+specifier that actually appears in the graph (`react-dom/client`, `react/jsx-runtime`) — naming the
+bare packages emits a 0-byte chunk and leaves React in the app bundle.
+
+Because a lazy chunk can 404 after a redeploy (content-hashed names, page held open across a
+deploy), every lazy panel is wrapped in `ui/LazyTabPanel.tsx` — a *scoped* boundary. Without it that
+rejection reaches `App.tsx`'s app-level boundary and blanks the whole dashboard, which is worse than
+the eager import it replaced. Chunk boundaries are a build-output property no unit test can see, so
+the end-to-end check is `lazychunks.mjs` in the out-of-tree Playwright harness.
+
 ---
 
 ## IBKR Flex Query integration
@@ -453,8 +470,14 @@ it silently disagreed with the Dividends tab and anyone reconciling DA-1 read ne
 undeclared in `DividendSummaryResponse`. `source` was also binary — `'ibkr'` the moment any IBKR row
 existed, while the splice still carries the estimated months ahead of the boundary — and is now the
 same `ibkr` | `mixed` | `yfinance_estimate` flag the tax report uses (`_summary_source()`), which the
-footnote reads off. **`/api/dividends/summary` has no `response_model`**, so nothing but
-`tests/test_api_smoke.py` stops a rename silently blanking that note.
+footnote reads off. `/api/dividends/summary` now carries a `response_model`, but **completing the
+model had to come first, and that order is the whole point**: a `response_model` is a *filter*, so
+attaching one to a model still declaring five of the ten keys would have deleted the provenance
+fields from the wire and blanked the footnote — shipping the exact bug as a hardening change. For
+that reason `tests/test_dividend_summary_contract.py` compares the service's key set against the
+model's in both directions rather than spot-checking names: an undeclared key is dropped silently,
+and a declared-but-unsupplied one silently takes its default (0.00 withholding, estimate
+provenance). Add a key to the service and you must add it to the model.
 
 **Only dividends that could have been earned are ingested.** `sync_dividend_data()` skips ex-dates
 before the security's earliest lot `open_date` (reported as `pre_ownership_skipped`); a security with no
@@ -953,7 +976,7 @@ raiser for that whole module, so an accidental network reach fails loudly; `/api
 is excluded because it lazy-fetches Yahoo on a cache miss, and POST routes are excluded because they
 start real syncs. **Add a case here when an endpoint's response shape changes.**
 
-Tests (442 backend + 85 frontend, all offline — no IBKR, Yahoo or FX-provider calls):
+Tests (446 backend + 91 frontend, all offline — no IBKR, Yahoo or FX-provider calls):
 ```bash
 cd backend && ./venv/Scripts/python.exe -m pytest tests/ -q
 cd frontend && npx tsc -b && npm run test && npm run build
