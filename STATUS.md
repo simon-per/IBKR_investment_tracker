@@ -258,6 +258,14 @@ this section can be deleted once the commits are pushed without losing them.
   above rows reading *Not currently held*. Caught by `e2e/errors`, which now covers it.
 - **`e2e/a11y.mjs` claimed "backend optional"** and never could have been: three of its checks need one,
   so run as documented it reported 11/14 with every failure a phantom.
+- **An unconvertible dividend was persisted as if it were EUR.** `DividendService._to_eur` ended with
+  `return amount  # fallback: store unconverted`, so a payment with no rate for its pay date went into
+  `gross_amount_eur` as the raw foreign figure — a TWD dividend roughly 35× high. **The identical
+  defect fixed in `TaxService._to_eur` on 2026-07-30**, whose docstring lists the consumers that skip
+  correctly and misses this sibling. And the worse of the two: the tax report computed at read time,
+  this is the **ingest** path, so the wrong number is persisted and then read by the Dividends tab, the
+  forecast, and the tax report's own DA-1 income. Now skipped with a warning hoisted into the sync's
+  `warnings[]` — recoverable, since re-ingest is idempotent.
 - **A never-rated security could never acquire an analyst rating.** `sync_stale_ratings` built its work
   list from `get_stale_ratings`, which selects rating rows older than the cutoff — rows that already
   *exist*. So a newly-bought security was invisible to it forever, and against an empty table it
@@ -479,9 +487,9 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
 "tidy up" the overlap by deleting the wrong one.
 
 - **2026-07-31 (overnight, unpushed)** — autonomous loop: three frontend features (risk row, target
-  allocation & drift, currency exposure) and twelve bugs (49 sites reading the clock in local time; SOXQ
+  allocation & drift, currency exposure) and thirteen bugs (49 sites reading the clock in local time; SOXQ
   missing from the ETF look-through; the rebalance panel building a plan out of an outage; `e2e/a11y`'s
-  "backend optional" claim). Suites 462 → 597 backend, 91 → 268 frontend; all `e2e` scripts green bar
+  "backend optional" claim). Suites 462 → 603 backend, 91 → 268 frontend; all `e2e` scripts green bar
   `ledger`. Durable rules promoted into CLAUDE.md. **Nothing deployed** — see *Unpushed*.
 - **2026-07-31** — enterprise-readiness pass: shared TTM growth,
   locale-independent chart dates, inception read from the data, keyboard/ARIA across the tab strip and
