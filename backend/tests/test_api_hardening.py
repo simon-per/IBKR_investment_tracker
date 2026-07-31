@@ -208,6 +208,53 @@ def test_an_implausible_inbound_id_is_replaced(client):
     assert len(r.headers[REQUEST_ID_HEADER]) <= 64
 
 
+def test_an_unhandled_error_is_correlatable_and_redacted(monkeypatch, caplog):
+    """
+    The one path where `str(e)` still reached the client unredacted. Routers already
+    redact their HTTPException details and SyncRunRepository redacts what it stores,
+    but an exception escaping a handler went through FastAPI's default 500 — and a
+    failed Flex request stringifies with the token in a `t=` URL parameter, which is
+    exactly how production leaked it once.
+    """
+    import logging
+
+    rate_limit.reset()
+    monkeypatch.setattr(settings, "rate_limit_per_minute", 0, raising=False)
+    monkeypatch.setattr(settings, "api_admin_token", "", raising=False)
+    monkeypatch.setattr(settings, "ibkr_token", "SUPERSECRETTOKENVALUE123", raising=False)
+
+    @app.get("/api/_unhandled_error_probe")
+    async def _boom():
+        raise RuntimeError(
+            "SendRequest failed: https://host/Flex?t=SUPERSECRETTOKENVALUE123&q=1234"
+        )
+
+    # raise_server_exceptions=False so the handler runs instead of the test client
+    # re-raising, which is what a real client sees.
+    probe = TestClient(app, raise_server_exceptions=False)
+    with caplog.at_level(logging.ERROR):
+        r = probe.get("/api/_unhandled_error_probe")
+
+    assert r.status_code == 500
+    # Says nothing about the exception; the id is the handle for whoever reads the logs.
+    assert r.json()["detail"] == "Internal server error."
+    assert r.json()["request_id"] == r.headers[REQUEST_ID_HEADER]
+    assert "SUPERSECRETTOKENVALUE123" not in r.text
+
+    # And the log line too: the container log is not public, but it gets pasted into
+    # issues and chats, and this repo is public.
+    logged = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "SUPERSECRETTOKENVALUE123" not in logged
+    assert r.headers[REQUEST_ID_HEADER] in logged
+    # The query id stays readable — public in the docs and useless without the token.
+    assert "q=1234" in logged
+
+    app.router.routes = [
+        route for route in app.router.routes
+        if getattr(route, "path", "") != "/api/_unhandled_error_probe"
+    ]
+
+
 def test_a_rejected_request_is_still_correlatable(client, monkeypatch):
     """
     The request-id layer sits outermost, so the 401 and 429 the layers below produce
