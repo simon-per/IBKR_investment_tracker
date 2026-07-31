@@ -11,6 +11,7 @@ from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from datetime import date, timedelta
+from app.clock import utcnow
 
 from app.config import settings
 from app.database import AsyncSessionLocal
@@ -94,10 +95,15 @@ class SchedulerService:
     """
     Service for scheduling automated data synchronization tasks.
 
-    Runs 3 times daily (Europe/Berlin):
+    Runs 5 times daily (Europe/Berlin):
+    - 00:00: IBKR + FX only — no Yahoo
+    - 06:00: IBKR + FX only — no Yahoo
     - 08:00: Full sync (IBKR + 730 days market data) — fills historical gaps gradually
     - 15:00: Market data only (7 days) — picks up EU closing prices
     - 22:00: Market data only (7 days) — picks up US closing prices
+
+    The two IBKR-only slots sit overnight on purpose; see `_ibkr_only_sync_locked`
+    and `test_every_ibkr_job_avoids_us_market_hours`.
     """
 
     def __init__(self):
@@ -141,7 +147,7 @@ class SchedulerService:
                     "status": "success",
                     "message": "Successfully synced data from IBKR",
                     **ingested,
-                    "timestamp": utc_iso(datetime.now()),
+                    "timestamp": utc_iso(utcnow()),
                 }
                 if warnings:
                     result["warnings"] = warnings
@@ -158,7 +164,7 @@ class SchedulerService:
                 return {
                     "status": "error",
                     "message": f"Failed to sync IBKR data: {str(e)}",
-                    "timestamp": utc_iso(datetime.now())
+                    "timestamp": utc_iso(utcnow())
                 }
 
     async def sync_market_data(self, days_back: int = 730) -> dict:
@@ -189,7 +195,7 @@ class SchedulerService:
                         "message": "No securities found to sync",
                         "securities_processed": 0,
                         "prices_fetched": 0,
-                        "timestamp": utc_iso(datetime.now())
+                        "timestamp": utc_iso(utcnow())
                     }
 
                 total_prices = 0
@@ -224,7 +230,7 @@ class SchedulerService:
                     "message": f"Synced market data for {len(securities)} securities",
                     "securities_processed": len(securities),
                     "prices_fetched": total_prices,
-                    "timestamp": utc_iso(datetime.now())
+                    "timestamp": utc_iso(utcnow())
                 }
 
                 if errors:
@@ -271,7 +277,7 @@ class SchedulerService:
                 return {
                     "status": "error",
                     "message": f"Failed to sync market data: {str(e)}",
-                    "timestamp": utc_iso(datetime.now())
+                    "timestamp": utc_iso(utcnow())
                 }
 
     async def find_stale_priced_securities(
@@ -355,7 +361,7 @@ class SchedulerService:
 
         Returns `warnings[]`-ready strings, like the sibling detectors.
         """
-        as_of = as_of or datetime.now()
+        as_of = as_of or utcnow()
 
         latest = await db.execute(
             select(func.max(SyncRun.finished_at)).where(
@@ -534,7 +540,7 @@ class SchedulerService:
                     "currencies_synced": total_rates,
                     "currencies": sorted(currencies),
                     "held_currencies": sorted(held),
-                    "timestamp": utc_iso(datetime.now())
+                    "timestamp": utc_iso(utcnow())
                 }
                 logger.info(f"Exchange rate sync completed: {total_rates} currencies updated")
                 return result
@@ -545,7 +551,7 @@ class SchedulerService:
                 return {
                     "status": "error",
                     "message": f"Failed to sync exchange rates: {str(e)}",
-                    "timestamp": utc_iso(datetime.now())
+                    "timestamp": utc_iso(utcnow())
                 }
 
     async def sync_benchmark_prices(self) -> dict:
@@ -626,7 +632,7 @@ class SchedulerService:
                     "status": "success",
                     "sync": sync_res,
                     "compute": compute_res,
-                    "timestamp": utc_iso(datetime.now())
+                    "timestamp": utc_iso(utcnow())
                 }
 
             except Exception as e:
@@ -634,7 +640,7 @@ class SchedulerService:
                 return {
                     "status": "error",
                     "message": f"Failed to sync dividends: {str(e)}",
-                    "timestamp": utc_iso(datetime.now())
+                    "timestamp": utc_iso(utcnow())
                 }
 
     async def _gated_job(self, job_type: str, run) -> Optional[dict]:
@@ -655,9 +661,9 @@ class SchedulerService:
                 "type": job_type,
                 "status": "skipped",
                 "message": str(e),
-                "timestamp": utc_iso(datetime.now()),
+                "timestamp": utc_iso(utcnow()),
             }
-            await self._record_run(skipped, datetime.now())
+            await self._record_run(skipped, utcnow())
             return skipped
 
     async def full_sync_job(self) -> Optional[dict]:
@@ -676,7 +682,7 @@ class SchedulerService:
         logger.info("STARTING FULL SYNC JOB (IBKR + MARKET DATA)")
         logger.info("=" * 80)
 
-        started_at = datetime.now()
+        started_at = utcnow()
         market_result = None
 
         # Step 1: Sync IBKR data
@@ -704,7 +710,7 @@ class SchedulerService:
         # Track result
         self.last_sync_result = {
             "type": "full_sync",
-            "timestamp": utc_iso(datetime.now()),
+            "timestamp": utc_iso(utcnow()),
             "ibkr_result": ibkr_result,
             "fx_result": fx_result,
             "market_result": market_result,
@@ -732,7 +738,7 @@ class SchedulerService:
         logger.info("STARTING MARKET DATA + EXCHANGE RATE SYNC (7 days)")
         logger.info("=" * 80)
 
-        started_at = datetime.now()
+        started_at = utcnow()
 
         # Sync exchange rates first (needed for portfolio value calculation)
         fx_result = await self.sync_exchange_rates(days_back=7)
@@ -758,7 +764,7 @@ class SchedulerService:
         # Track result
         self.last_sync_result = {
             "type": "market_data_only",
-            "timestamp": utc_iso(datetime.now()),
+            "timestamp": utc_iso(utcnow()),
             "fx_result": fx_result,
             "market_result": market_result,
             "benchmark_result": bench_result,
@@ -801,12 +807,23 @@ class SchedulerService:
 
     async def _ibkr_only_sync_locked(self) -> dict:
         """
-        IBKR-only sync, at 13:00 and 20:00 Europe/Berlin.
+        IBKR-only sync, at 00:00 and 06:00 Europe/Berlin.
 
-        Exists because the 08:00 full sync is the *only* job that talks to IBKR, so a
-        transient `Code=1001` ("statement could not be generated") used to cost a whole
-        day of freshness — and that got likelier once the Flex Query grew to Year-to-Date
-        with Trades/CorporateActions/CashTransactions, since IBKR takes longer to build it.
+        Exists because the 08:00 full sync used to be the *only* job that talks to IBKR,
+        so a transient `Code=1001` ("statement could not be generated") cost a whole day
+        of freshness — which got likelier once the Flex Query grew from one section to six
+        (Trades/CorporateActions/CashTransactions, then Deposits & Withdrawals and
+        Transfers), five of which scan the whole period.
+
+        **These ran at 13:00 and 20:00 until 2026-07-31 and must not go back.** IBKR
+        builds the statement from *finalised* daily data, so SendRequest succeeds overnight
+        and fails mid-session — as `Code=1001` at the request step, which is the
+        fatal-fast kind. Measured on this account's own `sync_runs`: overnight 8/9,
+        afternoon and evening 1/15 (13:00 was 0-for-6, 20:00 1-for-8). Those slots were
+        not merely weak but negative, since a failed generation is exactly what
+        `Code=1025` counts — two jobs meant to protect freshness were spending lockout
+        budget twice a day to recover nothing. Pinned by
+        `test_every_ibkr_job_avoids_us_market_hours`.
 
         Deliberately does NOT call sync_market_data() or sync_dividends(): both hit Yahoo
         Finance, which is rate-limited and, per CLAUDE.md, must never be called without
@@ -818,7 +835,7 @@ class SchedulerService:
         logger.info("STARTING IBKR-ONLY SYNC (no market data)")
         logger.info("=" * 80)
 
-        started_at = datetime.now()
+        started_at = utcnow()
         ibkr_result = await self.sync_ibkr_data()
         logger.info(f"IBKR Sync Result: {ibkr_result}")
 
@@ -827,7 +844,7 @@ class SchedulerService:
 
         self.last_sync_result = {
             "type": "ibkr_sync",
-            "timestamp": utc_iso(datetime.now()),
+            "timestamp": utc_iso(utcnow()),
             "ibkr_result": ibkr_result,
             "fx_result": fx_result,
             "status": ibkr_result.get("status", "error"),
