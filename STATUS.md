@@ -24,6 +24,13 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 
       git push origin main
 
+  **Or run `bash ops/finish-deploy.sh`**, which does all three *Needs a human* deploy steps in the
+  only safe order and refuses to reach step 2 until `/health` reports the commit it just pushed.
+  It also checks the Berlin clock before pushing — via Python's `zoneinfo`, because **Git Bash on
+  Windows silently ignores `TZ=`** and returns UTC, which in summer would put the guard two hours
+  out in the unsafe direction and wave a push straight into the 08:00 slot. Every step asks first
+  and can be skipped.
+
   Pushing auto-deploys within 10 minutes, so land it **outside** a Berlin sync slot
   (08/13/15/20/22:00). The new persistent job store recovers a slot missed by under 30 min once it is
   live — but it is not live until this deploy lands, so **this first one still has to be timed by
@@ -262,6 +269,10 @@ Each of these cost real time at least once.
 - **`sqlite:////tmp/x.db` in Git Bash lands in `C:\tmp`, not the shell's `/tmp`.** The SQLAlchemy URL
   is read by Python, which does not apply the MSYS path translation, so a stray file goes somewhere
   `ls /tmp` will not show it.
+- **`TZ=Europe/Berlin date` silently returns UTC in Git Bash.** It does not error and it does not
+  warn — `TZ=America/New_York` prints the same time — so any script reasoning about the Berlin sync
+  slots from the shell clock is two hours out in summer, in the direction that permits a collision.
+  Use Python's `zoneinfo` (`ops/finish-deploy.sh` has the helper).
 
 ## Recent sessions (last 5)
 
