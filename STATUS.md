@@ -30,20 +30,6 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
   fresh shell silently passes empty strings and `scp`/`ssh` print usage. Use literal paths, or
   re-run the script.
 
-- **Set the Flex Query period to `Last 30 Calendar Days`** (IBKR portal → Reports → Flex Queries →
-  `App_OpenLots` → Period). Only Simon can do this; it is the fix for the `1001`s, which began when
-  the query grew from one section to six on 2026-07-24/28 — five of those scan the whole period,
-  Open Positions does not. **The prerequisite is now in place**: `find_stale_ibkr_sync` warns after
-  `IBKR_SYNC_STALE_DAYS` (7) without a successful IBKR sync, which is what makes a bounded window
-  safe — 23 days of margin under a 30-day period to fix the cause or ingest a browser download.
-
-  Nothing in the code needs changing: `reconcile_taxlots` reads trades from the DB, ingestion is
-  idempotent and additive, `widen_cash_flows_covered_from` only moves the boundary *earlier* (so a
-  30-day `from_date` is ignored and January coverage stands — verified, not assumed), and Open
-  Positions is period-independent so all ~979 lots still arrive.
-
-  The cost: YTD's self-healing property. A restored backup would no longer refill the year on its
-  own — recover that with a one-off period change plus `app/cli/ingest_flex_xml.py`.
 - **Rotate the IBKR Flex token.** It travelled as a `t=` URL parameter into `sync_runs.message` and
   was served by the public `/api/scheduler/history` until the 2026-07-28 scrub. `app/redact.py` now
   redacts on write *and* on read, so it cannot recur — but redaction cannot un-leak what was already
@@ -57,26 +43,28 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 
 ## Watching
 
-- **The IBKR retry slots moved to 00:00 and 06:00 (was 13:00/20:00) — confirm they succeed.**
-  `sync_runs` on 2026-07-31: the old slots were **0-for-6 and 0-for-6+**, against 8-for-9 overnight.
-  IBKR cannot generate a YTD statement during US market hours. Every failure is a failed
-  *generation*, which is what `Code=1025` counts, so those two jobs spent lockout budget twice a day
-  to recover nothing. **Prediction to check: 00:00 and 06:00 should now succeed** (00:30 already did
-  on 07-26). If they don't, the offline XML path is the fallback — never a manual retry loop.
+- **The `1001` problem is fixed — the Flex Query period is now `Last 30 Calendar Days`.** Confirmed
+  by as clean an A/B as production allows: **20:00 error, 21:08 success, same token, same hour band,
+  68 minutes apart, only the period changed.** 15:08 New York is mid-session, the window that had
+  gone 0-for-8 that day. Statement shape went ~290 trade rows → 103 and ~107 cash transactions → 17.
 
-  **Two separate things happened in the same week**, and conflating them sends you the wrong way:
+  The cause was **the query growing from one section to six between 07-24 and 07-28** (Trades,
+  CorporateActions, CashTransactions, then Deposits & Withdrawals and Transfers). Five of those scan
+  the whole period; Open Positions, the only original section, does not — which is why years of
+  YTD queries never provoked it. A *separate* change made it look worse than it was: the 13:00/20:00
+  retry slots were added in `67e6a59` on 07-25, the same day `sync_runs` persistence landed, so new
+  failing slots and first-ever visibility arrived together.
 
-  - *Why the failures look constant* — the retry slots were added in `67e6a59` on 2026-07-25, the
-    same day `sync_runs` persistence landed, so the oldest record we hold is the first retry ever
-    attempted, failing. New failing slots plus first-ever visibility.
-  - *Why `1001` exists at all* — **the Flex Query went from one section to six between 07-24 and
-    07-28** (Trades, CorporateActions, CashTransactions, then Deposits & Withdrawals and Transfers).
-    Five of those scan the whole YTD period; Open Positions, the only original section, does not.
-    The 08:00 `1001`s that motivated the retries began the day after the first expansion.
+  Verified after the switch: all 71 YTD trades still on record month-by-month, `coverage_from` still
+  2026-01-09, `taxlots_skipped: 0`, 979 lots. Nothing was lost.
 
-  **Shortening the period is the real lever**, and it is queued under *Needs a human* (30 days).
-  Don't judge it by row counts: Open Positions is ~70% of the rows and ~0% of the scan work. Full
-  reasoning in CLAUDE.md's *Sync schedule* section.
+  **Still worth confirming**: that 00:00 and 06:00 succeed on a normal night. And don't reason about
+  statement cost from row counts — Open Positions is ~70% of the rows and ~0% of the scan work.
+- **`find_stale_ibkr_sync` is now the thing that tells you a bounded window is drifting.** It warns
+  after 7 days with no successful IBKR sync. Treat it as a prompt to download the statement from
+  Client Portal and run `app/cli/ingest_flex_xml.py` — that path is idempotent, so re-ingesting a
+  YTD export simply fills whatever the 30-day window missed. Real recovery, not a theoretical one,
+  which is why a 30-day window is a comfortable choice rather than a tight one.
 - **MCO and MRVL each forecast off only 2 samples.** Surfaced by the new `forecast_samples` field the
   day it shipped, and badged `n=2` in the dividends table. Not known-wrong — both are real payers with
   plausible schedules — but two samples is the exact shape that let SBI project a fake monthly cadence,

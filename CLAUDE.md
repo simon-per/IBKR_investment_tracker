@@ -176,13 +176,19 @@ money at all. **Transfers** exists only so an incoming broker transfer can be to
 — see the contributions section. Both are inert until parsed: `extract_cash_transactions` filters to the
 three dividend types, so ticking them early cannot disturb anything.
 
-**General config that matters:** Format **XML**; Period **Year to Date** (Trades/CashTransactions only
-contain rows *inside* the period — "Last Business Day" would mean historical trades never arrive);
+**General config that matters:** Format **XML**; Period **Last 30 Calendar Days**;
 Date `yyyyMMdd`, Time `HHmmss`, separator `;`. **Never use `dd/MM/yyyy`** — ibflex assumes US
 `MM/dd/yyyy` for ambiguous formats and would silently swap month and day.
 
-Prior tax years need a one-off period change (e.g. 2025), then set back to YTD. Ingestion is idempotent
-(upserts keyed on `ib_key`), so re-syncing is safe.
+**The period was Year to Date until 2026-07-31 and must not go back** — that is what caused the
+`Code=1001` failures (see *Sync schedule*). Trades/CashTransactions contain only rows *inside* the
+period, so the window has to comfortably exceed the longest plausible run of failed syncs; 30 days
+against three IBKR attempts a day is ~90 consecutive failures. Something very short like
+"Last Business Day" would mean a single bad day loses trades permanently.
+
+Prior tax years need a one-off period change (e.g. 2025), then set back. Ingestion is idempotent
+(upserts keyed on `ib_key`), so re-syncing is safe — which is also the recovery if a bounded window
+ever *does* miss something: download a wider statement from Client Portal and ingest it offline.
 
 ### Offline ingest — the escape hatch from a locked token
 
@@ -405,8 +411,8 @@ that is where `min(missing)` then sits.
 Two details carry the weight. `PRICE_RESTATING_ACTIONS` is a deliberate **subset** of
 `SPLIT_LIKE_ACTIONS`: we fetch with `auto_adjust=False` and Yahoo rebases raw `Close` for splits only,
 so `SPINOFF`/`STOCKDIV`/`ISSUECHANGE` are excluded as pure churn. And it fires **only for actions
-newly inserted on this sync** (`CorporateActionRepository.existing_ib_keys()`) — the YTD statement
-resends every action every time, so without that check all five daily jobs would wipe and refetch the
+newly inserted on this sync** (`CorporateActionRepository.existing_ib_keys()`) — the statement
+resends every action inside its period every time, so without that check all five daily jobs would wipe and refetch the
 same history forever. Reported in `warnings[]` and as `prices_invalidated`.
 Limitation: the 7-day jobs restore the current value, but the full history only comes back at the next
 **08:00** 730-day `full_sync`. Tests: `tests/test_split_price_invalidation.py`.
@@ -695,8 +701,9 @@ elapsed months and every window carries a meaningful number.
 `coverage_from` lives in `app_settings` (`cash_flows_covered_from`), set from the statement's `from_date`
 and **only when deposit rows were actually present** — an export taken without the Deposits option must
 not claim coverage it has no data for. It only ever widens backwards
-(`widen_cash_flows_covered_from`), so a later YTD statement can't shrink what a prior-year import
-established. It must be the period start, not the first deposit's date: a covered week with no deposits is
+(`widen_cash_flows_covered_from`), so neither a later statement nor the 2026-07-31 switch to a
+30-day window can shrink what a prior-year import established — the narrower `from_date` is simply
+ignored, which is what kept `coverage_from` at 2026-01-09 through that change. It must be the period start, not the first deposit's date: a covered week with no deposits is
 still covered, and using the first row would hand that week's purchases to the lot side *and* count its
 deposits.
 
@@ -859,11 +866,20 @@ One hypothesis this does kill: **"failures accumulate into a throttle."** The au
 schedule position, not contagion: 08:00 follows a failed 20:00, and 13:00 follows a successful
 08:00. A success 4½ hours after a failure (2026-07-26 00:30) rules out a cooling-off period.
 
-**If the overnight slots are not enough, shorten the query period** (60 days is ample). It is safe
-because `reconcile_taxlots` reads trades from the *database*, ingestion is idempotent and additive,
-`coverage_from` only widens backwards, and Open Positions is period-independent. The cost is YTD's
-self-healing property — a restored backup would no longer refill the year — so pair it with the
-sync-staleness alarm rather than relying on noticing.
+**The period is `Last 30 Calendar Days` as of 2026-07-31, and that is what fixed it.** The evidence
+is a clean A/B: a 20:00 failure and a 21:08 success 68 minutes apart, same token, same hour band —
+15:08 New York, mid-session, where the day had gone 0-for-8. Statement shape dropped from ~290 trade
+rows to 103 and ~107 cash transactions to 17.
+
+It is safe because `reconcile_taxlots` reads trades from the *database*, ingestion is idempotent and
+additive, `widen_cash_flows_covered_from` only moves the boundary earlier (a 30-day `from_date` is
+ignored, so January coverage stands), and Open Positions is period-independent. Verified after the
+switch: all 71 YTD trades still on record, `coverage_from` still 2026-01-09, 979 lots, 0 skipped.
+
+**Do not restore the YTD period to "be safe".** That reintroduces the failure. What it bought — a
+statement that re-delivers the whole year every time — is available on demand instead: a browser
+download ingested through `app/cli/ingest_flex_xml.py` is idempotent, so it simply fills whatever a
+bounded window missed. `find_stale_ibkr_sync` exists to tell you when to do that.
 
 **One pipeline at a time (`app/single_flight.py`).** `/api/` is public — and was unauthenticated when
 this was written; `app/auth.py` (below) can now gate the writes, but throttling and authorization are
@@ -1340,6 +1356,6 @@ Cross-checked against IBKR via the MCP connector: IBKR lists **282 YTD trades = 
 conversions, correctly filtered out) **+ 64 `STK`**, and the 64 match ours symbol-for-symbol. Same-day,
 same-price pairs (e.g. NU 7 @ 17.205 twice on 2026-02-04) are **genuine separate fills**, not duplicates.
 
-**Prior years remain estimates** — a YTD query can't reach them. Backfilling 2025 needs a one-off period
+**Prior years remain estimates** — the rolling 30-day query can't reach them. Backfilling 2025 needs a one-off period
 change in the Flex Query (see the tax section); until then 2025 correctly reports
 `dividend_source='yfinance_estimate'`.
