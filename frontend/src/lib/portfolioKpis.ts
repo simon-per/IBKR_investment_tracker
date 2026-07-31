@@ -11,7 +11,7 @@ const MIN_RETURNS = 5
  * `MIN_RETURNS` because a regression slope needs far more evidence than a mean
  * does, and because the pairing rule below throws days away.
  */
-const MIN_PAIRED_RETURNS = 20
+export const MIN_PAIRED_RETURNS = 20
 /**
  * A cost-basis line unchanged from one day to the next subtracts to exactly
  * zero, so this only has to absorb the cent rounding the API applies.

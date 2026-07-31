@@ -9,6 +9,7 @@ import { LazyTabPanel } from '@/components/ui/LazyTabPanel'
 import { PortfolioValueChart } from './PortfolioValueChart'
 import { PortfolioSummaryCards } from './PortfolioSummaryCards'
 import { PerformanceMetricsCards } from './PerformanceMetricsCards'
+import { RiskMetricsCards } from './RiskMetricsCards'
 import { ContributionsStrip } from './ContributionsStrip'
 import { PositionsList } from './PositionsList'
 import { PerformanceAttribution } from './PerformanceAttribution'
@@ -39,7 +40,18 @@ import { ThemeToggle } from './ThemeToggle'
 import { AdminKeyButton } from './AdminKeyButton'
 import { BenchmarkPicker, BENCHMARK_COLORS } from './BenchmarkPicker'
 import { useBaseCurrency, useCurrencySymbol } from '@/lib/CurrencyContext'
-import { concentrationPct, maxDrawdownPct, sharpeRatio } from '@/lib/portfolioKpis'
+import {
+  MIN_PAIRED_RETURNS,
+  annualizedVolatilityPct,
+  benchmarkAsValueSeries,
+  betaAndCorrelation,
+  concentrationPct,
+  drawdownDetail,
+  herfindahlConcentration,
+  maxDrawdownPct,
+  sharpeRatio,
+  sortinoRatio,
+} from '@/lib/portfolioKpis'
 import { rangeFor, TIME_RANGES, type TimeRange } from '@/lib/dateRanges'
 import { RefreshCw, Download, Clock } from 'lucide-react'
 
@@ -245,6 +257,42 @@ export function Dashboard() {
     }
   }, [valueOverTime, positions, annualizedReturn])
 
+  // The risk side of the same series. Kept in a second memo because beta also
+  // depends on the benchmark selection, which the return KPIs do not.
+  const riskMetrics = useMemo(() => {
+    if (!valueOverTime || valueOverTime.length < 2 || !positions) {
+      return null
+    }
+
+    const drawdown = drawdownDetail(valueOverTime)
+    const { effectiveHoldings } = herfindahlConcentration(positions)
+
+    // Beta uses the FIRST selected benchmark: it is the primary comparison and
+    // the one the chart draws first. Nothing selected means no beta rather than
+    // a silent default, because which index the portfolio is measured against
+    // changes the answer.
+    const primary = benchmarkDatasets[0]
+    const beta = primary
+      ? {
+          ...betaAndCorrelation(valueOverTime, benchmarkAsValueSeries(primary.data)),
+          minSampleDays: MIN_PAIRED_RETURNS,
+          benchmarkName: primary.name,
+        }
+      : null
+
+    return {
+      volatilityPct: annualizedVolatilityPct(valueOverTime),
+      sortino: sortinoRatio(valueOverTime),
+      currentDrawdownPct: drawdown.currentDrawdownPct,
+      maxDrawdownPct: drawdown.maxDrawdownPct,
+      troughDate: drawdown.troughDate,
+      recoveredDate: drawdown.recoveredDate,
+      effectiveHoldings,
+      totalPositions: positions.length,
+      beta,
+    }
+  }, [valueOverTime, positions, benchmarkDatasets])
+
   // Sync mutation
   const syncMutation = useMutation({
     mutationFn: () => api.syncIBKRData(),
@@ -419,6 +467,12 @@ export function Dashboard() {
             <PerformanceMetricsCards
               metrics={kpiMetrics}
               isLoading={chartLoading || positionsLoading || xirrLoading}
+            />
+
+            {/* Risk Metrics — the denominators the row above divides by */}
+            <RiskMetricsCards
+              metrics={riskMetrics}
+              isLoading={chartLoading || positionsLoading}
             />
 
             {/* Portfolio Value Chart */}
