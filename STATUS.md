@@ -17,8 +17,10 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 ## Needs a human
 
 - **Nothing from 2026-07-31 has been pushed** — `git push` is **refused to an agent by the permission
-  classifier**, so this is a human step, not an oversight. Twenty-two commits sit on local `main` (see
-  *Shipped locally* below); the tree is clean and both suites are green, so it is one command:
+  classifier**, so this is a human step, not an oversight. The unpushed work sits on local `main` (see
+  *Shipped locally* below; `git log --oneline origin/main..main` is the current list — the count is
+  deliberately not written here, it drifted three times in one session). The tree is clean and both
+  suites are green, so it is one command:
 
       git push origin main
 
@@ -90,7 +92,7 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 
 ## Shipped locally 2026-07-31 — NOT deployed
 
-Twenty-two commits on local `main`, none pushed. Suites: backend 357 → 446, frontend 45 → 91,
+Nothing pushed (`git log --oneline origin/main..main`). Suites: backend 357 → 446, frontend 45 → 91,
 `tsc -b` and `npm run build` clean.
 
 **The bundle is now code-split**, which changed the shape of a deploy for users. It was one 891 kB /
@@ -251,7 +253,7 @@ detail; this exists so the next session knows what just moved without reading it
 confirmed) and gets deleted once nothing in it is outstanding: these lines are permanent, so don't
 "tidy up" the overlap by deleting the wrong one.
 
-- **2026-07-31** — enterprise-readiness pass, twenty-two commits: shared TTM growth,
+- **2026-07-31** — enterprise-readiness pass: shared TTM growth,
   locale-independent chart dates, inception read from the data, keyboard/ARIA across the tab strip and
   every collapsible and sortable header, four more explicit error states, optional write auth +
   per-IP rate limit + request ids + `/health` build identity, the Activity ledger over the four

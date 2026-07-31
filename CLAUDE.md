@@ -113,6 +113,9 @@ being true** instead of stacking corrections. `Recent sessions` is the one appen
 five one-liners — drop the oldest rather than letting it grow. And never accumulate **figures** (public
 repo, user-switchable base currency, and a pasted total goes stale silently) or **what git already
 records** — the log has what changed; STATUS.md has what is now true and what it costs the next person.
+A count of unpushed commits is both, which is why it is written as `git log --oneline origin/main..main`
+rather than a number: as a figure it went stale three times in one session, each time inside the very
+commit that corrected it.
 
 ---
 
