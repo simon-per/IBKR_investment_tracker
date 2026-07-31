@@ -331,6 +331,13 @@ run; it needs a production snapshot, which is real account data. **Nothing is de
 is local. Every local server was started with `SCHEDULER_ENABLED=false` confirmed in `.env` *and* in
 `/health`, and stopped afterwards; no provider was contacted at any point.
 
+**The aggregate diff has been read as well as tested** — 52 files, +4322 / −157, no stray artifacts, no
+debug leftovers, no focused or disabled tests. The public-repo audit passed the half that is expensive
+to re-establish: **no database is tracked now and none was ever committed in history**, and there are no
+stray data files. It did turn up one doc defect, since fixed: `backend/portfolio.db` is gitignored and
+untracked, but five places called it "checked-in" — so a fresh clone has *no* database, the backend
+creates an empty one, and `e2e/a11y` fails for want of rows in a way that looks like a regression.
+
 `tests/test_api_contract_drift.py` now fails when a TS interface reads a field the backend stopped
 sending — a generalisation of the dividend contract test to all 25 name-matched model/interface pairs,
 with no hand-maintained list. It found **no drift** on the current tree, so it ships as a guard rather
