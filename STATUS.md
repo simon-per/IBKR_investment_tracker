@@ -258,6 +258,14 @@ this section can be deleted once the commits are pushed without losing them.
   above rows reading *Not currently held*. Caught by `e2e/errors`, which now covers it.
 - **`e2e/a11y.mjs` claimed "backend optional"** and never could have been: three of its checks need one,
   so run as documented it reported 11/14 with every failure a phantom.
+- **A never-rated security could never acquire an analyst rating.** `sync_stale_ratings` built its work
+  list from `get_stale_ratings`, which selects rating rows older than the cutoff — rows that already
+  *exist*. So a newly-bought security was invisible to it forever, and against an empty table it
+  reported "No stale ratings to update" and fetched nothing: the endpoint whose job is keeping ratings
+  current could not populate them in the first place. Same shape CLAUDE.md documents for benchmark
+  bootstrapping, and **the correct pattern was already in the sibling** —
+  `FundamentalsService.sync_stale_fundamentals` unions the two sets. Still bounded: a rating fresher
+  than three days is left alone.
 - **A security with no allocation data was re-fetched on every sync forever.**
   `sync_allocation_data`'s failure path never set `allocation_last_updated`, and selection takes every
   security whose timestamp is null or over 7 days old — so a security Yahoo has no `.info` for cost a
@@ -471,9 +479,9 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
 "tidy up" the overlap by deleting the wrong one.
 
 - **2026-07-31 (overnight, unpushed)** — autonomous loop: three frontend features (risk row, target
-  allocation & drift, currency exposure) and eleven bugs (49 sites reading the clock in local time; SOXQ
+  allocation & drift, currency exposure) and twelve bugs (49 sites reading the clock in local time; SOXQ
   missing from the ETF look-through; the rebalance panel building a plan out of an outage; `e2e/a11y`'s
-  "backend optional" claim). Suites 462 → 592 backend, 91 → 268 frontend; all `e2e` scripts green bar
+  "backend optional" claim). Suites 462 → 597 backend, 91 → 268 frontend; all `e2e` scripts green bar
   `ledger`. Durable rules promoted into CLAUDE.md. **Nothing deployed** — see *Unpushed*.
 - **2026-07-31** — enterprise-readiness pass: shared TTM growth,
   locale-independent chart dates, inception read from the data, keyboard/ARIA across the tab strip and
