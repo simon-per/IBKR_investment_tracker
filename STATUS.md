@@ -258,6 +258,15 @@ this section can be deleted once the commits are pushed without losing them.
   above rows reading *Not currently held*. Caught by `e2e/errors`, which now covers it.
 - **`e2e/a11y.mjs` claimed "backend optional"** and never could have been: three of its checks need one,
   so run as documented it reported 11/14 with every failure a phantom.
+- **A security with no allocation data was re-fetched on every sync forever.**
+  `sync_allocation_data`'s failure path never set `allocation_last_updated`, and selection takes every
+  security whose timestamp is null or over 7 days old — so a security Yahoo has no `.info` for cost a
+  request and ~5s of delays on every run, indefinitely, against an IP-based rate limit. Same shape as
+  the price-holiday and benchmark-retry bugs. **Fixing it alone would have been worse than the bug**:
+  `securities_without_data` counted by *null timestamp* and drives the Allocation tab's "N securities
+  missing allocation data" banner, so stamping the attempt would have cleared the banner the moment we
+  gave up. The count now keys on the data (a sector, a country, or a known ETF type — an ETF
+  legitimately has many sectors rather than none) and the timestamp means "last attempted".
 - **Analyst ratings were read out of yfinance by row position.** `recommendations.iloc[0]`, under a
   comment asserting row 0 *is* the current month — provider ordering taken on trust, and the same shape
   as the `openDateTime` defect CLAUDE.md says not to reintroduce. A three-month-old consensus reported
@@ -462,9 +471,9 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
 "tidy up" the overlap by deleting the wrong one.
 
 - **2026-07-31 (overnight, unpushed)** — autonomous loop: three frontend features (risk row, target
-  allocation & drift, currency exposure) and ten bugs (49 sites reading the clock in local time; SOXQ
+  allocation & drift, currency exposure) and eleven bugs (49 sites reading the clock in local time; SOXQ
   missing from the ETF look-through; the rebalance panel building a plan out of an outage; `e2e/a11y`'s
-  "backend optional" claim). Suites 462 → 587 backend, 91 → 268 frontend; all `e2e` scripts green bar
+  "backend optional" claim). Suites 462 → 592 backend, 91 → 268 frontend; all `e2e` scripts green bar
   `ledger`. Durable rules promoted into CLAUDE.md. **Nothing deployed** — see *Unpushed*.
 - **2026-07-31** — enterprise-readiness pass: shared TTM growth,
   locale-independent chart dates, inception read from the data, keyboard/ARIA across the tab strip and
