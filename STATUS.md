@@ -336,11 +336,29 @@ positions, not realistic ones (unlike `ledger.mjs`).
 `a11y.mjs` now also covers the rebalance panel — its target and tolerance-band fields are the only
 editable inputs in the app, so an accessible name on each is its whole keyboard story. **17/17.**
 
-**The `e2e/` suite was run for the first time in a while and the build-output halves pass clean:**
-`chunks` 33/33, `csp` 4/4, `a11y` 17/17. Every chunk boundary survived this session's frontend work —
-`RiskMetricsCards` sits in the eager `index` chunk (correct: default tab) and `RebalanceCard` in the
-lazy `AllocationTab` one — and the Allocation tab mounts with the new panel under the production CSP
-with zero violations. `sweep` and `errors` remain unrun.
+**The `e2e/` suite was run for the first time in a while:** `chunks` 33/33, `csp` 4/4, `a11y` 17/17,
+`errors` 14/14. Every chunk boundary survived this session's frontend work — `RiskMetricsCards` sits in
+the eager `index` chunk (correct: default tab) and `RebalanceCard` in the lazy `AllocationTab` one — and
+the Allocation tab mounts with the new panel under the production CSP with zero violations. **`sweep`
+(16 checks, needs backend + data) is the one script still unrun.**
+
+**`e2e/errors` earned its keep immediately: the rebalance panel drew a whole plan out of a backend
+outage.** With targets saved in localStorage and the backend down it reported *0 position(s) outside the
+5 pp band* above rows reading *Not currently held* — that nothing needs rebalancing, and that held
+positions are not held. It escaped the existing eleven checks because they predate the panel and because
+**the shape is unreachable without a saved target**, which no check set up. The panel is the only surface
+whose state survives an outage, which is what lets it build a plan out of one.
+
+Two defects, both fixed: `undefined` positions were read as "none held" rather than "not loaded" (an
+empty array is still genuinely "none held"; `undefined` or a query error now renders **no table**, since
+building one from an empty list is what produced those rows), and *"0 outside the band"* was reported
+when **nothing could be judged** — `RebalancePlan` now carries `judgedCount`. The second was wrong with a
+healthy backend too: a portfolio whose every target sat on an unpriced holding read as balanced.
+`errors.mjs` gained three checks that seed a target first. Frontend suite 171 → 181.
+
+`RiskMetricsCards` returning `null` during an outage is **deliberate, not the same bug**: that is absence
+rather than an empty-data claim, the Performance tab already states the failure (8 panels do), and its
+sibling `PerformanceMetricsCards` has the identical `if (!metrics) return null`.
 
 **`benchmark_service.calculate_benchmark_value_over_time()` was audited and is correct** — it is the
 input to the new beta metric, and re-reading 200 lines is expensive, so: close events exclude **on**
