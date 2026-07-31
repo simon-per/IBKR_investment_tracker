@@ -398,3 +398,43 @@ def test_scheduler_is_enabled_by_default():
     from app.config import Settings
 
     assert Settings.model_fields["scheduler_enabled"].default is True
+
+
+@pytest.mark.asyncio
+async def test_an_unusable_job_store_degrades_instead_of_killing_the_container(
+    monkeypatch, caplog
+):
+    """
+    The store is a bind-mounted sqlite file, so corrupt or unwritable is possible — and
+    an exception out of start() propagates through the lifespan handler and the
+    container never boots. Losing misfire recovery costs one late sync; failing to
+    start costs the whole site.
+
+    The guard has to wrap start(), not the constructor: SQLAlchemyJobStore connects
+    lazily, so a bad file surfaces when the scheduler starts the store.
+    """
+    import logging
+    from apscheduler.jobstores import sqlalchemy as js_module
+
+    monkeypatch.setattr(settings, "scheduler_jobstore_url", "sqlite:///:memory:", raising=False)
+
+    class Exploding(js_module.SQLAlchemyJobStore):
+        def start(self, scheduler, alias):
+            raise RuntimeError("database disk image is malformed")
+
+    monkeypatch.setattr(
+        "app.services.scheduler_service.SQLAlchemyJobStore", Exploding
+    )
+
+    svc = SchedulerService()
+    try:
+        with caplog.at_level(logging.ERROR):
+            svc.start()
+
+        # Came up anyway, with the full schedule.
+        assert svc.scheduler is not None
+        assert len(svc.scheduler.get_jobs()) == 5
+        # And said so, rather than degrading silently.
+        assert any("running in memory" in r.getMessage() for r in caplog.records)
+    finally:
+        svc.shutdown()

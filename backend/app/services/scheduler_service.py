@@ -775,6 +775,38 @@ class SchedulerService:
             func, trigger=trigger, id=job_id, name=name, replace_existing=True
         )
 
+    def _try_start(self, jobstores: dict, fatal: bool = False) -> bool:
+        """
+        Build and start a paused scheduler over `jobstores`. True if it came up.
+
+        Paused so the job store is live for `_add_or_keep`'s `get_job()` lookups —
+        before `start()` those see only APScheduler's pending-jobs list — while nothing
+        can fire mid-registration.
+
+        `fatal=True` for the in-memory attempt: if even that fails there is nothing left
+        to fall back to, and swallowing it would leave `self.scheduler` None for
+        `shutdown()` and `/api/scheduler/status` to trip over later.
+        """
+        try:
+            self.scheduler = AsyncIOScheduler(
+                jobstores=jobstores,
+                job_defaults={
+                    # One catch-up run, not one per slot the outage covered.
+                    'coalesce': True,
+                    'misfire_grace_time': MISFIRE_GRACE_SECONDS,
+                    # Belt and braces beside single_flight, which is the real guard.
+                    'max_instances': 1,
+                },
+            )
+            self.scheduler.start(paused=True)
+            return True
+        except Exception:
+            self.scheduler = None
+            if fatal:
+                raise
+            logger.exception("Scheduler failed to start with the configured job store")
+            return False
+
     def start(self):
         """
         Start the scheduler with 5 daily syncs (Europe/Berlin):
@@ -793,29 +825,35 @@ class SchedulerService:
 
         logger.info("Starting scheduler service...")
 
-        jobstores = {}
+        # A persistent store serializes each job, so the target must be importable by
+        # name. That is why the five entry points below are module-level functions
+        # rather than the bound methods they used to be: a bound method of this instance
+        # would drag the live AsyncIOScheduler into the pickle.
+        #
+        # It degrades to in-memory rather than raising, and the guard wraps `start()`
+        # rather than the constructor because SQLAlchemyJobStore connects lazily — a
+        # corrupt or unwritable file surfaces when the scheduler starts the store, not
+        # when it is built. The store is a bind-mounted sqlite file, so both are
+        # possible, and an exception here propagates out of the lifespan handler and
+        # **the container never boots**. Losing misfire recovery costs one late sync;
+        # failing to start costs the whole site.
+        started = False
         if settings.scheduler_jobstore_url:
-            # A persistent store serializes each job, so the target must be importable
-            # by name. That is why the five entry points below are module-level
-            # functions rather than the bound methods they used to be: a bound method
-            # of this instance would drag the live AsyncIOScheduler into the pickle.
-            jobstores['default'] = SQLAlchemyJobStore(url=settings.scheduler_jobstore_url)
+            try:
+                store = SQLAlchemyJobStore(url=settings.scheduler_jobstore_url)
+            except Exception:
+                logger.exception("Could not build the scheduler job store")
+            else:
+                started = self._try_start({'default': store})
+            if not started:
+                logger.error(
+                    "Scheduler job store at %s is unusable - running in memory. Jobs "
+                    "still run on schedule, but a restart overlapping a slot loses it.",
+                    settings.scheduler_jobstore_url,
+                )
 
-        self.scheduler = AsyncIOScheduler(
-            jobstores=jobstores,
-            job_defaults={
-                # One catch-up run, not one per slot the outage covered.
-                'coalesce': True,
-                'misfire_grace_time': MISFIRE_GRACE_SECONDS,
-                # Belt and braces beside single_flight, which is the real guard.
-                'max_instances': 1,
-            },
-        )
-
-        # Paused, so the job store is live for the get_job() lookups in _add_or_keep
-        # (before start() those would only see APScheduler's pending-jobs list) while
-        # nothing can fire mid-registration.
-        self.scheduler.start(paused=True)
+        if not started:
+            self._try_start({}, fatal=True)
 
         self._add_or_keep(
             'full_sync_job', full_sync_job_entry,
