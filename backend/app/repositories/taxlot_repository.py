@@ -3,13 +3,11 @@ TaxLot Repository
 Handles database operations for Tax Lots.
 """
 from typing import List, Optional
-from datetime import date
 from sqlalchemy import select, delete, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
 from app.models.taxlot import TaxLot
-from app.models.security import Security
 
 
 class TaxLotRepository:
@@ -48,25 +46,6 @@ class TaxLotRepository:
             .options(joinedload(TaxLot.security))
             .where(TaxLot.is_open == True)
             .order_by(TaxLot.open_date)
-        )
-        return list(result.scalars().all())
-
-    async def get_taxlots_on_date(self, target_date: date) -> List[TaxLot]:
-        """
-        Get all tax lots that were active on a specific date.
-        A tax lot is active if:
-        - open_date <= target_date
-        - close_date is None OR close_date > target_date
-        """
-        result = await self.session.execute(
-            select(TaxLot)
-            .options(joinedload(TaxLot.security))
-            .where(TaxLot.open_date <= target_date)
-            .where(
-                (TaxLot.close_date.is_(None)) |
-                (TaxLot.close_date > target_date)
-            )
-            .order_by(TaxLot.security_id, TaxLot.open_date)
         )
         return list(result.scalars().all())
 
@@ -121,13 +100,6 @@ class TaxLotRepository:
             await self.session.refresh(taxlot)
         return taxlot
 
-    async def close_taxlot(self, taxlot_id: int, close_date: date) -> Optional[TaxLot]:
-        """Mark a tax lot as closed"""
-        return await self.update(taxlot_id, {
-            'is_open': False,
-            'close_date': close_date
-        })
-
     async def delete(self, taxlot_id: int) -> bool:
         """Delete a tax lot by ID"""
         taxlot = await self.get_by_id(taxlot_id)
@@ -136,25 +108,6 @@ class TaxLotRepository:
             await self.session.flush()
             return True
         return False
-
-    async def delete_by_security_id(self, security_id: int) -> int:
-        """
-        Delete all tax lots for a security.
-        Returns count of deleted lots.
-        """
-        taxlots = await self.get_by_security_id(security_id)
-        count = len(taxlots)
-        for taxlot in taxlots:
-            await self.session.delete(taxlot)
-        await self.session.flush()
-        return count
-
-    async def delete_open_by_security_id(self, security_id: int) -> int:
-        """
-        Delete only OPEN tax lots for a security, preserving closed (historical) lots.
-        Returns count of deleted lots.
-        """
-        return await self.delete_open_by_security_ids([security_id])
 
     async def delete_open_by_security_ids(self, security_ids) -> int:
         """
