@@ -1,6 +1,6 @@
 # Working state
 
-**Last updated: 2026-07-31**
+**Last updated: 2026-07-31 (overnight loop in progress — see *Unpushed*)**
 
 `CLAUDE.md` is the durable guide — architecture, invariants, and the rules that were each a bug
 first. **This file is the perishable half**: where the work actually stands, what is known-broken,
@@ -224,6 +224,32 @@ What landed, and why each was worth doing:
   slots. Confirm on the next deploy that `/root/auto-deploy.log` still logs a normal run — and,
   when one lands near 08/13/15/20/22:00, that it logs `SKIP: within 10min` and defers rather than
   stalling. A guard that refuses *every* deploy would look identical to "nothing was pushed".
+
+## Unpushed — waiting on a human
+
+An autonomous overnight loop is running (`/loop 10m`, started 2026-07-31 ~21:45) doing feature
+research → implementation → bug hunting. Its commits are **local and unpushed**, deliberately: a push
+auto-deploys inside 10 minutes and nobody is awake to watch it. `git log --oneline origin/main..main`
+is the list; the loop's own running notes are `.claude/overnight-log.md` (gitignored).
+
+**Risk metrics on the Performance tab.** The app reported return *per unit of risk* — Sharpe, Calmar —
+without ever showing the risk, and a top-5 weight cannot tell five equal positions from one dominant
+one. A second card row now carries annualised volatility, Sortino, beta vs the primary selected
+benchmark, the **current** drawdown with the worst one as its footnote, and Herfindahl effective
+holdings. Frontend-only: beta reuses the benchmark series the chart already fetches, so it adds no
+request and cannot reach Yahoo. Frontend suite 91 → 133.
+
+Two decisions there that should not be quietly reverted:
+
+- **Beta is measured over flow-free days only.** The benchmark is a flow-matched hypothetical carrying
+  the portfolio's own cost-basis line but no `external_flow_eur`, so netting a flow out of it would
+  mean inferring one from the cost delta — the same asymmetry that fabricates a loss on every sale
+  date in `externalFlow`'s fallback, biasing beta on exactly the days the portfolio traded. The pair
+  is dropped instead, and `sampleDays` rides along so a thin window declares itself rather than
+  showing a confident-looking slope.
+- **Volatility and Sortino are `null`, not `0`, when unknown** — below the minimum sample, or with no
+  down days at all. Same rule the tax report's `holdings_snapshot_total` and `_to_eur` learned the
+  hard way.
 
 ## Worth doing next
 
