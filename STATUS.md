@@ -48,10 +48,10 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
   was served by the public `/api/scheduler/history` until the 2026-07-28 scrub. `app/redact.py` now
   redacts on write *and* on read, so it cannot recur — but redaction cannot un-leak what was already
   reachable. Only Simon can rotate it (IBKR portal → Reports → Settings → Flex Web Service).
-- **Backfill the 2025 tax year.** A YTD Flex Query cannot reach it, so 2025 correctly reports
+- **Backfill the 2025 tax year.** The Flex Query period cannot reach it, so 2025 correctly reports
   `dividend_source='yfinance_estimate'`. Needs a one-off period change on the query (or a browser
-  download ingested via `app/cli/ingest_flex_xml.py`), then set it back to YTD. Ingestion is
-  idempotent, so this is safe to repeat. The UI no longer hardcodes 2024 as the earliest tax year —
+  download ingested via `app/cli/ingest_flex_xml.py`), then set it back to the rolling window.
+  Ingestion is idempotent, so this is safe to repeat. The UI no longer hardcodes 2024 as the earliest tax year —
   both it and the chart's ALL range read `min(taxlots.open_date)` — so the backfilled year appears
   on its own once ingested.
 
@@ -74,10 +74,9 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
     Five of those scan the whole YTD period; Open Positions, the only original section, does not.
     The 08:00 `1001`s that motivated the retries began the day after the first expansion.
 
-  **So shortening the period is the real lever if the overnight slots aren't enough** — 60 days is
-  ample and safe (trades are read from the DB, ingestion is additive, `coverage_from` only widens,
-  Open Positions is period-independent). Don't judge it by row counts: Open Positions is ~70% of the
-  rows and ~0% of the scan work. Full reasoning in CLAUDE.md's *Sync schedule* section.
+  **Shortening the period is the real lever**, and it is queued under *Needs a human* (30 days).
+  Don't judge it by row counts: Open Positions is ~70% of the rows and ~0% of the scan work. Full
+  reasoning in CLAUDE.md's *Sync schedule* section.
 - **MCO and MRVL each forecast off only 2 samples.** Surfaced by the new `forecast_samples` field the
   day it shipped, and badged `n=2` in the dividends table. Not known-wrong — both are real payers with
   plausible schedules — but two samples is the exact shape that let SBI project a fake monthly cadence,
