@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.repositories.fundamentals_repository import FundamentalsRepository
+from app.services.peg_ratio import peg_from_growth
 from app.services.ttm_growth import ttm_growth_from_quarterly
 from app.models.security import Security
 
@@ -131,14 +132,22 @@ class FundamentalsService:
             'data_currency': info.get('currency'),
         }
 
-        # Fallback: compute PEG from trailing PE / 5-year EPS growth (analyst long-term estimate)
-        # Uses longTermGrowth (5-yr CAGR) which matches Yahoo Finance's PEG methodology.
-        # Only falls back to trailing quarterly growth if longTermGrowth is unavailable.
-        if metrics_data.get('peg_ratio') is None and metrics_data.get('trailing_pe'):
+        # PEG fallbacks, in the same order as WatchlistService — Yahoo's own figure,
+        # then forward EPS growth, then the analyst 5-year CAGR (which matches
+        # Yahoo's own PEG methodology). The orders used to differ: this path had no
+        # forward-EPS tier at all, so the same security could show one PEG on
+        # /api/fundamentals/portfolio and another on /api/watchlist. `fwd_eps` was
+        # already computed above, so closing that costs no extra request.
+        if metrics_data['peg_ratio'] is None:
+            metrics_data['peg_ratio'] = self._safe_float(
+                peg_from_growth(metrics_data['trailing_pe'], fwd_eps)
+            )
+
+        if metrics_data['peg_ratio'] is None:
             lt_growth = self._safe_float(info.get('longTermGrowth') or info.get('longTermEpsGrowth'))
-            if lt_growth and lt_growth > 0:
-                lt_pct = lt_growth * 100 if lt_growth < 1 else lt_growth  # normalise if already a %
-                metrics_data['peg_ratio'] = round(metrics_data['trailing_pe'] / lt_pct, 4)
+            metrics_data['peg_ratio'] = self._safe_float(
+                peg_from_growth(metrics_data['trailing_pe'], lt_growth)
+            )
 
         logger.info(f"Got fundamentals for {security.symbol} (type={metrics_data['quote_type']})")
         return metrics_data

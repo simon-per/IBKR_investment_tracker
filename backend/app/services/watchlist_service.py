@@ -10,6 +10,7 @@ import numpy as np
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.repositories.watchlist_repository import WatchlistRepository
+from app.services.peg_ratio import peg_from_growth
 from app.services.ttm_growth import ttm_growth_from_quarterly
 
 logger = logging.getLogger(__name__)
@@ -264,17 +265,20 @@ class WatchlistService:
             "last_synced": utcnow(),
         }
 
-        # Fallback 1 (preferred): P/E / Fwd EPS growth %
-        if data["peg_ratio"] is None and data["trailing_pe"] and fwd_eps and fwd_eps > 0:
-            fwd_eps_pct = fwd_eps * 100  # convert decimal (0.30) -> percentage (30)
-            data["peg_ratio"] = self._safe_float(data["trailing_pe"] / fwd_eps_pct)
+        # Fallback 1 (preferred): P/E / Fwd EPS growth %. FundamentalsService runs the
+        # same tiers in the same order over the same inputs — it used to lack this one
+        # entirely, so the two endpoints disagreed. See app/services/peg_ratio.py.
+        if data["peg_ratio"] is None:
+            data["peg_ratio"] = self._safe_float(
+                peg_from_growth(data["trailing_pe"], fwd_eps)
+            )
 
         # Fallback 2 (last resort): Trailing P/E / analyst 5-yr EPS CAGR %
-        if data["peg_ratio"] is None and data["trailing_pe"]:
+        if data["peg_ratio"] is None:
             lt_growth = self._safe_float(info.get("longTermGrowth") or info.get("longTermEpsGrowth"))
-            if lt_growth and lt_growth > 0:
-                lt_pct = lt_growth * 100 if lt_growth < 1 else lt_growth  # normalise if already a %
-                data["peg_ratio"] = self._safe_float(data["trailing_pe"] / lt_pct)
+            data["peg_ratio"] = self._safe_float(
+                peg_from_growth(data["trailing_pe"], lt_growth)
+            )
 
         # Use .info for 52-week high/low and moving averages (reliable, pre-computed)
         data["week52_high"] = self._safe_float(info.get("fiftyTwoWeekHigh"))
