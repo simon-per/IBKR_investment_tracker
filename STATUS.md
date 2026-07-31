@@ -1,6 +1,6 @@
 # Working state
 
-**Last updated: 2026-07-31 (overnight loop in progress — see *Unpushed*)**
+**Last updated: 2026-08-01 (overnight loop, unpushed — see *Unpushed*)**
 
 `CLAUDE.md` is the durable guide — architecture, invariants, and the rules that were each a bug
 first. **This file is the perishable half**: where the work actually stands, what is known-broken,
@@ -298,8 +298,14 @@ Suites **backend 523 / frontend 214**, `tsc -b` and `npm run build` clean. `e2e/
 `csp` 4/4, `a11y` 17/17, `errors` 14/14, `sweep` 16/16 — everything except `ledger`, which needs a
 production snapshot. **Nothing is deployed**: all of the above is verified locally only.
 
-Coverage-led hunting found two of the four bugs (`pytest --cov`, backend ~70%);
-`taxlot_repository` (58%) is the last flagged pure-computation gap.
+Coverage-led hunting found two of the bugs (`pytest --cov`, backend ~70%). The last flagged gap,
+`taxlot_repository` (58%), turned out to be **dead code rather than untested code**: four methods with no
+caller anywhere, three of them traps for whoever reaches for the obvious name — `close_taxlot` wrote a
+closure with no `close_source` (the shape `restamp_unsourced_closed_lots()` repairs),
+`delete_by_security_id` deleted *closed* lots that the contributions splice needs to survive, and
+`get_taxlots_on_date` was a fourth uncalled copy of the exclude-on-close convention CLAUDE.md says to
+change in lockstep. Removed rather than tested: coverage would have pinned behaviour that should not be
+reachable.
 
 
 ## Worth doing next
