@@ -84,6 +84,9 @@ class SchedulerService:
     def __init__(self):
         self.scheduler: Optional[AsyncIOScheduler] = None
         self.last_sync_result: Optional[dict] = None
+        # Ids registered by this build, filled in by `_add_or_keep` and consumed by
+        # `_prune_unknown_jobs` to evict jobs the persistent store outlived.
+        self._registered_job_ids: set = set()
 
     async def sync_ibkr_data(self) -> dict:
         """
@@ -763,6 +766,10 @@ class SchedulerService:
         repr is its full field set, so editing an hour replaces the job (and its stale
         run time) while a restart with the same schedule does not.
         """
+        # Feeds `_prune_unknown_jobs`, so the set of live jobs is defined by what was
+        # actually registered rather than by a second list free to fall out of step.
+        self._registered_job_ids.add(job_id)
+
         existing = self.scheduler.get_job(job_id)
         if existing is not None and str(existing.trigger) == str(trigger):
             logger.info(f"  {name} — kept, next run: {existing.next_run_time}")
@@ -774,6 +781,26 @@ class SchedulerService:
         self.scheduler.add_job(
             func, trigger=trigger, id=job_id, name=name, replace_existing=True
         )
+
+    def _prune_unknown_jobs(self) -> None:
+        """
+        Drop persisted jobs this build no longer registers.
+
+        The job store outlives the code. Without this, **renaming a job id silently
+        doubles the work instead of replacing it**: `_add_or_keep` adds the new id, and
+        the row under the old id keeps its trigger and keeps firing — two IBKR syncs a
+        night, each burning a Flex statement generation, which is what `Code=1025`
+        counts. Retiring a job entirely has the same shape: the code forgets it, the
+        store does not.
+
+        Registration is the single source of truth: `_add_or_keep` records each id it
+        handles, so this cannot drift from the list above the way a second hardcoded set
+        would. Safe because jobs are only ever added there — nothing schedules at runtime.
+        """
+        for job in self.scheduler.get_jobs():
+            if job.id not in self._registered_job_ids:
+                logger.info(f"  removing retired job '{job.id}' from the persistent store")
+                job.remove()
 
     def _try_start(self, jobstores: dict, fatal: bool = False) -> bool:
         """
@@ -883,13 +910,20 @@ class SchedulerService:
         #
         # Keep any future retry inside roughly 22:00–09:00 Berlin. A midday slot looks
         # helpful and is not.
+        #
+        # The ids are **numbered, not named for their hour**. They used to be
+        # `ibkr_sync_midday` / `ibkr_sync_evening`, which became lies the moment the
+        # hours moved — and an id is the one thing a persistent job store cannot cheaply
+        # rename (see `_prune_unknown_jobs`). Encoding the schedule in the identity
+        # guarantees exactly this problem on the next change; the human-readable hour
+        # lives in `name`, which is free to change.
         self._add_or_keep(
-            'ibkr_sync_midday', ibkr_only_sync_job_entry,
+            'ibkr_retry_1', ibkr_only_sync_job_entry,
             CronTrigger(hour=0, minute=0, timezone='Europe/Berlin'),
             'IBKR-only Sync (00:00 Europe/Berlin)',
         )
         self._add_or_keep(
-            'ibkr_sync_evening', ibkr_only_sync_job_entry,
+            'ibkr_retry_2', ibkr_only_sync_job_entry,
             CronTrigger(hour=6, minute=0, timezone='Europe/Berlin'),
             'IBKR-only Sync (06:00 Europe/Berlin)',
         )
@@ -904,6 +938,7 @@ class SchedulerService:
             'Market Data Sync after US Close (22:00 Europe/Berlin)',
         )
 
+        self._prune_unknown_jobs()
         self.scheduler.resume()
 
         logger.info("Scheduler started successfully")

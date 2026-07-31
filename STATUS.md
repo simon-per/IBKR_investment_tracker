@@ -84,7 +84,7 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 
 ## Shipped 2026-07-31 — DEPLOYED and verified
 
-Live at 19:31 Berlin. Suites: backend 357 → 452, frontend 45 → 91, `tsc -b` and `npm run build`
+Live at 19:31 Berlin. Suites: backend 357 → 453, frontend 45 → 91, `tsc -b` and `npm run build`
 clean. **Write auth is ON in production** — verified from outside the host: a write with no key and
 a write with a wrong key both 401, reads still 200. All five scheduler jobs re-registered after the
 rebuild, which is the persistent job store doing its job. **The guarded `auto-deploy.sh` is
@@ -282,7 +282,7 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
   per-IP rate limit + request ids + `/health` build identity, the Activity ledger over the four
   unread tables, a persistent scheduler job store, delta-chip and scroll-affordance consolidation,
   real product chrome, a completed `/api/dividends/summary` contract, and a code-split bundle. Suites
-  357 → 452 backend, 45 → 91 frontend; verified against a prod snapshot and in a real browser, which
+  357 → 453 backend, 45 → 91 frontend; verified against a prod snapshot and in a real browser, which
   found three defects the green suite did not. **Deployed the same evening**: write auth on and
   enforced, guarded auto-deploy installed, five scheduler jobs surviving the rebuild.
 - **2026-07-30** — two batches: five audit fixes (Yahoo gating, `openDateTime` off ibflex, SELL beats

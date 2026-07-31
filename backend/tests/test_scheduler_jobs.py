@@ -272,21 +272,21 @@ async def test_scheduler_registers_five_jobs_with_expected_hours(jobstore_url):
         jobs = {job.id: job for job in svc.scheduler.get_jobs()}
 
         assert set(jobs) == {
-            'full_sync_job', 'ibkr_sync_midday', 'ibkr_sync_evening',
+            'full_sync_job', 'ibkr_retry_1', 'ibkr_retry_2',
             'market_sync_eu_close', 'market_sync_us_close',
         }
         # The two IBKR retries must not collide with the market-data jobs, so that a
         # Yahoo sync and an IBKR sync never run concurrently against the same DB.
         hours = {jid: str(job.trigger) for jid, job in jobs.items()}
-        assert "hour='0'" in hours['ibkr_sync_midday']
-        assert "hour='6'" in hours['ibkr_sync_evening']
+        assert "hour='0'" in hours['ibkr_retry_1']
+        assert "hour='6'" in hours['ibkr_retry_2']
         assert "hour='8'" in hours['full_sync_job']
     finally:
         svc.shutdown()
 
 
 # Every job that reaches IBKR. Market-data jobs are excluded: they touch Yahoo, not Flex.
-IBKR_JOB_IDS = ('full_sync_job', 'ibkr_sync_midday', 'ibkr_sync_evening')
+IBKR_JOB_IDS = ('full_sync_job', 'ibkr_retry_1', 'ibkr_retry_2')
 
 
 @pytest.mark.asyncio
@@ -366,6 +366,43 @@ async def test_a_restart_preserves_the_run_time_it_is_meant_to_recover(jobstore_
 
 
 @pytest.mark.asyncio
+async def test_a_job_this_build_no_longer_registers_is_removed_from_the_store(jobstore_url):
+    """
+    The job store outlives the code, so a renamed or retired job does not disappear — it
+    keeps its trigger and keeps firing. For the IBKR retries that is not cosmetic: the
+    old id would run a *second* sync alongside the new one, and each extra run burns a
+    Flex statement generation, which is exactly what `Code=1025` counts.
+
+    This is not hypothetical — the retries were renamed from `ibkr_sync_midday` /
+    `ibkr_sync_evening` on 2026-07-31 when their hours moved and the names became lies.
+    """
+    first = SchedulerService()
+    first.start()
+    # A job from a hypothetical earlier build, persisted in the same store.
+    first.scheduler.add_job(
+        ibkr_only_sync_job_entry,
+        trigger=CronTrigger(hour=13, minute=0, timezone='Europe/Berlin'),
+        id='ibkr_sync_midday', name='IBKR-only Sync (13:00 Europe/Berlin)',
+        replace_existing=True,
+    )
+    assert first.scheduler.get_job('ibkr_sync_midday') is not None
+    first.shutdown()
+
+    second = SchedulerService()
+    try:
+        second.start()
+        ids = {j.id for j in second.scheduler.get_jobs()}
+    finally:
+        second.shutdown()
+
+    assert 'ibkr_sync_midday' not in ids, "a retired job kept firing from the store"
+    assert ids == {
+        'full_sync_job', 'ibkr_retry_1', 'ibkr_retry_2',
+        'market_sync_eu_close', 'market_sync_us_close',
+    }
+
+
+@pytest.mark.asyncio
 async def test_a_schedule_change_still_takes_effect(jobstore_url, monkeypatch):
     """
     The other half: keeping a stored job must not mean a stored job can never be
@@ -412,7 +449,7 @@ async def test_jobs_are_serializable_into_the_persistent_store(jobstore_url):
         second.start()
         funcs = {job.id: job.func for job in second.scheduler.get_jobs()}
         assert funcs['full_sync_job'] is full_sync_job_entry
-        assert funcs['ibkr_sync_midday'] is ibkr_only_sync_job_entry
+        assert funcs['ibkr_retry_1'] is ibkr_only_sync_job_entry
         assert funcs['market_sync_us_close'] is market_data_only_sync_job_entry
     finally:
         second.shutdown()
