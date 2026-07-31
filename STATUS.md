@@ -258,6 +258,11 @@ this section can be deleted once the commits are pushed without losing them.
   above rows reading *Not currently held*. Caught by `e2e/errors`, which now covers it.
 - **`e2e/a11y.mjs` claimed "backend optional"** and never could have been: three of its checks need one,
   so run as documented it reported 11/14 with every failure a phantom.
+- **Any validation error reached the user as `[object Object]`.** FastAPI sends a 422's `detail` as an
+  **array of objects** (an ordinary `HTTPException` sends a string, which is why it went unnoticed), and
+  `api.request()` passed it straight to `new Error()`. `describeErrorBody` now renders it as
+  `year: Input should be a valid integer`, and a non-JSON error page reports its real status instead of
+  the literal string "Unknown error". Verified against the running backend, not assumed.
 - **A failed `/api/settings` fetch silently mislabelled every money figure for the whole session.**
   `CurrencyContext` fetches with `staleTime: Infinity` — correct, since the value only changes through
   our own mutation, but it makes one failed fetch sticky rather than a blink. The provider fell back to
@@ -314,12 +319,12 @@ such a pair by design, and the date stays in `missing_dates` so it self-heals.
 
 **Do not add `@vitest/coverage-v8` to `frontend/`** to measure frontend coverage — a devDependency there
 is installed by `npm ci` on every `--no-cache` deploy, which is the trap `e2e/` is a separate package to
-avoid. Listing source modules with no corresponding test file is the zero-install proxy, and it is what
-found `lib/utils.ts`. Remaining leads from that list: `lib/CurrencyContext.tsx` (76 lines, real logic —
-the invalidate-everything-on-currency-change behaviour) and `lib/api.ts` (891 lines but mostly thin
-`fetch` wrappers).
+avoid. Listing source modules with no corresponding test file is the zero-install proxy, and it found
+three of this session's bugs. **That lens is now exhausted**: every `lib/` module has tests. What is
+still untested is the large tab components, whose logic lives in the `lib/` modules they call and is
+additionally exercised by `e2e/sweep`.
 
-Suites **backend 523 / frontend 248**, `tsc -b` and `npm run build` clean. `e2e/`: `chunks` 33/33,
+Suites **backend 523 / frontend 268**, `tsc -b` and `npm run build` clean. `e2e/`: `chunks` 33/33,
 `csp` 4/4, `a11y` 17/17, `errors` 15/15, `sweep` 16/16 — everything except `ledger`, which needs a
 production snapshot. **Nothing is deployed**: all of the above is verified locally only.
 
@@ -416,9 +421,9 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
 "tidy up" the overlap by deleting the wrong one.
 
 - **2026-07-31 (overnight, unpushed)** — autonomous loop: three frontend features (risk row, target
-  allocation & drift, currency exposure) and six bugs (49 sites reading the clock in local time; SOXQ
+  allocation & drift, currency exposure) and seven bugs (49 sites reading the clock in local time; SOXQ
   missing from the ETF look-through; the rebalance panel building a plan out of an outage; `e2e/a11y`'s
-  "backend optional" claim). Suites 462 → 523 backend, 91 → 248 frontend; all `e2e` scripts green bar
+  "backend optional" claim). Suites 462 → 523 backend, 91 → 268 frontend; all `e2e` scripts green bar
   `ledger`. Durable rules promoted into CLAUDE.md. **Nothing deployed** — see *Unpushed*.
 - **2026-07-31** — enterprise-readiness pass: shared TTM growth,
   locale-independent chart dates, inception read from the data, keyboard/ARIA across the tab strip and
