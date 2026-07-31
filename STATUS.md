@@ -16,7 +16,7 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 
 ## Needs a human
 
-- **Nothing from 2026-07-31 has been pushed.** Fifteen commits sit on local `main` (see *Shipped
+- **Nothing from 2026-07-31 has been pushed.** Nineteen commits sit on local `main` (see *Shipped
   locally* below). Pushing auto-deploys within 10 minutes, so land it **outside** a Berlin sync slot
   (08/13/15/20/22:00). The new persistent job store recovers a slot missed by under 30 min once it is
   live — but it is not live until this deploy lands, so the first one still has to be timed by hand.
@@ -84,7 +84,7 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 
 ## Shipped locally 2026-07-31 — NOT deployed
 
-Fifteen commits on local `main`, none pushed. Suites: backend 357 → 431, frontend 45 → 85, `tsc -b`
+Nineteen commits on local `main`, none pushed. Suites: backend 357 → 442, frontend 45 → 85, `tsc -b`
 and `npm run build` clean.
 
 **Verified against a production DB snapshot and in a real browser** (Playwright, out-of-tree), not
@@ -168,16 +168,16 @@ Rough priority. Item 1 is written but not installed; the rest are not started.
    (`@testing-library/react` + `jsdom` *did* go in on 2026-07-31 — a few MB, which is affordable.)
    The checks worth keeping: the tab/collapsible/sort keyboard sweep, the eight-tab console-error
    sweep, and the backend-stopped pass that asserts no surface falls back to an empty-data message.
-4. **The bundle is 877 kB / 260 kB gzipped in one chunk**, and Vite warns on every build. Recharts is
-   most of it and only three tabs use it, so a `React.lazy` split per tab is the obvious first cut.
-   Not urgent on a desktop-first single-user app, but it is the largest remaining rough edge.
+4. **The bundle is 891 kB / 264 kB gzipped in one chunk**, and Vite warns on every build. Recharts is
+   most of it, but **splitting it off wins less than it looks**: six components import it and three of
+   them (`PortfolioValueChart`, `PerformanceAttribution`, `MonthlyDeploymentCard`) are on the *default*
+   Performance tab, so it is needed at first paint anyway. The realistic cut is a `React.lazy` split of
+   the other seven tabs. Not urgent on a desktop-first single-user app, and deliberately not attempted
+   immediately before a deploy.
 5. **`/api/dividends/summary` still has no `response_model`.** Nothing but `tests/test_api_smoke.py`
    stops a field rename silently blanking the Performance tab's provenance footnote.
 6. **Fold `PRE_OWNERSHIP_HISTORY_YEARS` pruning into a scheduled job.** `prune_empty_dividends.py`
    is a manual CLI; the ingest window now prevents new junk, so this is cleanup-only and low value.
-
-Also noted, not yet items: `CLAUDE.md` says React 18; `package.json` pins `react@^19.2.0`. And
-`CLAUDE.md`'s test counts (357 backend + 45 frontend) are now 431 + 85.
 
 ## Local development traps
 
@@ -228,12 +228,13 @@ detail; this exists so the next session knows what just moved without reading it
 confirmed) and gets deleted once nothing in it is outstanding: these lines are permanent, so don't
 "tidy up" the overlap by deleting the wrong one.
 
-- **2026-07-31** — enterprise-readiness pass, eight commits, **not pushed**: shared TTM growth,
+- **2026-07-31** — enterprise-readiness pass, nineteen commits: shared TTM growth,
   locale-independent chart dates, inception read from the data, keyboard/ARIA across the tab strip and
   every collapsible and sortable header, four more explicit error states, optional write auth +
   per-IP rate limit + request ids + `/health` build identity, the Activity ledger over the four
   unread tables, a persistent scheduler job store, delta-chip and scroll-affordance consolidation,
-  real product chrome. Suites 357 → 431 backend, 45 → 85 frontend; verified against a prod snapshot and in a real browser.
+  real product chrome. Suites 357 → 442 backend, 45 → 85 frontend; verified against a prod snapshot
+  and in a real browser, which found three defects the green suite did not.
 - **2026-07-30** — two batches: five audit fixes (Yahoo gating, `openDateTime` off ibflex, SELL beats
   the cost-conserved heuristic, tax-report honesty, dividend card net), then the SBI dividend bug —
   poisoned estimates purged on prod, mapping changes now retire the rows they produced, source-aware
