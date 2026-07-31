@@ -30,10 +30,11 @@ export function ScrollableTable({ children, label, className }: ScrollableTableP
     const maxScroll = el.scrollWidth - el.clientWidth
     // A pixel of slack: fractional layout widths otherwise leave the fade stuck on at
     // full width, which is exactly the "decoration" case this avoids.
-    setEdges({
-      left: el.scrollLeft > 1,
-      right: el.scrollLeft < maxScroll - 1,
-    })
+    const next = { left: el.scrollLeft > 1, right: el.scrollLeft < maxScroll - 1 }
+    // Compared before setting: the scroll handler fires continuously during a drag,
+    // and a fresh object every time would re-render the whole table on each event
+    // even though the fades only change at the two ends.
+    setEdges(prev => (prev.left === next.left && prev.right === next.right ? prev : next))
   }, [])
 
   useEffect(() => {
