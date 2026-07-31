@@ -828,6 +828,24 @@ lockout budget twice a day to recover nothing. They moved to 00:00 and 06:00 on 
 Keep any future IBKR slot inside roughly **22:00–09:00 Berlin**; a midday one looks helpful and is
 not. `test_every_ibkr_job_avoids_us_market_hours` fails the suite if one drifts back.
 
+**Read "we suddenly get constant 1001s" as *we added slots that never worked*, not as a regression.**
+The 13:00/20:00 jobs were introduced in `67e6a59` on **2026-07-25** — the same day `sync_runs`
+persistence landed, so the oldest record we have (20:00:11 Berlin, a failure) *is* the first retry
+ever attempted. Before that only the 08:00 `full_sync` ran, and its success rate has not moved (4/5
+that week). Two changes arriving together — new failing slots and, for the first time, a record of
+every attempt — read as IBKR getting worse. It had not.
+
+Two hypotheses this kills, both plausible enough to be worth writing down:
+
+- **"Failures accumulate into a throttle."** The autocorrelation is *inverted*: the next attempt
+  succeeds 5/15 after a failure and 0/5 after a success. That is schedule position, not contagion —
+  08:00 follows a failed 20:00, and 13:00 follows a successful 08:00. A success 4½ hours after a
+  failure (2026-07-26 00:30) rules out a cooling-off period.
+- **"The YTD statement outgrew IBKR's generator."** Then 08:00 would be degrading too, and it is
+  not — it succeeds at full YTD size. Shortening the query period is also weaker than it looks
+  here: **Open Positions is an as-of snapshot, not period-bounded**, so the 979 lots that are ~70%
+  of the statement do not shrink at all. Don't trade away YTD's self-healing property for that.
+
 **One pipeline at a time (`app/single_flight.py`).** `/api/` is public — and was unauthenticated when
 this was written; `app/auth.py` (below) can now gate the writes, but throttling and authorization are
 different jobs and this one is still needed. Nothing stopped concurrent or rapid-fire triggers: APScheduler's `max_instances=1` only fences jobs *it*

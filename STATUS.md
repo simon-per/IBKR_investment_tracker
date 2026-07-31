@@ -43,15 +43,20 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 
 ## Watching
 
-- **The IBKR retry slots moved to 00:00 and 06:00 (was 13:00/20:00) — watch whether they actually
-  fire and succeed.** Reading `sync_runs` on 2026-07-31 showed the old slots were **0-for-6 and
-  1-for-8**, against 8-for-9 overnight: IBKR builds a YTD statement from finalised daily data, so
-  generation fails during the US session. Since every failure is a failed *generation* — what
-  `Code=1025` counts — those two jobs were spending lockout budget twice a day to recover nothing.
-  The new hours are inferred from a small sample (n=25 runs total), so **confirm over a few days**
-  that 00:00/06:00 really do succeed rather than merely being untested. If they don't, the offline
-  XML path is the fallback, never a manual retry loop. The **08:00 `full_sync` remains the
-  dependable slot** either way.
+- **The IBKR retry slots moved to 00:00 and 06:00 (was 13:00/20:00) — confirm they succeed.**
+  `sync_runs` on 2026-07-31: the old slots were **0-for-6 and 0-for-6+**, against 8-for-9 overnight.
+  IBKR cannot generate a YTD statement during US market hours. Every failure is a failed
+  *generation*, which is what `Code=1025` counts, so those two jobs spent lockout budget twice a day
+  to recover nothing. **Prediction to check: 00:00 and 06:00 should now succeed** (00:30 already did
+  on 07-26). If they don't, the offline XML path is the fallback — never a manual retry loop.
+
+  **The apparent explosion of 1001s was not a regression.** Those slots were added in `67e6a59` on
+  2026-07-25, the same day `sync_runs` persistence landed — so the oldest record we hold is the
+  first retry ever attempted, failing. Before that only 08:00 ran, and its rate is unchanged. New
+  failing slots plus first-ever visibility arrived together and read as IBKR degrading.
+  **Don't shorten the Flex Query period to "fix" it**: 08:00 succeeds at full YTD size, and Open
+  Positions is an as-of snapshot, so the ~979 lots that are 70% of the statement wouldn't shrink
+  anyway. The reasoning is written up in CLAUDE.md's *Sync schedule* section.
 - **MCO and MRVL each forecast off only 2 samples.** Surfaced by the new `forecast_samples` field the
   day it shipped, and badged `n=2` in the dividends table. Not known-wrong — both are real payers with
   plausible schedules — but two samples is the exact shape that let SBI project a fake monthly cadence,
