@@ -860,17 +860,38 @@ class SchedulerService:
             CronTrigger(hour=8, minute=0, timezone='Europe/Berlin'),
             'Full IBKR + Market Data Sync (08:00 Europe/Berlin)',
         )
-        # 13:00 and 20:00 are IBKR-only second chances: a transient Code=1001 at 08:00
-        # used to cost a full day of freshness.
+        # Two IBKR-only second chances, so a transient Code=1001 at 08:00 does not cost a
+        # full day of freshness.
+        #
+        # **They sit at 00:00 and 06:00, not 13:00 and 20:00, and the hours are the whole
+        # point.** IBKR builds a Year-to-Date statement from finalised daily data, so
+        # generation succeeds outside US market hours and fails inside them. Measured on
+        # this account's own `sync_runs` (2026-07-31):
+        #
+        #     Berlin   ET       ok/total
+        #     00:00    18:00     1/1      after the US close
+        #     06:00    00:00     2/2
+        #     08:00    02:00     4/5
+        #     09:00    03:00     1/1
+        #     13:00    07:00     0/6      pre-market
+        #     20:00    14:00     1/8      mid-session
+        #
+        # Overnight 8/9; afternoon and evening 1/15. The old slots were not merely weak,
+        # they were **negative**: each failure is a failed *generation*, which is exactly
+        # what `Code=1025` counts — so the two jobs meant to protect freshness were
+        # spending lockout budget twice a day to recover nothing, 0-for-6 and 1-for-8.
+        #
+        # Keep any future retry inside roughly 22:00–09:00 Berlin. A midday slot looks
+        # helpful and is not.
         self._add_or_keep(
             'ibkr_sync_midday', ibkr_only_sync_job_entry,
-            CronTrigger(hour=13, minute=0, timezone='Europe/Berlin'),
-            'IBKR-only Sync (13:00 Europe/Berlin)',
+            CronTrigger(hour=0, minute=0, timezone='Europe/Berlin'),
+            'IBKR-only Sync (00:00 Europe/Berlin)',
         )
         self._add_or_keep(
             'ibkr_sync_evening', ibkr_only_sync_job_entry,
-            CronTrigger(hour=20, minute=0, timezone='Europe/Berlin'),
-            'IBKR-only Sync (20:00 Europe/Berlin)',
+            CronTrigger(hour=6, minute=0, timezone='Europe/Berlin'),
+            'IBKR-only Sync (06:00 Europe/Berlin)',
         )
         self._add_or_keep(
             'market_sync_eu_close', market_data_only_sync_job_entry,

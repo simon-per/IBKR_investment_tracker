@@ -43,11 +43,15 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 
 ## Watching
 
-- **IBKR `1001` on the retry slots.** Four consecutive failures on 2026-07-29 (11:00 and 18:00 UTC
-  among them). This is documented flaky behaviour, not a regression: `1001` at the *request* step is
-  fatal-fast on purpose, and the schedule is designed so a later slot recovers. The **08:00
-  `full_sync` is the dependable slot** — if that one also starts failing, use the offline XML path
-  rather than retrying, which is what caused three token lockouts historically.
+- **The IBKR retry slots moved to 00:00 and 06:00 (was 13:00/20:00) — watch whether they actually
+  fire and succeed.** Reading `sync_runs` on 2026-07-31 showed the old slots were **0-for-6 and
+  1-for-8**, against 8-for-9 overnight: IBKR builds a YTD statement from finalised daily data, so
+  generation fails during the US session. Since every failure is a failed *generation* — what
+  `Code=1025` counts — those two jobs were spending lockout budget twice a day to recover nothing.
+  The new hours are inferred from a small sample (n=25 runs total), so **confirm over a few days**
+  that 00:00/06:00 really do succeed rather than merely being untested. If they don't, the offline
+  XML path is the fallback, never a manual retry loop. The **08:00 `full_sync` remains the
+  dependable slot** either way.
 - **MCO and MRVL each forecast off only 2 samples.** Surfaced by the new `forecast_samples` field the
   day it shipped, and badged `n=2` in the dividends table. Not known-wrong — both are real payers with
   plausible schedules — but two samples is the exact shape that let SBI project a fake monthly cadence,
@@ -80,7 +84,7 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 
 ## Shipped 2026-07-31 — DEPLOYED and verified
 
-Live at 19:31 Berlin. Suites: backend 357 → 451, frontend 45 → 91, `tsc -b` and `npm run build`
+Live at 19:31 Berlin. Suites: backend 357 → 452, frontend 45 → 91, `tsc -b` and `npm run build`
 clean. **Write auth is ON in production** — verified from outside the host: a write with no key and
 a write with a wrong key both 401, reads still 200. All five scheduler jobs re-registered after the
 rebuild, which is the persistent job store doing its job. **The guarded `auto-deploy.sh` is
@@ -278,7 +282,7 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
   per-IP rate limit + request ids + `/health` build identity, the Activity ledger over the four
   unread tables, a persistent scheduler job store, delta-chip and scroll-affordance consolidation,
   real product chrome, a completed `/api/dividends/summary` contract, and a code-split bundle. Suites
-  357 → 451 backend, 45 → 91 frontend; verified against a prod snapshot and in a real browser, which
+  357 → 452 backend, 45 → 91 frontend; verified against a prod snapshot and in a real browser, which
   found three defects the green suite did not. **Deployed the same evening**: write auth on and
   enforced, guarded auto-deploy installed, five scheduler jobs surviving the rebuild.
 - **2026-07-30** — two batches: five audit fixes (Yahoo gating, `openDateTime` off ibflex, SELL beats

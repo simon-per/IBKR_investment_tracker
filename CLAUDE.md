@@ -796,15 +796,37 @@ read a small non-zero gap in the base currency as FX, not as a dropped lot. Test
 
 | Time | Job | Touches Yahoo? |
 |---|---|---|
+| 00:00 | `ibkr_only_sync_job` — IBKR + FX | no |
+| 06:00 | `ibkr_only_sync_job` — IBKR + FX | no |
 | 08:00 | `full_sync_job` — IBKR + FX + 730d market data + dividends | **yes** |
-| 13:00 | `ibkr_only_sync_job` — IBKR + FX | no |
 | 15:00 | `market_data_only_sync_job` (7d) | yes |
-| 20:00 | `ibkr_only_sync_job` — IBKR + FX | no |
 | 22:00 | `market_data_only_sync_job` (7d) | yes |
 
-The 13:00/20:00 IBKR-only jobs exist because a transient `Code=1001` at 08:00 used to cost a full day of
+The two IBKR-only jobs exist because a transient `Code=1001` at 08:00 used to cost a full day of
 freshness. They deliberately **skip** market data and yfinance dividends — see rule 1. Pinned by
 `tests/test_scheduler_jobs.py`. Status: `GET /api/scheduler/status`.
+
+**Every IBKR attempt must sit outside US market hours, and this is measured rather than assumed.**
+IBKR builds a Year-to-Date statement from *finalised* daily data, so `SendRequest` succeeds overnight
+and fails mid-session — the failure surfaces as `Code=1001` **at the request step**, which is the
+fatal-fast kind, not the "keep polling" kind. This account's own `sync_runs`, read on 2026-07-31:
+
+| Berlin | ET | ok/total | |
+|---|---|---|---|
+| 00:00 | 18:00 | 1/1 | after the US close |
+| 06:00 | 00:00 | 2/2 | |
+| 08:00 | 02:00 | 4/5 | |
+| 09:00 | 03:00 | 1/1 | |
+| 13:00 | 07:00 | **0/6** | pre-market |
+| 20:00 | 14:00 | **1/8** | mid-session |
+
+Overnight 8/9; afternoon and evening 1/15. The retries used to sit at **13:00 and 20:00**, where they
+were not merely weak but **negative**: every failure is a failed *generation*, and failed generations
+are exactly what `Code=1025` counts. Two jobs whose purpose was protecting freshness were spending
+lockout budget twice a day to recover nothing. They moved to 00:00 and 06:00 on 2026-07-31.
+
+Keep any future IBKR slot inside roughly **22:00–09:00 Berlin**; a midday one looks helpful and is
+not. `test_every_ibkr_job_avoids_us_market_hours` fails the suite if one drifts back.
 
 **One pipeline at a time (`app/single_flight.py`).** `/api/` is public — and was unauthenticated when
 this was written; `app/auth.py` (below) can now gate the writes, but throttling and authorization are
@@ -992,7 +1014,7 @@ cd frontend && npm run dev          # http://localhost:5173
 ```
 
 **Set `SCHEDULER_ENABLED=false` in `backend/.env` for any local run.** Starting the backend is not a
-neutral act: the lifespan handler arms the 08:00/13:00/15:00/20:00/22:00 Europe/Berlin jobs, which call
+neutral act: the lifespan handler arms the 00:00/06:00/08:00/15:00/22:00 Europe/Berlin jobs, which call
 the live Flex API with the real token from `.env` and hit Yahoo — both rules at the top of this file,
 from a dev machine. `settings.scheduler_enabled` defaults to **True** so production is unaffected, and
 a disabled scheduler logs a warning because otherwise it looks exactly like a healthy site whose data
@@ -1017,7 +1039,7 @@ raiser for that whole module, so an accidental network reach fails loudly; `/api
 is excluded because it lazy-fetches Yahoo on a cache miss, and POST routes are excluded because they
 start real syncs. **Add a case here when an endpoint's response shape changes.**
 
-Tests (451 backend + 91 frontend, all offline — no IBKR, Yahoo or FX-provider calls):
+Tests (452 backend + 91 frontend, all offline — no IBKR, Yahoo or FX-provider calls):
 ```bash
 cd backend && ./venv/Scripts/python.exe -m pytest tests/ -q
 cd frontend && npx tsc -b && npm run test && npm run build

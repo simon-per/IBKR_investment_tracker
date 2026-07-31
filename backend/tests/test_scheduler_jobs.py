@@ -3,9 +3,13 @@ Tests for the scheduler's job wiring.
 
 The load-bearing invariant here is a Yahoo Finance one: CLAUDE.md forbids calling
 Yahoo without explicit user permission (it rate-limits aggressively, and a full
-sync is 50-150+ requests over 730 days). The extra IBKR attempts at 13:00/20:00
+sync is 50-150+ requests over 730 days). The extra IBKR attempts at 00:00/06:00
 exist to recover from transient IBKR errors *without* dragging Yahoo along, so
 that separation must not quietly regress into calling the full sync.
+
+Their *hours* are load-bearing too: IBKR generates a YTD statement from finalised
+daily data, so `SendRequest` succeeds overnight and fails during US market hours.
+The retries used to sit at 13:00 and 20:00 Berlin and went 0-for-6 and 1-for-8.
 
 Also covers the stale-price detector, which exists because a price that simply never
 arrives is otherwise silent: the position is valued at 0.00 and the portfolio total drops
@@ -203,8 +207,8 @@ async def test_a_stale_price_is_reported_with_its_age(price_db):
 
 @pytest.mark.asyncio
 async def test_a_fresh_price_is_not_reported(price_db):
-    """The 13:00 job runs before the US open and the 15:00 one before the US close, so
-    a day or two of lag is routine. Warning on it would train the reader to ignore this."""
+    """The 15:00 market-data job runs before the US close, so a day or two of lag on a
+    price is routine. Warning on it would train the reader to ignore this."""
     await _seed(price_db, 1, "FRESH", latest_price_age=1)
 
     assert await SchedulerService().find_stale_priced_securities(price_db) == []
@@ -274,9 +278,47 @@ async def test_scheduler_registers_five_jobs_with_expected_hours(jobstore_url):
         # The two IBKR retries must not collide with the market-data jobs, so that a
         # Yahoo sync and an IBKR sync never run concurrently against the same DB.
         hours = {jid: str(job.trigger) for jid, job in jobs.items()}
-        assert "hour='13'" in hours['ibkr_sync_midday']
-        assert "hour='20'" in hours['ibkr_sync_evening']
+        assert "hour='0'" in hours['ibkr_sync_midday']
+        assert "hour='6'" in hours['ibkr_sync_evening']
         assert "hour='8'" in hours['full_sync_job']
+    finally:
+        svc.shutdown()
+
+
+# Every job that reaches IBKR. Market-data jobs are excluded: they touch Yahoo, not Flex.
+IBKR_JOB_IDS = ('full_sync_job', 'ibkr_sync_midday', 'ibkr_sync_evening')
+
+
+@pytest.mark.asyncio
+async def test_every_ibkr_job_avoids_us_market_hours(jobstore_url):
+    """
+    IBKR builds a Year-to-Date statement from *finalised* daily data, so `SendRequest`
+    succeeds overnight and fails during the US session — as `Code=1001` at the request
+    step, the fatal-fast kind.
+
+    Measured on this account's own `sync_runs` (2026-07-31): overnight 8/9, afternoon and
+    evening 1/15, with 13:00 at 0-for-6 and 20:00 at 1-for-8. Those slots were not merely
+    weak but negative — a failed generation is exactly what `Code=1025` counts, so the two
+    jobs meant to protect freshness were spending lockout budget twice a day for nothing.
+
+    A midday slot looks helpful and is not. This fails the suite if one drifts back.
+    """
+    svc = SchedulerService()
+    try:
+        svc.start()
+        jobs = {job.id: job for job in svc.scheduler.get_jobs()}
+
+        offenders = {}
+        for jid in IBKR_JOB_IDS:
+            hour = int(str(jobs[jid].trigger).split("hour='")[1].split("'")[0])
+            if not (hour <= 9 or hour >= 22):
+                offenders[jid] = hour
+
+        assert not offenders, (
+            f"IBKR job(s) scheduled inside US market hours: {offenders}. "
+            f"Statement generation reliably fails there and each failure spends "
+            f"Code=1025 lockout budget. Keep IBKR slots within 22:00-09:00 Berlin."
+        )
     finally:
         svc.shutdown()
 
