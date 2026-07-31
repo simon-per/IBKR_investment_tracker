@@ -16,17 +16,24 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 
 ## Needs a human
 
-- **Nothing from 2026-07-31 has been pushed.** Twelve commits sit on local `main` (see *Shipped
+- **Nothing from 2026-07-31 has been pushed.** Fifteen commits sit on local `main` (see *Shipped
   locally* below). Pushing auto-deploys within 10 minutes, so land it **outside** a Berlin sync slot
-  (08/13/15/20/22:00). The new persistent job store recovers a slot missed by under 30 min, and
-  *Worth doing next* item 1 would prevent the overlap outright — but it is not installed yet.
+  (08/13/15/20/22:00). The new persistent job store recovers a slot missed by under 30 min once it is
+  live — but it is not live until this deploy lands, so the first one still has to be timed by hand.
+  *Worth doing next* item 1 would prevent the overlap outright.
 - **Turn on the write API auth.** `app/auth.py` gates every `POST/PUT/PATCH/DELETE` under `/api/`,
   but it is **inert until `API_ADMIN_TOKEN` is set** — deliberately, so shipping it could not 401 the
   running site. Until then `/api/` is what it has always been: anyone who can reach the host can
   change the base currency, edit the watchlist and start syncs that spend the IBKR and Yahoo budgets.
   Generate a token (`python -c "import secrets; print(secrets.token_urlsafe(32))"`), put it in
   `/root/IBKR_investment_tracker/backend/.env`, and paste the same value into the app's lock button
-  (header, beside Sync). The footer shows *write API unauthenticated* while it is off.
+  (header, beside Sync). The footer shows *write API unauthenticated* while it is off. **Do it after
+  the deploy, not before** — the currently-live frontend has no lock button, so enabling auth first
+  would refuse its sync and currency controls with no way to unlock them.
+
+  This and *Worth doing next* item 1 are both **production config edits on the VPS, which the
+  permission classifier refuses to an agent** — correctly. Everything either needs is written and
+  tested; only the two commands remain.
 - **Rotate the IBKR Flex token.** It travelled as a `t=` URL parameter into `sync_runs.message` and
   was served by the public `/api/scheduler/history` until the 2026-07-28 scrub. `app/redact.py` now
   redacts on write *and* on read, so it cannot recur — but redaction cannot un-leak what was already
@@ -77,13 +84,30 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 
 ## Shipped locally 2026-07-31 — NOT deployed
 
-Twelve commits on local `main`, none pushed. Suites: backend 357 → 427, frontend 45 → 85, `tsc -b`
-and `npm run build` clean. Verified against a live uvicorn as well as through the test client —
-`/health`, the activity ledger and its CSV, the 400s on a bad `kind` and an over-wide window, write
-auth in all four states, the 429 with `Retry-After`, and a persistent-job-store restart preserving
-run times. What is **not** verified is the ledger against real trades and cash flows: the checked-in
-`portfolio.db` predates both, so only dividends came back locally. Unit tests cover those shapes; a
-prod snapshot would confirm them.
+Fifteen commits on local `main`, none pushed. Suites: backend 357 → 431, frontend 45 → 85, `tsc -b`
+and `npm run build` clean.
+
+**Verified against a production DB snapshot and in a real browser** (Playwright, out-of-tree), not
+just through the test client. That is worth stating because it found three defects the whole green
+suite did not:
+
+- **Trades were converted wrong.** `trades.proceeds`, `trades.realized_pnl` and
+  `corporate_actions.proceeds` are stored in the trade's **own** currency — there is no `_eur` column
+  on either, unlike `cash_flows.amount_eur` and `dividend_payments.*_eur`. The ledger applied only
+  the EUR→base factor, so a CAD 30.27 realized gain read as CHF 27.85 instead of CHF 17.15 and the
+  ledger's realized total sat 6.8% away from `/api/portfolio/summary`. Both now agree to the cent.
+- **67 BUY rows showed `CHF 0.00` realized.** IBKR sends `fifoPnlRealized=0` on every buy; rendering
+  it asserts a realized result where there is none.
+- **Fractional share counts rounded to `0`** (and a fractional sell to `-0`). This account trades
+  0.5 SOXQ, 0.3 MU, 0.1 CSU routinely, so it was most rows, not an edge case.
+
+Confirmed on the snapshot: 194 events in the default window; **22 in-kind transfer rows badged
+*Transfer · not money in*** and 26 deposits + 1 withdrawal counted, matching the DB exactly; the
+ledger's deposit total equals `/api/portfolio/contributions`'s `deposits_eur` to the cent (two
+independent code paths). All eight tabs render with zero console errors. With the backend stopped,
+eleven surfaces report the failure explicitly and none falls back to an empty-data message.
+Keyboard: arrow/Home/End across the tab strip, Enter on all four collapsible headers, 9 headers
+carrying `aria-sort`.
 
 What landed, and why each was worth doing:
 
@@ -133,16 +157,15 @@ Rough priority. Item 1 is written but not installed; the rest are not started.
    Verify afterwards by watching `/root/auto-deploy.log` for a `SKIP: within 10min` line near a slot.
    The persistent job store now recovers a missed slot within 30 minutes anyway, so this is belt to
    that braces rather than the only defence.
-2. **Verify the Activity ledger against real trades and cash flows.** Only its dividend rows were
-   seen live: the checked-in `portfolio.db` predates the other three tables. In particular confirm
-   the 22 in-kind transfer rows render as *Transfer · not money in*, since that badge is the audit
-   CLAUDE.md prescribes before trusting any money-added figure.
-3. **Commit the visual-regression harness.** The Playwright screenshot loop that verified the
-   Dividends tab lives *outside* the repo, so it is not reproducible from a clean checkout. It cannot
-   simply become a `frontend` devDependency: `deploy.sh` runs `npm ci` on a `--no-cache` rebuild and
-   Playwright's postinstall pulls ~150 MB of Chromium, which would tax every 10-minute deploy. Needs
-   a separate package or a skipped-download flag. (`@testing-library/react` + `jsdom` *did* go in on
-   2026-07-31 — a few MB, which is affordable; Playwright is the one that is not.)
+2. **Commit the visual-regression harness.** The Playwright checks that found the three ledger
+   defects above live *outside* the repo (`%TEMP%/claude/uiharness`), so they are not reproducible
+   from a clean checkout — and they earned their keep, so this has gone from nice-to-have to the
+   obvious next investment. It cannot simply become a `frontend` devDependency: `deploy.sh` runs
+   `npm ci` on a `--no-cache` rebuild and Playwright's postinstall pulls ~150 MB of Chromium, which
+   would tax every 10-minute deploy. Needs a separate package or a skipped-download flag.
+   (`@testing-library/react` + `jsdom` *did* go in on 2026-07-31 — a few MB, which is affordable.)
+   The checks worth keeping: the tab/collapsible/sort keyboard sweep, the eight-tab console-error
+   sweep, and the backend-stopped pass that asserts no surface falls back to an empty-data message.
 4. **The bundle is 877 kB / 260 kB gzipped in one chunk**, and Vite warns on every build. Recharts is
    most of it and only three tabs use it, so a `React.lazy` split per tab is the obvious first cut.
    Not urgent on a desktop-first single-user app, but it is the largest remaining rough edge.
@@ -152,7 +175,7 @@ Rough priority. Item 1 is written but not installed; the rest are not started.
    is a manual CLI; the ingest window now prevents new junk, so this is cleanup-only and low value.
 
 Also noted, not yet items: `CLAUDE.md` says React 18; `package.json` pins `react@^19.2.0`. And
-`CLAUDE.md`'s test counts (357 backend + 45 frontend) are now 427 + 85.
+`CLAUDE.md`'s test counts (357 backend + 45 frontend) are now 431 + 85.
 
 ## Local development traps
 
@@ -177,6 +200,17 @@ Each of these cost real time at least once.
 - **`curl 127.0.0.1:<vite port>` fails while the browser works.** Vite binds `localhost`, which
   resolves to `::1` first on this machine, so the IPv4 literal gets connection-refused and looks like
   a dead dev server. Use `http://localhost:<port>`.
+- **`pkill` is not installed** (Git Bash has no procps). `pkill -f uvicorn` prints
+  "command not found" and exits non-zero — easy to miss inside a `&&` chain — so the old server keeps
+  the port and the new one dies on bind while `--strictPort`'s error scrolls past in a log file. The
+  result is a dev server quietly answering from the *previous* config, which cost real time here: a
+  browser pass appeared to show an empty ledger when it was reading the stale local DB. Kill by PID:
+  `netstat -ano | grep ':8000 ' | grep LISTENING` then `taskkill //F //PID <pid>` (double slashes —
+  MSYS eats single ones).
+- **A dev server against a prod snapshot must run on port 5173.** `frontend/.env` points
+  `VITE_API_URL` at `localhost:8000`, so the browser calls the backend cross-origin and only the
+  ports in `CORS_ORIGINS` work. Any other port fails every request with a CORS error and looks like
+  a backend outage.
 - **A test that starts a scheduler drops a `scheduler_jobs.db` wherever it runs.** `tests/conftest.py`
   blanks `scheduler_jobstore_url` for the whole suite, so an in-memory store is the default; a test
   that wants persistence points it at `tmp_path` itself.
@@ -197,7 +231,7 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
   every collapsible and sortable header, four more explicit error states, optional write auth +
   per-IP rate limit + request ids + `/health` build identity, the Activity ledger over the four
   unread tables, a persistent scheduler job store, delta-chip and scroll-affordance consolidation,
-  real product chrome. Suites 357 → 427 backend, 45 → 85 frontend.
+  real product chrome. Suites 357 → 431 backend, 45 → 85 frontend; verified against a prod snapshot and in a real browser.
 - **2026-07-30** — two batches: five audit fixes (Yahoo gating, `openDateTime` off ibflex, SELL beats
   the cost-conserved heuristic, tax-report honesty, dividend card net), then the SBI dividend bug —
   poisoned estimates purged on prod, mapping changes now retire the rows they produced, source-aware
