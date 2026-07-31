@@ -31,7 +31,7 @@ daily jobs against the live Flex token and Yahoo.
 
 | Script | Needs |
 |---|---|
-| `npm run a11y` | dev server; backend optional |
+| `npm run a11y` | dev server **+ backend with data** |
 | `npm run sweep` | dev server + backend with data |
 | `npm run csp` | `vite preview` on 4173 (**built output**, not the dev server) |
 | `npm run ledger` | dev server + backend on a **production snapshot** |
@@ -39,6 +39,14 @@ daily jobs against the live Flex token and Yahoo.
 | `npm run chunks` | `npm run build && npx vite preview --port 4173` in `frontend/`; no backend |
 
 `BASE` and `PREVIEW` override the URLs.
+
+`a11y.mjs` said "backend optional" until 2026-07-31 and it is not: three of its checks need one.
+`aria-sort` headers only exist once Fundamentals and Watchlist have rows to sort, the footer assertion
+reads `/health`, and a stopped backend fills the console with `ERR_CONNECTION_REFUSED` so the
+zero-console-errors check fails too. With no backend it reports 11/14 and every failure is a phantom —
+which either sends you chasing an ARIA regression that isn't there or teaches you to ignore red.
+The checked-in `portfolio.db` is enough here (unlike `ledger.mjs` below); it needs positions, not
+realistic ones.
 
 `ledger.mjs` asserts against real account shapes — transfers badged *not money in*, fractional
 quantities, a deposit row. The checked-in `portfolio.db` predates trades, cash flows and the IBKR
