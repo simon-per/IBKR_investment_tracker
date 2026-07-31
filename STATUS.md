@@ -323,8 +323,34 @@ number in contributions. Now 18 tests, 0% → 97%, pinning the money-added bound
 printing. **The CLI itself is correct** — no defect found. Backend suite 467 → 523.
 
 Coverage-led hunting is what found both of these; `pytest-cov` is already installed and the backend
-sits at ~70%. `taxlot_repository` (58%) and `benchmark_service` (40%) are the next pure-computation
-gaps.
+sits at ~70%. `taxlot_repository` (58%) is the last flagged pure-computation gap.
+
+**`e2e/a11y.mjs` said "backend optional" and never could have been.** Three of its checks need one:
+`aria-sort` headers only exist once Fundamentals and Watchlist have rows to sort, the footer assertion
+reads `/health`, and a refused connection fills the console so the zero-console-errors check fails too.
+Run as documented it reports 11/14 with **every failure a phantom** — which either sends you chasing an
+ARIA regression that isn't there or teaches you to ignore red. Fixed in the README table and in the
+script's own header, which repeated it. The checked-in `portfolio.db` is enough here; it needs
+positions, not realistic ones (unlike `ledger.mjs`).
+
+`a11y.mjs` now also covers the rebalance panel — its target and tolerance-band fields are the only
+editable inputs in the app, so an accessible name on each is its whole keyboard story. **17/17.**
+
+**The `e2e/` suite was run for the first time in a while and the build-output halves pass clean:**
+`chunks` 33/33, `csp` 4/4, `a11y` 17/17. Every chunk boundary survived this session's frontend work —
+`RiskMetricsCards` sits in the eager `index` chunk (correct: default tab) and `RebalanceCard` in the
+lazy `AllocationTab` one — and the Allocation tab mounts with the new panel under the production CSP
+with zero violations. `sweep` and `errors` remain unrun.
+
+**`benchmark_service.calculate_benchmark_value_over_time()` was audited and is correct** — it is the
+input to the new beta metric, and re-reading 200 lines is expensive, so: close events exclude **on**
+the close date like everywhere else; pre-window events fold in on the first iteration without needing
+`portfolio_service`'s explicit seeding loop; share and cost events are appended *and skipped* together,
+so a zero value can never be emitted against a live cost basis; and `_apply_base_currency` converts all
+four money fields and recomputes the gain from the converted pair, so it is **not** the CAD/CHF
+half-conversion shape. One behaviour worth knowing: when shares are held but the index price or FX rate
+is missing, that day is **omitted from the series** rather than zeroed — `betaAndCorrelation` skips such
+a pair by design, and the date stays in `missing_dates` so it self-heals.
 
 Four things were checked and are **not** bugs, recorded so nobody re-chases them: `ActivityTab`'s
 `amount_base ?? 0` (unreachable — `BaseFx.convert` never returns `None`), `DividendKpiCards`'
