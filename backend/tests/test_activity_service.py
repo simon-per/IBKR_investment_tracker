@@ -486,3 +486,70 @@ async def test_a_fractional_share_count_is_not_rounded_away(db):
     assert row["description"] == "SELL 0.1 AAPL"
     whole = next(r for r in (await fetch(db))["items"] if r["ib_key"] == "T-BUY")
     assert whole["description"] == "BUY 10 AAPL"
+
+
+@pytest.mark.asyncio
+async def test_the_fx_rate_is_looked_up_once_per_currency_and_date(db):
+    """
+    `get_exchange_rate` queries the rate table on every call and, on a miss, reaches
+    Frankfurter — so a 500-row page would issue up to 500 queries and, cold, 500
+    provider requests. Rows cluster on a handful of pairs, so the memo has to collapse
+    them.
+    """
+    await seed(db)
+    # Several USD trades on ONE date: one lookup, not one per row.
+    for i in range(5):
+        db.add(Trade(
+            ib_key=f"T-SAMEDAY-{i}", conid="103", security_id=1, symbol="AAPL",
+            trade_date=TODAY - timedelta(days=7), buy_sell="BUY",
+            quantity=Decimal("1"), price=Decimal("100"), proceeds=Decimal("-100"),
+            commission=Decimal("-1"), currency="USD", realized_pnl=None,
+        ))
+    await db.commit()
+
+    service = ActivityService(db)
+    calls = []
+    real = service.currency_service.get_exchange_rate
+
+    async def counting(from_currency, target_date, to_currency="EUR"):
+        calls.append((from_currency, target_date))
+        return await real(from_currency, target_date, to_currency)
+
+    service.currency_service.get_exchange_rate = counting
+    result = await service.get_activity(start_date=WINDOW_START, end_date=TODAY)
+
+    assert result["total"] > 5
+    # One per distinct (currency, date), and never for the EUR rows.
+    assert len(calls) == len(set(calls))
+    assert all(c[0] != "EUR" for c in calls)
+    same_day = [c for c in calls if c[1] == TODAY - timedelta(days=7)]
+    assert len(same_day) == 1, f"5 trades on one date caused {len(same_day)} lookups"
+
+
+@pytest.mark.asyncio
+async def test_a_missing_rate_is_memoized_too(db):
+    """Otherwise every unconvertible row retries the provider that just failed."""
+    await seed(db)
+    for i in range(3):
+        db.add(Trade(
+            ib_key=f"T-TWD-{i}", conid="777", security_id=None, symbol="2330",
+            trade_date=TODAY - timedelta(days=9), buy_sell="BUY",
+            quantity=Decimal("1"), price=Decimal("1000"), proceeds=Decimal("-1000"),
+            commission=Decimal("-1"), currency="TWD", realized_pnl=None,
+        ))
+    await db.commit()
+
+    service = ActivityService(db)
+    calls = []
+    real = service.currency_service.get_exchange_rate
+
+    async def counting(from_currency, target_date, to_currency="EUR"):
+        calls.append((from_currency, target_date))
+        return await real(from_currency, target_date, to_currency)
+
+    service.currency_service.get_exchange_rate = counting
+    result = await service.get_activity(start_date=WINDOW_START, end_date=TODAY)
+
+    twd = [r for r in result["items"] if r["currency"] == "TWD"]
+    assert len(twd) == 3 and all(r["amount_base"] is None for r in twd)
+    assert len([c for c in calls if c[0] == "TWD"]) == 1

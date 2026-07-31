@@ -112,6 +112,8 @@ class ActivityService:
     def __init__(self, db: AsyncSession):
         self.db = db
         self.currency_service = CurrencyService(db)
+        # (currency, date) -> native->EUR rate, or None when none is available.
+        self._rate_memo: Dict[tuple, Optional[Decimal]] = {}
 
     async def get_activity(
         self,
@@ -170,6 +172,38 @@ class ActivityService:
             "end_date": end_date.isoformat(),
         }
 
+    async def _eur_rate(self, currency: str, on_date: date) -> Optional[Decimal]:
+        """
+        The native->EUR rate for one (currency, date), memoized for this request.
+
+        `convert_to_eur` queries the rate table on every call and, on a miss, reaches
+        Frankfurter — so a 500-row page would issue up to 500 queries and, cold, 500
+        provider requests. Rows cluster heavily on a handful of pairs (this account's
+        trades are USD on a few dozen dates), so the memo collapses that to one lookup
+        each. Cached per request rather than per process: rates are backfilled by the
+        syncs, and a long-lived cache would keep serving a miss that has since been filled.
+
+        None means no rate is available; the caller leaves the figure blank.
+        """
+        key = (currency, on_date)
+        if key in self._rate_memo:
+            return self._rate_memo[key]
+
+        rate: Optional[Decimal]
+        try:
+            rate = await self.currency_service.get_exchange_rate(currency, on_date)
+        # convert paths raise ValueError when neither provider covers the pair, but the
+        # read path must survive anything: one unconvertible row must not 500 the page.
+        except Exception as e:
+            logger.warning(
+                "Activity: no %s->EUR rate for %s (%s); leaving the amount blank",
+                currency, on_date, e,
+            )
+            rate = None
+
+        self._rate_memo[key] = rate
+        return rate
+
     async def _to_base(
         self, amount: Optional[Decimal], currency: Optional[str], on_date: date, base_fx
     ) -> Optional[Decimal]:
@@ -198,19 +232,10 @@ class ActivityService:
 
         eur = amount
         if currency and currency != "EUR":
-            try:
-                eur = await self.currency_service.convert_to_eur(
-                    amount=amount, from_currency=currency, target_date=on_date
-                )
-            # convert_to_eur raises ValueError when neither provider covers the pair,
-            # but the read path must survive anything: this is a ledger, and one
-            # unconvertible row must not 500 the whole page.
-            except Exception as e:
-                logger.warning(
-                    "Activity: no %s->EUR rate for %s (%s); leaving the amount blank",
-                    currency, on_date, e,
-                )
+            rate = await self._eur_rate(currency, on_date)
+            if rate is None:
                 return None
+            eur = amount * rate
         return base_fx.convert(eur, on_date)
 
     async def _trades(self, start: date, end: date, base_fx) -> List[ActivityRow]:
