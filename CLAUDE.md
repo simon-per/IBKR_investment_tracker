@@ -1202,7 +1202,7 @@ Two traps when pointing a browser at a local stack:
   and issuing requests to the live site — including `/api/dividends/summary`, which can enqueue a
   Yahoo dividend sync.
 - **A real-data snapshot beats the stale local DB.** `sqlite3 .backup` on the VPS, copied down, and
-  `DATABASE_URL` pointed at it (the checked-in local `portfolio.db` predates trades, cash flows and
+  `DATABASE_URL` pointed at it (the local `backend/portfolio.db` predates trades, cash flows and
   the IBKR dividend era, so it exercises none of the interesting shapes). Delete the copy afterwards —
   `*.db` is gitignored, but it is real account data.
 

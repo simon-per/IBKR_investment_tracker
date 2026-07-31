@@ -368,7 +368,7 @@ Each of these cost real time at least once.
 - **Check which port Vite actually took.** If 5173 is occupied it moves to 5174 and says so once. A
   stray dev server on 5173 configured against production means you are reading prod data and issuing
   requests to the live site — including `/api/dividends/summary`, which can enqueue a Yahoo sync.
-- **Use a snapshot of the production DB, not the checked-in `portfolio.db`** — the latter predates
+- **Use a snapshot of the production DB, not the local `backend/portfolio.db`** — the latter predates
   trades, cash flows and the IBKR dividend era, so it exercises none of the interesting shapes.
   `sqlite3 .backup` on the VPS, copy down, point `DATABASE_URL` at it, **delete it afterwards** (it
   is real account data; `*.db` is gitignored but it should not linger).
@@ -392,7 +392,7 @@ Each of these cost real time at least once.
   `VITE_API_URL` at `localhost:8000`, so the browser calls the backend cross-origin and only the
   ports in `CORS_ORIGINS` work. Any other port fails every request with a CORS error and looks like
   a backend outage.
-- **Every position in the checked-in `portfolio.db` has `market_price: null` and a market value of
+- **Every position in the local `backend/portfolio.db` has `market_price: null` and a market value of
   0.00.** So the currency-exposure card reports *no priced positions* and the rebalance panel shows 29
   unpriced rows — both correct, and both easy to mistake for a broken feature. Anything that depends on
   a valued portfolio can only be browser-verified against a production snapshot.

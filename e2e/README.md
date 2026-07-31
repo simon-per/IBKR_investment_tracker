@@ -45,11 +45,13 @@ daily jobs against the live Flex token and Yahoo.
 reads `/health`, and a stopped backend fills the console with `ERR_CONNECTION_REFUSED` so the
 zero-console-errors check fails too. With no backend it reports 11/14 and every failure is a phantom —
 which either sends you chasing an ARIA regression that isn't there or teaches you to ignore red.
-The checked-in `portfolio.db` is enough here (unlike `ledger.mjs` below); it needs positions, not
-realistic ones.
+Any populated database is enough here (unlike `ledger.mjs` below) — it needs positions, not realistic
+ones. **`backend/portfolio.db` is gitignored and untracked**, so a fresh clone has none and the backend
+creates an empty one on first start; `a11y` then fails the `aria-sort` and target-input checks for want
+of rows, which looks exactly like a regression. Point `DATABASE_URL` at a populated copy first.
 
 `ledger.mjs` asserts against real account shapes — transfers badged *not money in*, fractional
-quantities, a deposit row. The checked-in `portfolio.db` predates trades, cash flows and the IBKR
+quantities, a deposit row. The local `backend/portfolio.db` predates trades, cash flows and the IBKR
 dividend era, so every assertion in it fails there. Take a snapshot with `sqlite3 .backup` on the
 VPS, point `DATABASE_URL` at it, and **delete it afterwards**: it is real account data.
 
