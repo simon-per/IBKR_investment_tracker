@@ -258,6 +258,15 @@ this section can be deleted once the commits are pushed without losing them.
   above rows reading *Not currently held*. Caught by `e2e/errors`, which now covers it.
 - **`e2e/a11y.mjs` claimed "backend optional"** and never could have been: three of its checks need one,
   so run as documented it reported 11/14 with every failure a phantom.
+- **A fallback price claimed Yahoo's provenance.** `fetch_and_cache_prices` wrote
+  `source='yahoo_finance'` for every cached row, with a comment conceding the truth (`# or
+  'alpha_vantage' if from fallback`) — and the fallback is **live**, since `ALPHA_VANTAGE_API_KEY` is
+  set in `backend/.env`. So a fallback row misreported the provider in the column every pricing
+  diagnosis reads first. Two related defects went with it: the fallback **stamped `security.currency`
+  onto its prices unchecked** while querying by bare US symbol — the exact SBI mechanism, fixed for
+  Yahoo in July and not here, so it now refuses a non-USD security rather than adopting an
+  unverifiable label — and `MarketPrice.source` **defaulted to `"alpha_vantage"`**, the fallback
+  provider. See CLAUDE.md's rule 1, which now says Yahoo is not the only provider.
 - **Any validation error reached the user as `[object Object]`.** FastAPI sends a 422's `detail` as an
   **array of objects** (an ordinary `HTTPException` sends a string, which is why it went unnoticed), and
   `api.request()` passed it straight to `new Error()`. `describeErrorBody` now renders it as
@@ -325,7 +334,7 @@ still untested is the large tab components, whose logic lives in the `lib/` modu
 additionally exercised by `e2e/sweep`.
 
 **Verified in one consolidated pass at the end of the session**, not just incrementally: backend
-**550**, frontend **268**, `tsc -b` and `npm run build` clean, and every runnable browser script back to
+**556**, frontend **268**, `tsc -b` and `npm run build` clean, and every runnable browser script back to
 back — `a11y` 17/17, `sweep` 16/16, `errors` 15/15, `chunks` 33/33, `csp` 4/4. Only `ledger` was not
 run; it needs a production snapshot, which is real account data. **Nothing is deployed** — all of this
 is local. Every local server was started with `SCHEDULER_ENABLED=false` confirmed in `.env` *and* in
@@ -437,9 +446,9 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
 "tidy up" the overlap by deleting the wrong one.
 
 - **2026-07-31 (overnight, unpushed)** — autonomous loop: three frontend features (risk row, target
-  allocation & drift, currency exposure) and seven bugs (49 sites reading the clock in local time; SOXQ
+  allocation & drift, currency exposure) and eight bugs (49 sites reading the clock in local time; SOXQ
   missing from the ETF look-through; the rebalance panel building a plan out of an outage; `e2e/a11y`'s
-  "backend optional" claim). Suites 462 → 550 backend, 91 → 268 frontend; all `e2e` scripts green bar
+  "backend optional" claim). Suites 462 → 556 backend, 91 → 268 frontend; all `e2e` scripts green bar
   `ledger`. Durable rules promoted into CLAUDE.md. **Nothing deployed** — see *Unpushed*.
 - **2026-07-31** — enterprise-readiness pass: shared TTM growth,
   locale-independent chart dates, inception read from the data, keyboard/ARIA across the tab strip and

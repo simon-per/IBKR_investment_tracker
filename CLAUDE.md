@@ -30,6 +30,21 @@ User-Agent, rate-limit detection that aborts the run, and incremental caching (o
 
 The IBKR Flex sync (`POST /api/sync/ibkr`) is Flex-only and touches **no** Yahoo — it's always safe.
 
+**Yahoo is not the only price provider, which this rule used to imply.** `market_data_service.py`
+falls back to **Alpha Vantage** when Yahoo returns nothing for a security on NASDAQ/NYSE/ARCA/AMEX,
+and `ALPHA_VANTAGE_API_KEY` is set in `backend/.env`, so the path is live rather than dormant. It
+does not widen the rule — it only ever runs *inside* a market-data sync that already needs
+permission, and never on the Flex path — but "no Yahoo" is not the same as "no network", and a
+reader checking only for `yfinance` will miss it. Two things about it are load-bearing:
+
+- **Its rows are tagged `source='alpha_vantage'`.** The caller hardcoded `'yahoo_finance'` for every
+  row until 2026-08-01, so fallback prices claimed a provenance they did not have — in the column
+  every pricing diagnosis reads first.
+- **It refuses a non-USD security.** The endpoint quotes US listings in USD and its response carries
+  no currency to read back, so unlike Yahoo there is nothing to verify a label against. Stamping the
+  security's own currency onto a USD quote is exactly how SBI was carried 61% high; that path was
+  fixed for Yahoo in July and not here. Don't "restore" the fallback for non-USD listings.
+
 ### 2. Never loop the IBKR Flex sync
 IBKR allows **1 request/second and 10 requests/minute per token**, and one `ibflex.client.download()`
 is *several* HTTP requests (request statement, then poll until ready, each with 3 internal tries). An
