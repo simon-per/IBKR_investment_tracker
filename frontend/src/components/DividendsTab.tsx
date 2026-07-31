@@ -20,6 +20,7 @@ import { DividendKpiCards } from './DividendKpiCards'
 import { DividendYearComparison } from './DividendYearComparison'
 import { useTheme } from './ThemeProvider'
 import { cn } from '@/lib/utils'
+import { ScrollableTable } from '@/components/ui/ScrollableTable'
 
 /**
  * Categorical palette from the validated reference set, stepped per theme and
@@ -392,7 +393,7 @@ export function DividendsTab() {
                   <DividendCalendar upcoming={upcoming} colorOf={colorOf} />
                 </div>
 
-                <div className="overflow-x-auto border-t border-border pt-5">
+                <ScrollableTable label="Per-position dividend table" className="border-t border-border pt-5">
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="border-b border-border text-xs text-muted-foreground">
@@ -521,7 +522,7 @@ export function DividendsTab() {
                       ))}
                     </tbody>
                   </table>
-                </div>
+                </ScrollableTable>
               </>
             )}
           </>

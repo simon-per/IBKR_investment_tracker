@@ -1,5 +1,6 @@
 import { TrendingUp, TrendingDown, Wallet, Target } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { DeltaChip } from './DeltaChip'
 import type { PortfolioSummary } from '@/lib/api'
 import { formatPercent } from '@/lib/utils'
 import { useFormatCurrency } from '@/lib/CurrencyContext'
@@ -8,9 +9,17 @@ interface PortfolioSummaryCardsProps {
   summary: PortfolioSummary | undefined
   isLoading?: boolean
   isError?: boolean
+  /**
+   * Change in market value over the chart's selected range, and the label for it.
+   * Optional so the card still stands alone before the timeline resolves.
+   */
+  periodChangePct?: number | null
+  periodLabel?: string
 }
 
-export function PortfolioSummaryCards({ summary, isLoading, isError }: PortfolioSummaryCardsProps) {
+export function PortfolioSummaryCards({
+  summary, isLoading, isError, periodChangePct, periodLabel,
+}: PortfolioSummaryCardsProps) {
   const formatCurrency = useFormatCurrency()
 
   if (isLoading) {
@@ -66,9 +75,22 @@ export function PortfolioSummaryCards({ summary, isLoading, isError }: Portfolio
           <div className="text-2xl font-bold">
             {formatCurrency(summary.total_market_value_eur)}
           </div>
-          <p className="text-xs text-muted-foreground">
-            Current portfolio value
-          </p>
+          {periodChangePct != null ? (
+            <div className="flex items-center gap-1.5">
+              {/* flatBand 0: unlike dividend income, every move in portfolio value is
+                  signal — muting a 3% quarter as "flat" would understate it. */}
+              <DeltaChip
+                pct={periodChangePct}
+                flatBand={0}
+                label={periodLabel ? `over ${periodLabel}` : undefined}
+                title="Change in total holdings value over the selected chart range. Includes money added — see Period Gain for the return."
+              />
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              Current portfolio value
+            </p>
+          )}
         </CardContent>
       </Card>
 

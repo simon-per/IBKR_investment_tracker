@@ -4,6 +4,7 @@ import { formatPercent } from '@/lib/utils'
 import { useFormatCurrency } from '@/lib/CurrencyContext'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { SortableTh } from '@/components/ui/SortableTh'
+import { ScrollableTable } from '@/components/ui/ScrollableTable'
 
 interface PositionsListProps {
   positions: Position[]
@@ -197,7 +198,7 @@ export function PositionsList({ positions, isLoading, isError }: PositionsListPr
         <CardTitle>Positions ({positions.length})</CardTitle>
       </CardHeader>
       <CardContent>
-        <div className="overflow-x-auto">
+        <ScrollableTable label="Positions table">
           <table className="w-full">
             <thead>
               <tr className="border-b border-border text-left text-sm text-muted-foreground">
@@ -273,7 +274,7 @@ export function PositionsList({ positions, isLoading, isError }: PositionsListPr
               })}
             </tbody>
           </table>
-        </div>
+        </ScrollableTable>
       </CardContent>
     </Card>
   )

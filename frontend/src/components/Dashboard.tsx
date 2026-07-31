@@ -393,7 +393,13 @@ export function Dashboard() {
           {/* Performance Tab */}
           <TabsContent value="performance" className="space-y-8">
             {/* Summary Cards */}
-            <PortfolioSummaryCards summary={summary} isLoading={summaryLoading} isError={summaryError} />
+            <PortfolioSummaryCards
+              summary={summary}
+              isLoading={summaryLoading}
+              isError={summaryError}
+              periodChangePct={performanceMetrics?.percentageChange ?? null}
+              periodLabel={selectedRange}
+            />
 
             {/* Performance Metrics - Time-Filtered KPIs */}
             <PerformanceMetricsCards

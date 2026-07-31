@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { api } from '@/lib/api'
 import type { FundamentalMetrics, EarningsCalendarItem, EarningsHistoryItem } from '@/lib/api'
 import { SortableTh } from '@/components/ui/SortableTh'
+import { ScrollableTable } from '@/components/ui/ScrollableTable'
 import { RefreshCw } from 'lucide-react'
 
 type SortKey = 'symbol' | 'trailing_pe' | 'forward_pe' | 'peg_ratio' | 'price_to_sales' |
@@ -154,7 +155,7 @@ function MetricsTable({ data }: { data: FundamentalMetrics[] }) {
 
   return (
     <>
-      <div className="overflow-x-auto">
+      <ScrollableTable label="Fundamentals table">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b text-muted-foreground">
@@ -228,7 +229,7 @@ function MetricsTable({ data }: { data: FundamentalMetrics[] }) {
             ))}
           </tbody>
         </table>
-      </div>
+      </ScrollableTable>
       <EtfSection etfs={etfs} />
     </>
   )

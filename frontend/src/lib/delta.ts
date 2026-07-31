@@ -16,9 +16,16 @@
  */
 export const FLAT_BAND_PCT = 5
 
-export function deltaColor(pct: number): string {
-  if (pct > FLAT_BAND_PCT) return 'text-green-600 dark:text-green-400'
-  if (pct < -FLAT_BAND_PCT) return 'text-red-600 dark:text-red-400'
+/**
+ * The band is a parameter because it is a claim about the *series*, not about
+ * percentages in general. It suits dividend income and monthly contributions, where a
+ * few percent is cadence noise. It does not suit a portfolio's period return, where 3%
+ * is a real move and grepping it out as "flat" would understate it — those callers
+ * pass 0.
+ */
+export function deltaColor(pct: number, flatBand: number = FLAT_BAND_PCT): string {
+  if (pct > flatBand) return 'text-green-600 dark:text-green-400'
+  if (pct < -flatBand) return 'text-red-600 dark:text-red-400'
   return 'text-muted-foreground'
 }
 
@@ -36,9 +43,9 @@ export function formatDelta(pct: number | null | undefined): string {
 }
 
 /** '▲' / '▼' / '' — omitted inside the flat band, where direction is noise. */
-export function deltaArrow(pct: number | null | undefined): string {
+export function deltaArrow(pct: number | null | undefined, flatBand: number = FLAT_BAND_PCT): string {
   if (pct == null || !Number.isFinite(pct)) return ''
-  if (pct > FLAT_BAND_PCT) return '▲'
-  if (pct < -FLAT_BAND_PCT) return '▼'
+  if (pct > flatBand) return '▲'
+  if (pct < -flatBand) return '▼'
   return ''
 }

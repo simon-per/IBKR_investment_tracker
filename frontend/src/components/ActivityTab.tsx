@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { ScrollableTable } from '@/components/ui/ScrollableTable'
 import { Download, ArrowLeftRight, Banknote, Coins, Split } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { api } from '@/lib/api'
@@ -253,12 +254,7 @@ export function ActivityTab() {
             </p>
           ) : (
             <>
-              <div
-                className="overflow-x-auto"
-                tabIndex={0}
-                role="region"
-                aria-label="Activity table, scrollable"
-              >
+              <ScrollableTable label="Activity table">
                 <table className="w-full text-sm">
                   <caption className="sr-only">
                     Account activity from {data.start_date} to {data.end_date}, newest first
@@ -309,7 +305,7 @@ export function ActivityTab() {
                     })}
                   </tbody>
                 </table>
-              </div>
+              </ScrollableTable>
 
               {totalPages > 1 && (
                 <div className="mt-4 flex items-center justify-between text-sm text-muted-foreground">

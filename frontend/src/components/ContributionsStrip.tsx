@@ -1,7 +1,6 @@
 import { PiggyBank } from 'lucide-react'
-import { cn } from '@/lib/utils'
 import { useCurrencySymbol, useFormatCurrency } from '@/lib/CurrencyContext'
-import { deltaColor } from '@/lib/delta'
+import { DeltaChip } from './DeltaChip'
 import type { ContributionsResponse, ContributionWindow } from '@/lib/api'
 
 interface ContributionsStripProps {
@@ -118,10 +117,17 @@ export function ContributionsStrip({ data, isLoading, isError }: ContributionsSt
               {w.money_in_method === 'spliced' && (
                 <span className="opacity-60" title="part purchases, part deposits">~</span>
               )}
+              {/* DeltaChip rather than a second hand-rolled percentage: this file
+                  owned the original colour rule that lib/delta.ts was extracted
+                  from, and then kept a competing renderer beside it — `+7%` here
+                  against `▲ +7.4%` on the Dividends tab, and no flat band, so a
+                  1% move showed a confident green. */}
               {delta !== null && (
-                <span className={cn('tabular-nums', deltaColor(delta))}>
-                  {delta >= 0 ? '+' : ''}{delta.toFixed(0)}%
-                </span>
+                <DeltaChip
+                  pct={delta}
+                  className="text-[11px]"
+                  title={`vs the all-time average of ${formatCurrency(baseline)}/month`}
+                />
               )}
             </div>
             <div className="text-sm font-semibold leading-tight tabular-nums">

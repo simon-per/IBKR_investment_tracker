@@ -66,3 +66,31 @@ describe('deltaColor', () => {
     expect(deltaColor(0)).toBe('text-muted-foreground')
   })
 })
+
+describe('the flat band is a parameter, not a universal claim', () => {
+  it('defaults to the band that suits a lumpy series', () => {
+    // Dividend income and monthly contributions: a payer shifting its pay date by a
+    // few days moves a month by more than this.
+    expect(deltaColor(3)).toContain('muted-foreground')
+    expect(deltaArrow(3)).toBe('')
+  })
+
+  it('lets a caller opt out where every move is signal', () => {
+    // A portfolio's period return: muting a 3% quarter as "flat" understates it.
+    expect(deltaColor(3, 0)).toContain('green')
+    expect(deltaColor(-3, 0)).toContain('red')
+    expect(deltaArrow(3, 0)).toBe('▲')
+    expect(deltaArrow(-3, 0)).toBe('▼')
+  })
+
+  it('still treats exactly zero as flat with no band', () => {
+    // Strictly greater / strictly less, so no move is neither up nor down.
+    expect(deltaColor(0, 0)).toBe('text-muted-foreground')
+    expect(deltaArrow(0, 0)).toBe('')
+  })
+
+  it('accepts a wider band too', () => {
+    expect(deltaColor(8, 10)).toContain('muted-foreground')
+    expect(deltaArrow(12, 10)).toBe('▲')
+  })
+})

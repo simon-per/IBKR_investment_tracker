@@ -1,5 +1,5 @@
 import { cn } from '@/lib/utils'
-import { deltaArrow, deltaColor, formatDelta } from '@/lib/delta'
+import { deltaArrow, deltaColor, formatDelta, FLAT_BAND_PCT } from '@/lib/delta'
 
 interface DeltaChipProps {
   /** null renders a dash: the backend says there was no base to grow from. */
@@ -18,6 +18,12 @@ interface DeltaChipProps {
    * trailing marker with the reason in the title.
    */
   caveat?: string
+  /**
+   * Below this magnitude the chip is muted with no arrow. Defaults to the band that
+   * suits lumpy series (dividends, monthly contributions); pass 0 where every move is
+   * signal, such as a portfolio's period return.
+   */
+  flatBand?: number
   title?: string
   className?: string
 }
@@ -29,16 +35,16 @@ interface DeltaChipProps {
  * because dividend income is lumpy enough that a few percent is noise.
  */
 export function DeltaChip({
-  pct, label, projected, caveat, title, className,
+  pct, label, projected, caveat, flatBand = FLAT_BAND_PCT, title, className,
 }: DeltaChipProps) {
-  const arrow = deltaArrow(pct)
+  const arrow = deltaArrow(pct, flatBand)
   const hasValue = pct != null && Number.isFinite(pct)
 
   return (
     <span
       className={cn(
         'inline-flex items-center gap-1 text-xs tabular-nums',
-        hasValue ? deltaColor(pct) : 'text-muted-foreground',
+        hasValue ? deltaColor(pct, flatBand) : 'text-muted-foreground',
         className,
       )}
       title={title}

@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
 import { useFormatCurrency } from '@/lib/CurrencyContext'
 import { SortableTh } from '@/components/ui/SortableTh'
+import { ScrollableTable } from '@/components/ui/ScrollableTable'
 import { RefreshCw, Plus, Trash2, Pencil } from 'lucide-react'
 
 
@@ -294,7 +295,7 @@ export function WatchlistTab() {
             </div>
           )}
           <CardContent className="p-0">
-            <div className="overflow-x-auto">
+            <ScrollableTable label="Watchlist table">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b">
@@ -542,7 +543,7 @@ export function WatchlistTab() {
                   })}
                 </tbody>
               </table>
-            </div>
+            </ScrollableTable>
           </CardContent>
         </Card>
       )}
