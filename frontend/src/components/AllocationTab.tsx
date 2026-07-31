@@ -7,6 +7,7 @@ import { api } from '@/lib/api'
 import type { AllocationCategory } from '@/lib/api'
 import { useFormatCurrency } from '@/lib/CurrencyContext'
 import { RefreshCw, X } from 'lucide-react'
+import { RebalanceCard } from './RebalanceCard'
 
 // Semantic colors for sectors
 const SECTOR_COLORS: Record<string, string> = {
@@ -412,6 +413,13 @@ export function AllocationTab() {
     queryFn: () => api.getAllocationStatus(),
   })
 
+  // The same key the Dashboard uses, so this is a cache hit rather than a
+  // second request for data already on the page.
+  const { data: positions, isLoading: positionsLoading } = useQuery({
+    queryKey: ['portfolio', 'positions'],
+    queryFn: () => api.getPositions(),
+  })
+
   const syncMutation = useMutation({
     mutationFn: () => api.syncAllocationData(false),
     onSuccess: () => {
@@ -534,6 +542,8 @@ export function AllocationTab() {
           isLoading={isLoading}
         />
       </div>
+
+      <RebalanceCard positions={positions} isLoading={positionsLoading} />
     </div>
   )
 }
