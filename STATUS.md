@@ -258,6 +258,12 @@ this section can be deleted once the commits are pushed without losing them.
   above rows reading *Not currently held*. Caught by `e2e/errors`, which now covers it.
 - **`e2e/a11y.mjs` claimed "backend optional"** and never could have been: three of its checks need one,
   so run as documented it reported 11/14 with every failure a phantom.
+- **`formatDate` shifted every date a day west of Greenwich.** `new Date("2026-03-14")` parses a
+  date-only string as UTC midnight and `Intl` renders it in local time, so the portfolio chart labelled
+  every point a day early for any viewer in the Americas — and 1 January as 31 December. The **mirror**
+  of the bug `lib/dateRanges.ts` exists to fix (that one serialised local *to* UTC and started YTD early
+  in positive offsets; this parses *from* UTC and labels early in negative ones). Invisible from Berlin,
+  which is why it survived. `lib/utils.ts` had no tests at all; it has 25 now.
 
 ### Wants Simon's eye
 
@@ -294,7 +300,14 @@ such a pair by design, and the date stays in `missing_dates` so it self-heals.
 
 ### State
 
-Suites **backend 523 / frontend 214**, `tsc -b` and `npm run build` clean. `e2e/`: `chunks` 33/33,
+**Do not add `@vitest/coverage-v8` to `frontend/`** to measure frontend coverage — a devDependency there
+is installed by `npm ci` on every `--no-cache` deploy, which is the trap `e2e/` is a separate package to
+avoid. Listing source modules with no corresponding test file is the zero-install proxy, and it is what
+found `lib/utils.ts`. Remaining leads from that list: `lib/CurrencyContext.tsx` (76 lines, real logic —
+the invalidate-everything-on-currency-change behaviour) and `lib/api.ts` (891 lines but mostly thin
+`fetch` wrappers).
+
+Suites **backend 523 / frontend 239**, `tsc -b` and `npm run build` clean. `e2e/`: `chunks` 33/33,
 `csp` 4/4, `a11y` 17/17, `errors` 14/14, `sweep` 16/16 — everything except `ledger`, which needs a
 production snapshot. **Nothing is deployed**: all of the above is verified locally only.
 
@@ -391,9 +404,9 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
 "tidy up" the overlap by deleting the wrong one.
 
 - **2026-07-31 (overnight, unpushed)** — autonomous loop: three frontend features (risk row, target
-  allocation & drift, currency exposure) and four bugs (49 sites reading the clock in local time; SOXQ
+  allocation & drift, currency exposure) and five bugs (49 sites reading the clock in local time; SOXQ
   missing from the ETF look-through; the rebalance panel building a plan out of an outage; `e2e/a11y`'s
-  "backend optional" claim). Suites 462 → 523 backend, 91 → 214 frontend; all `e2e` scripts green bar
+  "backend optional" claim). Suites 462 → 523 backend, 91 → 239 frontend; all `e2e` scripts green bar
   `ledger`. Durable rules promoted into CLAUDE.md. **Nothing deployed** — see *Unpushed*.
 - **2026-07-31** — enterprise-readiness pass: shared TTM growth,
   locale-independent chart dates, inception read from the data, keyboard/ARIA across the tab strip and
