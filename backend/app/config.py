@@ -52,7 +52,10 @@ class Settings(BaseSettings):
     # portfolio.db: APScheduler's store is synchronous SQLAlchemy while the app is
     # aiosqlite in WAL mode, and pointing both at one file invites lock contention on
     # the database that holds the actual portfolio.
-    scheduler_jobstore_url: str = "sqlite:///./scheduler_jobs.db"
+    # Inside a directory, because that directory is what docker-compose bind-mounts —
+    # see the comment there. Pointing the mount at the .db file itself made Docker
+    # create it as a directory and sqlite could never open it.
+    scheduler_jobstore_url: str = "sqlite:///./scheduler-data/scheduler_jobs.db"
 
     model_config = SettingsConfigDict(
         env_file=str(ENV_FILE),

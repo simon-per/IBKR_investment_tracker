@@ -4,6 +4,7 @@ Handles automated daily synchronization of IBKR data and market prices.
 """
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
@@ -33,6 +34,43 @@ from app.models.ticker_mapping import TickerMapping
 from sqlalchemy import select, distinct, func, and_
 
 logger = logging.getLogger(__name__)
+
+
+def _sqlite_path(url: str) -> Optional[Path]:
+    """
+    The filesystem path a `sqlite:///` URL points at, or None if it has none.
+
+    None covers both the non-sqlite case and `:memory:` — neither has a directory
+    to create, and `tests/conftest.py` runs the whole suite on the latter.
+    """
+    prefix = "sqlite:///"
+    if not url.startswith(prefix):
+        return None
+    target = url[len(prefix):]
+    if not target or target.startswith(":"):
+        return None
+    return Path(target)
+
+
+def ensure_jobstore_parent(url: str) -> None:
+    """
+    Create the directory the job store's sqlite file lives in.
+
+    sqlite creates the *file* on first connect but never its parent, so a job store
+    addressed inside a directory that does not exist yet fails with the same
+    `unable to open database file` as a genuinely unwritable path. That matters on a
+    fresh clone and on any host where the compose mount has not been created yet.
+
+    Best-effort: a failure here is reported by the caller's existing fallback to an
+    in-memory store, which is strictly better than refusing to boot.
+    """
+    path = _sqlite_path(url)
+    if path is None or not path.parent.name:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        logger.exception("Could not create the scheduler job store directory %s", path.parent)
 
 # How old the newest cached price for a held security may be before we say so.
 # Generous enough to absorb a weekend plus a public holiday, and the 13:00 job running
@@ -109,6 +147,8 @@ class SchedulerService:
     def __init__(self):
         self.scheduler: Optional[AsyncIOScheduler] = None
         self.last_sync_result: Optional[dict] = None
+        # False until `start()` proves the configured store actually opened.
+        self.jobstore_persistent: bool = False
         # Ids registered by this build, filled in by `_add_or_keep` and consumed by
         # `_prune_unknown_jobs` to evict jobs the persistent store outlived.
         self._registered_job_ids: set = set()
@@ -971,6 +1011,7 @@ class SchedulerService:
         # failing to start costs the whole site.
         started = False
         if settings.scheduler_jobstore_url:
+            ensure_jobstore_parent(settings.scheduler_jobstore_url)
             try:
                 store = SQLAlchemyJobStore(url=settings.scheduler_jobstore_url)
             except Exception:
@@ -983,6 +1024,11 @@ class SchedulerService:
                     "still run on schedule, but a restart overlapping a slot loses it.",
                     settings.scheduler_jobstore_url,
                 )
+
+        # Reported by /health. The fallback re-registers all five jobs, so
+        # `/api/scheduler/status` cannot tell it from a working store — which is exactly
+        # how a job store that never once opened looked healthy for two days.
+        self.jobstore_persistent = started
 
         if not started:
             self._try_start({}, fatal=True)

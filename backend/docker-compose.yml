@@ -10,7 +10,17 @@ services:
       # at one file invites lock contention on the database holding the actual portfolio.
       # It has to outlive the container: persisting jobs is pointless if the rebuild that
       # loses a sync slot in the first place also discards them.
-      - ./scheduler_jobs.db:/app/scheduler_jobs.db
+      #
+      # **A directory, not the .db file itself.** Docker creates a missing bind-mount
+      # source *as a directory*, which is unrecoverable for a file mount: from
+      # 2026-07-30 to 08-01 this read `./scheduler_jobs.db:/app/scheduler_jobs.db`,
+      # nothing ever created that file, so both sides became an empty directory and
+      # sqlite answered `unable to open database file` on every boot. The store fell
+      # back to memory — and because the fallback re-registers all five jobs,
+      # `/api/scheduler/status` looked identical to a working store, so the feature was
+      # inert for two days while appearing healthy. Mounting the parent directory makes
+      # Docker's auto-create the right shape and lets sqlite create the file itself.
+      - ./scheduler-data:/app/scheduler-data
     env_file:
       - .env
     environment:

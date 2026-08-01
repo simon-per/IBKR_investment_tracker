@@ -1,6 +1,7 @@
 # Working state
 
-**Last updated: 2026-08-01 (overnight loop, unpushed — see *Unpushed*)**
+**Last updated: 2026-08-01 — the overnight batch is pushed and live; verifying it found the
+scheduler job store had never once opened in production (fixed, awaiting deploy)**
 
 `CLAUDE.md` is the durable guide — architecture, invariants, and the rules that were each a bug
 first. **This file is the perishable half**: where the work actually stands, what is known-broken,
@@ -100,7 +101,9 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 Live at 19:31 Berlin. Suites: backend 357 → 462, frontend 45 → 91, `tsc -b` and `npm run build`
 clean. **Write auth is ON in production** — verified from outside the host: a write with no key and
 a write with a wrong key both 401, reads still 200. All five scheduler jobs re-registered after the
-rebuild, which is the persistent job store doing its job. **The guarded `auto-deploy.sh` is
+rebuild — **which was read at the time as the persistent job store working, and was not**: the
+in-memory fallback re-registers exactly the same five, and the store had never opened at all (see
+*Recent sessions*, 08-01). **The guarded `auto-deploy.sh` is
 installed** on the VPS at 20:11 Berlin (5140 bytes, `-rwxr-xr-x`, byte-identical to `ops/`), so
 deploys now defer rather than landing inside a sync slot.
 
@@ -213,51 +216,26 @@ What landed, and why each was worth doing:
 
 ## Watch after the next deploy
 
-- **The scheduler job store survived its first rebuild** — `/api/scheduler/status` listed all five
-  jobs immediately after. Still worth one look on the *next* deploy for the other half of the claim:
-  the container logs should show `kept, next run:` rather than recomputing, which is what proves a
-  missed slot would actually be recovered instead of silently rescheduled forward.
-- **`commit` should read a real sha next time, not `unknown`** — see *Shipped* above. If it still
-  says `unknown` after a deploy that did **not** touch `deploy.sh`, then `GIT_COMMIT` genuinely is
-  not reaching the container and the build-identity feature is broken rather than bootstrapping.
-- **The newly-installed `auto-deploy.sh` has never actually fired.** It went on at 20:11, between
-  slots. Confirm on the next deploy that `/root/auto-deploy.log` still logs a normal run — and,
-  when one lands near 08/13/15/20/22:00, that it logs `SKIP: within 10min` and defers rather than
-  stalling. A guard that refuses *every* deploy would look identical to "nothing was pushed".
+- **Confirm the job store is actually persistent**, now that the mount shape is fixed (see
+  *Shipped*): `/health` must report `scheduler_jobstore_persistent: true`, and
+  `/root/IBKR_investment_tracker/backend/scheduler-data/` must hold a real `scheduler_jobs.db`
+  **file**. If the flag is `false` the store fell back to memory again and a deploy overlapping a
+  Berlin slot still loses that sync — the container log line names the reason.
+- Then the other half of the original claim, which has still never been observed: the logs should
+  show `kept, next run:` rather than recomputing, which is what proves a *missed* slot is recovered
+  instead of silently rescheduled forward. That needs a deploy landing near a slot
+  (00/06/08/15/22:00 Berlin); none has yet.
 
-## Unpushed — waiting on a human
+## The overnight batch — pushed and live
 
-An autonomous overnight loop ran 2026-07-31 into 08-01 (`/loop 10m`): feature research →
-implementation → bug hunting, ~22 iterations. Commits are **local and unpushed on purpose** — a push
-auto-deploys inside 10 minutes and nobody was awake to watch it.
+The autonomous loop of 2026-07-31 into 08-01 (`/loop 10m`, ~22 iterations) was pushed on request and
+auto-deployed at **07:32 UTC**. `/health` reports the sha; `git log` is the record of what changed,
+and **each commit message carries its own reasoning**. What follows is only what the log does not
+give you. The durable rules are already in CLAUDE.md (*Client-side analytics*, *The dominant failure
+mode*, the naive-UTC paragraph in *Database schema*, the Alpha Vantage note under rule 1).
 
-`git log --oneline origin/main..main` is the list, and **each commit message carries its own full
-reasoning** — what the defect was, why it mattered, and how the fix was verified. This section
-deliberately does not repeat them; it holds only what the log does not give you.
-
-The durable rules from the work are in CLAUDE.md (*Client-side analytics*, *The dominant failure
-mode*, the naive-UTC paragraph in *Database schema*, and the Alpha Vantage note under rule 1), so this
-section can be deleted once the commits are pushed without losing anything.
-
-### What shipped
-
-Three frontend features, all pure additions with no new endpoint and no path to a provider: a **risk
-row** on Performance (volatility, Sortino, beta vs the selected benchmark, current drawdown,
-effective holdings), **target allocation & drift** and **currency exposure** on Allocation.
-
-Fourteen bugs, which fall into four families:
-
-- **Unknowns asserted as facts** — a fallback price claiming Yahoo's provenance; an unconvertible
-  dividend *persisted* as EUR; a failed settings fetch labelling every figure `€`; a 422 surfacing as
-  `[object Object]`; the rebalance panel building a whole plan out of a backend outage.
-- **Duplicated logic that drifted** — five instances, now the subject of its own CLAUDE.md section.
-- **Provider data trusted positionally or resolved twice** — analyst ratings read by row index;
-  allocation resolving Yahoo tickers by its own weaker rules than the price path.
-- **Unbounded or unbootstrappable syncs** — allocation re-fetching a hopeless security forever;
-  analyst ratings unable to rate a security for the first time.
-
-Plus the clock: **49 sites read local time** against a naive-UTC convention, correct in production only
-because the base image sets no `TZ`.
+**Verifying that deploy is what found the job-store bug above** — the one item in this file that had
+been marked "watch after the next deploy" and was, until someone actually looked, believed fixed.
 
 ### Wants Simon's judgement
 
@@ -297,12 +275,14 @@ such a pair by design and the date self-heals.
 
 ### State
 
-Suites **backend 647 / frontend 268**, `tsc -b` and `npm run build` clean. `e2e/`: `a11y` 17/17,
+Suites **backend 664 / frontend 268**, `tsc -b` and `npm run build` clean. `e2e/`: `a11y` 17/17,
 `sweep` 16/16, `errors` 15/15, `chunks` 33/33, `csp` 4/4 — everything except `ledger`, which needs a
-production snapshot. Re-verified end to end after the final commit, not just incrementally.
+production snapshot.
 
-**Nothing is deployed.** Every local server ran with `SCHEDULER_ENABLED=false` confirmed in `.env` *and*
-in `/health`, and no provider was contacted at any point.
+The deploy is verified beyond `/health` returning 200: the five served asset hashes match a local
+`npm run build` byte for byte, and the read endpoints answer 200 across portfolio, allocation,
+contributions, dividends, activity and tax. `/api/portfolio/benchmark` and `/api/dividends/summary`
+were deliberately **not** called — both can reach Yahoo on a cache miss.
 
 
 ## Worth doing next
@@ -387,11 +367,17 @@ detail; this exists so the next session knows what just moved without reading it
 confirmed) and gets deleted once nothing in it is outstanding: these lines are permanent, so don't
 "tidy up" the overlap by deleting the wrong one.
 
-- **2026-07-31 → 08-01 (overnight, unpushed)** — autonomous loop, ~22 iterations: three frontend
+- **2026-08-01** — pushed the overnight batch on request; it auto-deployed at 07:32 UTC and verified
+  clean. Reading the container logs to close out the "watch after the next deploy" list found the
+  **persistent scheduler job store had never once opened**: the compose bind mount named the `.db`
+  file, Docker created it as a directory on both sides, and the in-memory fallback re-registered all
+  five jobs so `/api/scheduler/status` looked identical to success. Mount is now the parent
+  directory, and `/health` reports `scheduler_jobstore_persistent`.
+- **2026-07-31 → 08-01 (overnight)** — autonomous loop, ~22 iterations: three frontend
   features (risk row, target allocation & drift, currency exposure) and fourteen bugs, the largest being
   49 sites reading the clock in local time and an unconvertible dividend persisted as EUR. Suites
   462 → 647 backend, 91 → 268 frontend; every `e2e` script green bar `ledger`. Durable rules promoted
-  into CLAUDE.md, including *The dominant failure mode*. **Nothing deployed** — see *Unpushed*.
+  into CLAUDE.md, including *The dominant failure mode*.
 - **2026-07-31** — enterprise-readiness pass: shared TTM growth,
   locale-independent chart dates, inception read from the data, keyboard/ARIA across the tab strip and
   every collapsible and sortable header, four more explicit error states, optional write auth +
@@ -408,5 +394,3 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
   313 → 357, deployed and verified. Lost the 08:00 full_sync to a deploy landing in the slot.
 - **2026-07-29** — correctness sweep (16 fixes) plus dividend growth (MoM/YoY) and the DividendsTab
   rebuild; scheduler gated behind `SCHEDULER_ENABLED`; STATUS.md split out of CLAUDE.md.
-- **2026-07-28** — external cash ledger live on prod (deposits ingested, transfers excluded) and the
-  money-in splice; Dividends tab + breakdown endpoint; Flex token redacted from stored and served errors.

@@ -134,11 +134,19 @@ async def health_check(request: Request):
     Deliberately unauthenticated and un-throttled: the deploy script and any uptime
     check poll it, and it exposes no portfolio data.
     """
+    from app.services.scheduler_service import get_scheduler
+
     return {
         "status": "healthy",
         "version": settings.app_version,
         "commit": settings.git_commit,
         "scheduler_enabled": settings.scheduler_enabled,
+        # False means the job store fell back to memory, so a restart overlapping a
+        # Berlin slot loses that sync. It is here rather than only in the logs because
+        # the fallback re-registers every job, making `/api/scheduler/status` report a
+        # fully-armed scheduler either way — the store was inert for two days behind
+        # exactly that appearance.
+        "scheduler_jobstore_persistent": get_scheduler().jobstore_persistent,
         "write_auth_enabled": write_auth_enabled(),
         "request_id": getattr(request.state, "request_id", None),
     }

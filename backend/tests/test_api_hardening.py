@@ -49,6 +49,19 @@ def test_health_reports_whether_write_auth_is_on(client, monkeypatch):
     assert client.get("/health").json()["write_auth_enabled"] is True
 
 
+def test_health_reports_whether_the_job_store_is_persistent(client):
+    """
+    The only externally visible difference between a working job store and the
+    in-memory fallback. `/api/scheduler/status` cannot tell them apart, because the
+    fallback re-registers all five jobs — which is how a store that had never once
+    opened looked healthy from 2026-07-30 to 08-01.
+
+    False here in tests: `conftest.py` blanks the job store URL for the whole suite,
+    which is exactly the "not persistent" state this flag has to report.
+    """
+    assert client.get("/health").json()["scheduler_jobstore_persistent"] is False
+
+
 def test_a_mutating_request_without_a_key_is_refused(client, monkeypatch):
     monkeypatch.setattr(settings, "api_admin_token", TOKEN, raising=False)
 

@@ -1036,7 +1036,7 @@ attempts a day is ~21 consecutive failures, so it cannot fire over a `1025` lock
 reads `result["warnings"]` and a job's own dict never had that key — so warnings were being buried in
 `details` and never rendered as warnings.
 
-**The job store is persistent, and two details make it actually work.** APScheduler runs in-process, so
+**The job store is persistent, and three details make it actually work.** APScheduler runs in-process, so
 a `docker compose down` overlapping a Berlin slot used to drop that slot outright — which is what
 happened to the 2026-07-30 08:00 `full_sync`. A `SQLAlchemyJobStore` (`settings.scheduler_jobstore_url`,
 a **separate** sqlite file: the store is synchronous SQLAlchemy while the app is aiosqlite/WAL) plus
@@ -1049,9 +1049,25 @@ a **separate** sqlite file: the store is synchronous SQLAlchemy while the app is
   now** — it would overwrite the missed timestamp on the way in and make the persistence pointless. An
   identically-triggered job is left alone; comparing `str(trigger)` is what lets a genuine schedule
   change still replace one. Both directions are pinned in `tests/test_scheduler_jobs.py`.
+- **docker-compose mounts the store's *parent directory*, never the `.db` file.** Docker creates a
+  missing bind-mount source **as a directory**, so `./scheduler_jobs.db:/app/scheduler_jobs.db` — the
+  mount from 2026-07-30 to 08-01 — could only ever produce an empty directory at the database path
+  and `sqlite3.OperationalError: unable to open database file` on every boot. sqlite creates the file
+  but never its parent, which is why the URL lives inside `scheduler-data/` and
+  `ensure_jobstore_parent()` runs first. Pinned structurally by
+  `tests/test_scheduler_jobstore_path.py`, which reads the compose file — no runtime assertion can.
 
 Thirty minutes is chosen from both ends: long enough for a `build --no-cache` rebuild, short enough
 that a real outage doesn't dump four stale slots onto a cold container.
+
+**The failure mode to fear here is that the fallback looks exactly like success.** When the store
+won't open, `start()` degrades to an in-memory scheduler — deliberately, because an exception out of
+the lifespan handler costs the whole site while losing misfire recovery costs one late sync. But the
+fallback **re-registers all five jobs**, so `/api/scheduler/status` reports a fully-armed scheduler
+either way, and the sole symptom is one `logger.error` nobody had reason to read. It was inert for
+two days behind exactly that appearance, while STATUS.md recorded it as verified working. `/health`
+therefore reports **`scheduler_jobstore_persistent`**: if it is `false`, a deploy overlapping a
+Berlin slot still loses that sync, whatever `/api/scheduler/status` says.
 
 **`/api/` protections that are not `single_flight`.** Three middlewares in `app/main.py`, innermost
 last, so a rejection from any of them still carries a correlation id:
@@ -1404,7 +1420,8 @@ Tests: `tests/test_currency_fallback.py`.
 | Deploy says health FAILED | Usually the premature check; re-curl `/health` after ~15s |
 | A write returns 401 | `API_ADMIN_TOKEN` is set and the browser has no key. Lock button in the header; the same value goes in `backend/.env` |
 | A request returns 429 with `Retry-After` | Either the sync cooldown (`single_flight`) or the per-IP limit (`RATE_LIMIT_PER_MINUTE`). The response body says which |
-| "Which build is live?" | `curl /health` — it reports `version`, `commit`, `scheduler_enabled` and `write_auth_enabled`. Same line in the app footer |
+| "Which build is live?" | `curl /health` — it reports `version`, `commit`, `scheduler_enabled`, `write_auth_enabled` and `scheduler_jobstore_persistent`. Same line in the app footer |
+| A missed sync was **not** recovered after a restart | `curl /health` for `scheduler_jobstore_persistent`. `false` means the store fell back to memory, so misfire recovery is off — `/api/scheduler/status` still lists all five jobs and cannot tell you this. Check the compose mount is the `scheduler-data` **directory** |
 | A 500 with no detail | By design. Grep the container log for its `request_id`, which is in the body and the `X-Request-ID` header |
 | A missed sync ran late after a restart | Expected: the persistent job store honours a misfire for 30 min. Older than that is dropped, and the next slot recovers |
 | A drift row reads `—` instead of advice | No target (unmanaged — blank is not 0%), or the position has no cached price so it has no weight to compare. Both deliberate; see *Client-side analytics* |
