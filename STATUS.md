@@ -1,7 +1,7 @@
 # Working state
 
 **Last updated: 2026-08-01 — the overnight batch is pushed and live; verifying it found the
-scheduler job store had never once opened in production (fixed, awaiting deploy)**
+scheduler job store had never once opened in production. Fixed, deployed and confirmed.**
 
 `CLAUDE.md` is the durable guide — architecture, invariants, and the rules that were each a bug
 first. **This file is the perishable half**: where the work actually stands, what is known-broken,
@@ -216,15 +216,16 @@ What landed, and why each was worth doing:
 
 ## Watch after the next deploy
 
-- **Confirm the job store is actually persistent**, now that the mount shape is fixed (see
-  *Shipped*): `/health` must report `scheduler_jobstore_persistent: true`, and
-  `/root/IBKR_investment_tracker/backend/scheduler-data/` must hold a real `scheduler_jobs.db`
-  **file**. If the flag is `false` the store fell back to memory again and a deploy overlapping a
-  Berlin slot still loses that sync — the container log line names the reason.
-- Then the other half of the original claim, which has still never been observed: the logs should
-  show `kept, next run:` rather than recomputing, which is what proves a *missed* slot is recovered
-  instead of silently rescheduled forward. That needs a deploy landing near a slot
-  (00/06/08/15/22:00 Berlin); none has yet.
+- **The one thing still unobserved: that a *missed* slot is actually recovered.** The store is now
+  genuinely persistent (confirmed 08-01: `scheduler_jobstore_persistent: true`, a real 24 KB
+  `scheduler-data/scheduler_jobs.db`, all five job ids in `apscheduler_jobs`, and zero fallback
+  warnings in the log). What that does **not** prove is misfire recovery end to end — the logs should
+  show `kept, next run:` rather than recomputing. That needs a deploy landing within
+  `MISFIRE_GRACE_SECONDS` of a Berlin slot (00/06/08/15/22:00); none ever has.
+
+  Read a `false` on that health flag as: the store fell back to memory again, so a deploy overlapping
+  a slot still loses that sync. `/api/scheduler/status` cannot tell you — it lists all five jobs
+  either way, which is how this went unnoticed for two days.
 
 ## The overnight batch — pushed and live
 
@@ -372,7 +373,8 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
   **persistent scheduler job store had never once opened**: the compose bind mount named the `.db`
   file, Docker created it as a directory on both sides, and the in-memory fallback re-registered all
   five jobs so `/api/scheduler/status` looked identical to success. Mount is now the parent
-  directory, and `/health` reports `scheduler_jobstore_persistent`.
+  directory, `/health` reports `scheduler_jobstore_persistent`, and the fix is deployed and
+  confirmed on prod.
 - **2026-07-31 → 08-01 (overnight)** — autonomous loop, ~22 iterations: three frontend
   features (risk row, target allocation & drift, currency exposure) and fourteen bugs, the largest being
   49 sites reading the clock in local time and an unconvertible dividend persisted as EUR. Suites
