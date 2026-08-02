@@ -47,7 +47,10 @@ export function CollapsibleCardHeader({
         onClick={onToggle}
         aria-expanded={open}
         aria-controls={contentId}
-        className="flex w-full select-none items-center gap-2 rounded-lg p-6 text-left ring-offset-background transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+        // Same padding token as CardHeader, since this button *is* the header's
+        // padded box — hardcoding `p-6` here would leave one collapsible card at
+        // desktop padding on a phone while every other card shrank.
+        className="flex w-full select-none items-center gap-2 rounded-lg p-[var(--card-padding)] text-left ring-offset-background transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
       >
         <ChevronRight
           aria-hidden="true"

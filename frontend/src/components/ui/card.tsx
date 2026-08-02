@@ -22,7 +22,13 @@ const CardHeader = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <div
     ref={ref}
-    className={cn("flex flex-col space-y-1.5 p-6", className)}
+    // `p-[var(--card-padding)]`, not `p-4 sm:p-6`: see the token's definition in
+    // index.css for why a responsive base would break ~14 call-site overrides on
+    // desktop. The bracket form matters too — tailwind-merge classifies it as padding
+    // by the bracket, so a call site's `p-0` or `pt-6` replaces it rather than racing
+    // it in CSS source order. A `theme.extend.spacing` key like `p-card` would not be
+    // recognised as padding and both would survive.
+    className={cn("flex flex-col space-y-1.5 p-[var(--card-padding)]", className)}
     {...props}
   />
 ))
@@ -34,8 +40,11 @@ const CardTitle = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <h3
     ref={ref}
+    // `text-[length:...]` rather than `text-[...]` so tailwind-merge classifies it as
+    // font-size: sixteen KPI cards pass `text-sm` here (CardTitle is used as a small
+    // label, not a heading) and must keep winning.
     className={cn(
-      "text-2xl font-semibold leading-none tracking-tight",
+      "text-[length:var(--card-title-size)] font-semibold leading-none tracking-tight",
       className
     )}
     {...props}
@@ -59,7 +68,7 @@ const CardContent = React.forwardRef<
   HTMLDivElement,
   React.HTMLAttributes<HTMLDivElement>
 >(({ className, ...props }, ref) => (
-  <div ref={ref} className={cn("p-6 pt-0", className)} {...props} />
+  <div ref={ref} className={cn("p-[var(--card-padding)] pt-0", className)} {...props} />
 ))
 CardContent.displayName = "CardContent"
 
@@ -69,7 +78,7 @@ const CardFooter = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <div
     ref={ref}
-    className={cn("flex items-center p-6 pt-0", className)}
+    className={cn("flex items-center p-[var(--card-padding)] pt-0", className)}
     {...props}
   />
 ))

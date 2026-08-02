@@ -1,4 +1,5 @@
 import * as React from "react"
+import { cn } from "@/lib/utils"
 
 /**
  * A minimal tabs primitive.
@@ -89,7 +90,14 @@ export function TabsList({ children, className, label = 'Sections' }: TabsListPr
     // Selection follows focus, the WAI-ARIA default for panels cheap to render.
     // Focus has to move too, or the roving tabIndex strands the user on a -1 element.
     setValue(target.dataset.tabValue ?? '')
-    target.focus()
+    // `preventScroll` plus an explicit inline scroll: below `sm` the list is a sticky
+    // horizontal scroller, and focus()'s default scrolling would jump the *page* to
+    // bring an off-screen trigger into view. `inline: 'nearest'` moves only the strip.
+    //
+    // The optional call is not defensive coding — jsdom implements no scrollIntoView
+    // at all, and an unguarded call takes out every keyboard test in tabs.test.tsx.
+    target.focus({ preventScroll: true })
+    target.scrollIntoView?.({ inline: 'nearest', block: 'nearest' })
   }
 
   return (
@@ -99,7 +107,19 @@ export function TabsList({ children, className, label = 'Sections' }: TabsListPr
       aria-label={label}
       aria-orientation="horizontal"
       onKeyDown={onKeyDown}
-      className={`inline-flex h-10 items-center justify-center rounded-md bg-muted p-1 text-muted-foreground ${className || ''}`}
+      // Composed with `cn()` rather than string concatenation so a consumer can
+      // actually override the base: appended raw, Tailwind's own emit order decides,
+      // and `inline-flex` is emitted after `flex` — so a caller asking for a flex
+      // scroller silently got an inline-flex one. That is why the Dashboard strip
+      // used to be forced into `grid`.
+      //
+      // `min-h-10` rather than `h-10`: at >=sm the triggers plus `p-1` come to exactly
+      // 40px, so desktop is unchanged, but a mobile consumer can raise the triggers to
+      // a real touch target without being clipped by a fixed height.
+      className={cn(
+        'inline-flex min-h-10 items-center justify-center rounded-md bg-muted p-1 text-muted-foreground',
+        className,
+      )}
     >
       {children}
     </div>
@@ -127,11 +147,15 @@ export function TabsTrigger({ value, children, className }: TabsTriggerProps) {
       // Roving tabIndex: the list is one tab stop and arrows move within it.
       tabIndex={isActive ? 0 : -1}
       onClick={() => setValue(value)}
-      className={`inline-flex items-center justify-center whitespace-nowrap rounded-sm px-3 py-1.5 text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 ${
-        isActive
-          ? 'bg-background text-foreground shadow-sm'
-          : 'hover:bg-background/50'
-      } ${className || ''}`}
+      // `min-h-11` (44px) below `sm` only: the trigger is ~30px tall, under any touch
+      // guideline, and `sm:min-h-0` leaves the desktop strip at exactly today's 32px.
+      // `shrink-0` keeps the pills at their label width inside the mobile scroller;
+      // it is inert in the desktop grid.
+      className={cn(
+        'inline-flex min-h-11 shrink-0 items-center justify-center whitespace-nowrap rounded-sm px-3 py-1.5 text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 sm:min-h-0',
+        isActive ? 'bg-background text-foreground shadow-sm' : 'hover:bg-background/50',
+        className,
+      )}
     >
       {children}
     </button>

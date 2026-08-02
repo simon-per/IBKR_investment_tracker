@@ -50,10 +50,66 @@
 }
 
 @layer base {
+  /**
+   * Card padding and card-title size, as one custom property each.
+   *
+   * Both are single decisions applied at ~40 and ~20 call sites, so the obvious form
+   * is `p-4 sm:p-6` and `text-lg sm:text-2xl` on the primitives. That is wrong here,
+   * and quietly so: a responsive base lives inside a media query, where at >=640px it
+   * beats a *plain* call-site class. Sixteen KPI cards pass `text-sm font-medium` to
+   * CardTitle (it is used as a small label, not a heading), and fourteen sites pass
+   * `p-0` / `pt-6` / `py-8` to the padded parts. `sm:text-2xl` would blow up all
+   * sixteen labels and `sm:p-6` would double-pad the four collapsible cards — on
+   * desktop, which this work is not supposed to touch.
+   *
+   * One property, one override point, no media-query specificity to lose to.
+   */
+  :root {
+    /* 390px: the page gutter plus 16px each side leaves ~324px of card interior. */
+    --card-padding: 1rem;
+    --card-title-size: 1.125rem;
+  }
+
+  @media (min-width: 640px) {
+    /* Tailwind's stock `sm` — see src/lib/breakpoints.ts, which pins the same number
+       from the JS side and fails the suite if tailwind.config.js ever overrides it.
+       These two values are today's desktop `p-6` and `text-2xl` exactly. */
+    :root {
+      --card-padding: 1.5rem;
+      --card-title-size: 1.5rem;
+    }
+  }
+
+  html {
+    /* iOS Safari inflates type in landscape unless told not to, and the scale here is
+       already chosen per breakpoint. */
+    -webkit-text-size-adjust: 100%;
+  }
+
   * {
     @apply border-border;
   }
+
   body {
     @apply bg-background text-foreground;
+    /* Several surfaces now scroll horizontally on purpose — the tab strip, the range
+       pills, every ScrollableTable. Without this, reaching the end of one chains the
+       scroll to the page and fires the browser's back-swipe gesture. */
+    overscroll-behavior-x: none;
   }
 }
+
+/*
+ * Deliberately NOT here: `body { overflow-x: hidden }`.
+ *
+ * It does not remove an overflow, it clips one — the offending control is still laid
+ * out, just unreachable. It forces the block axis to `overflow-y: auto`, which kills
+ * `position: sticky` for the tab strip. And it makes `scrollWidth <= clientWidth` pass
+ * vacuously, disarming the one assertion in `e2e/mobile.mjs` that catches the next
+ * regression. Overflow is proved absent by measuring it per tab, not by hiding it.
+ *
+ * Also not here: `viewport-fit=cover` plus `env(safe-area-inset-*)`. Without the cover
+ * the browser already insets the layout viewport past the notch and home indicator, so
+ * nothing sits under either; adding the cover without the insets would create the bug
+ * it looks like it prevents. Revisit if anything is ever bottom-pinned.
+ */
