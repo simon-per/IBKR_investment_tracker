@@ -1,9 +1,10 @@
 import { useState, useMemo, useEffect } from 'react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Area, AreaChart } from 'recharts'
+import { XAxis, YAxis, CartesianGrid, Legend, Tooltip, ResponsiveContainer, Area, AreaChart } from 'recharts'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { useBaseCurrency, useCurrencySymbol } from '@/lib/CurrencyContext'
+import { useIsCompact } from '@/lib/useMediaQuery'
 
 const STORAGE_KEYS = {
   monthlyContribution: 'forecast.monthlyContribution',
@@ -22,6 +23,7 @@ function readNumber(key: string, fallback: number, min: number, max: number): nu
 
 export function ForecastTab() {
   const curSym = useCurrencySymbol()
+  const isCompact = useIsCompact()
   const { baseCurrency } = useBaseCurrency()
   const [monthlyContribution, setMonthlyContribution] = useState(() => readNumber(STORAGE_KEYS.monthlyContribution, 1000, 0, 1000000))
   const [expectedReturn, setExpectedReturn] = useState(() => readNumber(STORAGE_KEYS.expectedReturn, 8, 0, 30))
@@ -331,8 +333,10 @@ export function ForecastTab() {
           </CardDescription>
         </CardHeader>
         <CardContent className="pt-6">
-          <ResponsiveContainer width="100%" height={640}>
-            <AreaChart data={monthlyData}>
+          {/* Height in CSS on the wrapper: 640px was 76% of an 844px phone screen. */}
+          <div className="h-[280px] w-full sm:h-[440px] lg:h-[640px]">
+          <ResponsiveContainer width="100%" height="100%">
+            <AreaChart data={monthlyData} margin={{ top: 8, right: 8, left: 0, bottom: 8 }}>
               <CartesianGrid strokeDasharray="3 3" className="opacity-30" />
               <XAxis
                 dataKey="year"
@@ -344,12 +348,16 @@ export function ForecastTab() {
                 ticks={yAxisConfig.ticks}
                 tickFormatter={(value) => `${curSym}${(value / 1000).toFixed(0)}k`}
                 tick={{ fontSize: 12 }}
-                width={80}
+                width={isCompact ? 48 : 80}
               />
               <Tooltip
                 formatter={(value: number | undefined) => value != null ? `${curSym}${value.toLocaleString()}` : '—'}
                 labelFormatter={(label) => `Year ${label}`}
               />
+              {/* This two-series stacked area had no legend at all, at any width — the
+                  grey band and the green band were unlabelled. Unreadable is not a
+                  mobile problem, but it is a problem. */}
+              <Legend wrapperStyle={{ fontSize: 12 }} />
               <Area
                 type="monotone"
                 dataKey="contributions"
@@ -368,6 +376,7 @@ export function ForecastTab() {
               />
             </AreaChart>
           </ResponsiveContainer>
+          </div>
         </CardContent>
       </Card>
 

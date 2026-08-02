@@ -569,7 +569,11 @@ export function FundamentalsTab() {
       </Card>
 
       {/* Earnings Section - Side by Side */}
-      <div className="grid gap-6 lg:grid-cols-2">
+      {/* `[&>*]:min-w-0` because a grid item defaults to `min-width: auto`, so it
+          refuses to shrink below its content's min-content width — one wide table
+          inside made this single-column track 392px in a 358px page and pushed the
+          whole document sideways. The track, not the card, is what has to yield. */}
+      <div className="grid gap-6 [&>*]:min-w-0 lg:grid-cols-2">
         {/* Upcoming Earnings */}
         <Card ref={leftCardRef} className="flex flex-col">
           <CardHeader>

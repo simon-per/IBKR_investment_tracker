@@ -19,7 +19,7 @@ interface PerformanceMetricsCardsProps {
 export function PerformanceMetricsCards({ metrics, isLoading }: PerformanceMetricsCardsProps) {
   if (isLoading) {
     return (
-      <div className="grid gap-4 md:grid-cols-3 lg:grid-cols-6">
+      <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 lg:grid-cols-6">
         {[1, 2, 3, 4, 5, 6].map((i) => (
           <Card key={i}>
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
@@ -42,7 +42,7 @@ export function PerformanceMetricsCards({ metrics, isLoading }: PerformanceMetri
   const isPositiveSharpe = metrics.sharpeRatio >= 0
 
   return (
-    <div className="grid gap-4 md:grid-cols-3 lg:grid-cols-6">
+    <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 lg:grid-cols-6">
       {/* Annual Return (XIRR) */}
       <Card>
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
@@ -57,11 +57,11 @@ export function PerformanceMetricsCards({ metrics, isLoading }: PerformanceMetri
         </CardHeader>
         <CardContent>
           {metrics.xirr !== null ? (
-            <div className={`text-2xl font-bold ${isPositiveXIRR ? 'text-green-600' : 'text-red-600'}`}>
+            <div className={`text-lg font-bold tabular-nums sm:text-2xl ${isPositiveXIRR ? 'text-green-600' : 'text-red-600'}`}>
               {isPositiveXIRR ? '+' : ''}{metrics.xirr.toFixed(2)}%
             </div>
           ) : (
-            <div className="text-2xl font-bold text-muted-foreground">N/A</div>
+            <div className="text-lg font-bold tabular-nums sm:text-2xl text-muted-foreground">N/A</div>
           )}
           <p className="text-xs text-muted-foreground">
             Money-weighted, adjusted for deposits
@@ -76,7 +76,7 @@ export function PerformanceMetricsCards({ metrics, isLoading }: PerformanceMetri
           <TrendingDown className="h-4 w-4 text-red-600" />
         </CardHeader>
         <CardContent>
-          <div className="text-2xl font-bold text-red-600">
+          <div className="text-lg font-bold tabular-nums sm:text-2xl text-red-600">
             {metrics.maxDrawdown.toFixed(2)}%
           </div>
           <p className="text-xs text-muted-foreground">
@@ -92,7 +92,7 @@ export function PerformanceMetricsCards({ metrics, isLoading }: PerformanceMetri
           <Activity className="h-4 w-4 text-muted-foreground" />
         </CardHeader>
         <CardContent>
-          <div className={`text-2xl font-bold ${isPositiveSharpe ? 'text-green-600' : 'text-red-600'}`}>
+          <div className={`text-lg font-bold tabular-nums sm:text-2xl ${isPositiveSharpe ? 'text-green-600' : 'text-red-600'}`}>
             {metrics.sharpeRatio.toFixed(2)}
           </div>
           <p className="text-xs text-muted-foreground">
@@ -108,7 +108,7 @@ export function PerformanceMetricsCards({ metrics, isLoading }: PerformanceMetri
           <Target className="h-4 w-4 text-muted-foreground" />
         </CardHeader>
         <CardContent>
-          <div className="text-2xl font-bold">
+          <div className="text-lg font-bold tabular-nums sm:text-2xl">
             {metrics.winRate.toFixed(1)}%
           </div>
           <p className="text-xs text-muted-foreground">
@@ -125,11 +125,11 @@ export function PerformanceMetricsCards({ metrics, isLoading }: PerformanceMetri
         </CardHeader>
         <CardContent>
           {metrics.calmarRatio !== null ? (
-            <div className={`text-2xl font-bold ${metrics.calmarRatio >= 1 ? 'text-green-600' : metrics.calmarRatio >= 0 ? 'text-yellow-600' : 'text-red-600'}`}>
+            <div className={`text-lg font-bold tabular-nums sm:text-2xl ${metrics.calmarRatio >= 1 ? 'text-green-600' : metrics.calmarRatio >= 0 ? 'text-yellow-600' : 'text-red-600'}`}>
               {metrics.calmarRatio.toFixed(2)}
             </div>
           ) : (
-            <div className="text-2xl font-bold text-muted-foreground">N/A</div>
+            <div className="text-lg font-bold tabular-nums sm:text-2xl text-muted-foreground">N/A</div>
           )}
           <p className="text-xs text-muted-foreground">
             Return / drawdown
@@ -144,7 +144,7 @@ export function PerformanceMetricsCards({ metrics, isLoading }: PerformanceMetri
           <PieChart className="h-4 w-4 text-muted-foreground" />
         </CardHeader>
         <CardContent>
-          <div className={`text-2xl font-bold ${metrics.top5Weight > 70 ? 'text-red-600' : metrics.top5Weight > 50 ? 'text-yellow-600' : 'text-green-600'}`}>
+          <div className={`text-lg font-bold tabular-nums sm:text-2xl ${metrics.top5Weight > 70 ? 'text-red-600' : metrics.top5Weight > 50 ? 'text-yellow-600' : 'text-green-600'}`}>
             {metrics.top5Weight.toFixed(1)}%
           </div>
           <p className="text-xs text-muted-foreground">

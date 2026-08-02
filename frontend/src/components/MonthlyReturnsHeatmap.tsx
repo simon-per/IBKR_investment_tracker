@@ -5,6 +5,7 @@ import { cn } from '@/lib/utils'
 import { useCurrencySymbol } from '@/lib/CurrencyContext'
 import { computeModifiedDietzReturn, type MonthReturn } from '@/lib/monthlyReturns'
 import type { PortfolioValuePoint } from '@/lib/api'
+import { ScrollableTable } from '@/components/ui/ScrollableTable'
 
 interface MonthlyReturnsHeatmapProps {
   data: PortfolioValuePoint[] | undefined
@@ -155,15 +156,21 @@ export function MonthlyReturnsHeatmap({ data, isLoading, isError }: MonthlyRetur
               Not enough data to compute monthly returns.
             </p>
           ) : (
-            <div className="overflow-x-auto">
+            /* A 12-month x N-year matrix is legitimately wide, so it keeps scrolling
+               rather than being transposed — transposing would buy one honest scroll
+               for a much longer page plus a second rendering of the same data. What it
+               gains is the shared primitive's edge fade and keyboard reachability, and
+               cells narrow enough on a phone to drop the hard minimum from ~755px to
+               ~570px. */
+            <ScrollableTable label="Monthly returns by year">
               <table className="w-full text-sm">
                 <thead>
                   <tr>
                     <th className="text-left font-medium text-muted-foreground px-2 py-1.5">Year</th>
                     {MONTH_LABELS.map(m => (
-                      <th key={m} className="text-center font-medium text-muted-foreground px-1 py-1.5 min-w-[52px]">{m}</th>
+                      <th key={m} className="text-center font-medium text-muted-foreground px-1 py-1.5 min-w-[40px] sm:min-w-[52px]">{m}</th>
                     ))}
-                    <th className="text-center font-medium text-muted-foreground px-2 py-1.5 min-w-[60px] border-l">YTD</th>
+                    <th className="text-center font-medium text-muted-foreground px-2 py-1.5 min-w-[48px] sm:min-w-[60px] border-l">YTD</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -206,7 +213,7 @@ export function MonthlyReturnsHeatmap({ data, isLoading, isError }: MonthlyRetur
                   ))}
                 </tbody>
               </table>
-            </div>
+            </ScrollableTable>
           )}
         </CardContent>
       )}

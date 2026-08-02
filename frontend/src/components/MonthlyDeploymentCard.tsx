@@ -14,6 +14,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { CollapsibleCardHeader } from '@/components/ui/CollapsibleCardHeader'
 import { useCurrencySymbol } from '@/lib/CurrencyContext'
 import type { ContributionsResponse, ContributionMonthlyItem } from '@/lib/api'
+import { useIsCompact } from '@/lib/useMediaQuery'
 
 interface MonthlyDeploymentCardProps {
   data: ContributionsResponse | undefined
@@ -39,6 +40,7 @@ type ChartRow = ContributionMonthlyItem & { label: string }
 
 export function MonthlyDeploymentCard({ data, isLoading, isError }: MonthlyDeploymentCardProps) {
   const curSym = useCurrencySymbol()
+  const isCompact = useIsCompact()
   const [open, setOpen] = useState(false)
 
   const monthly = data?.monthly ?? []
@@ -74,7 +76,7 @@ export function MonthlyDeploymentCard({ data, isLoading, isError }: MonthlyDeplo
       {open && (
         <CardContent id="monthly-deployment-content">
           {isLoading ? (
-            <div className="h-[300px] w-full animate-pulse rounded-md bg-muted" />
+            <div className="h-[240px] w-full animate-pulse rounded-md bg-muted sm:h-[300px]" />
           ) : isError ? (
             // A failed fetch must not read as "you have deployed no capital" — same
             // rule as PortfolioValueChart and PerformanceAttribution.
@@ -86,10 +88,17 @@ export function MonthlyDeploymentCard({ data, isLoading, isError }: MonthlyDeplo
               No contribution history yet.
             </p>
           ) : (
-            <ResponsiveContainer width="100%" height={300}>
-              <BarChart data={chartData} margin={{ top: 5, right: 10, left: 10, bottom: 5 }}>
+            <div className="h-[240px] w-full sm:h-[300px]">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={chartData} margin={{ top: 5, right: 8, left: 0, bottom: 5 }}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                <XAxis dataKey="label" fontSize={12} tick={{ fill: 'currentColor' }} />
+                <XAxis
+                  dataKey="label"
+                  fontSize={12}
+                  tick={{ fill: 'currentColor' }}
+                  interval="preserveStartEnd"
+                  minTickGap={isCompact ? 28 : 8}
+                />
                 <YAxis
                   fontSize={12}
                   tickFormatter={(value: number) => {
@@ -100,12 +109,15 @@ export function MonthlyDeploymentCard({ data, isLoading, isError }: MonthlyDeplo
                   }}
                 />
                 <Tooltip content={<DeploymentTooltip />} />
-                <Legend />
+                <Legend wrapperStyle={{ fontSize: 12 }} />
                 <ReferenceLine y={0} stroke="hsl(var(--muted-foreground))" strokeWidth={1} />
                 <Bar dataKey="deployed_eur" name="Deployed" fill={DEPLOYED_COLOR} radius={[4, 4, 0, 0]} />
-                <Bar dataKey="net_eur" name="Net (deployed − released)" fill={NET_COLOR} radius={[4, 4, 0, 0]} />
+                {/* "Net", not "Net (deployed − released)": the long form is ~300px of legend in
+                    a 324px box, and DeploymentTooltip already spells it out. */}
+                <Bar dataKey="net_eur" name="Net" fill={NET_COLOR} radius={[4, 4, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
+            </div>
           )}
         </CardContent>
       )}

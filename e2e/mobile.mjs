@@ -122,10 +122,16 @@ for (const tab of TABS) {
   const offenders = await findOverflowing()
   log(offenders.length === 0, `${tab}: nothing laid out past the viewport${offenders.length ? ' — ' + offenders.join(' | ') : ''}`)
 
-  // 7 — charts fit the card they sit in.
+  // 7 — charts fit the box they sit in. Measured against the nearest ancestor that
+  // actually has a width: recharts' own ResponsiveContainer div reports clientWidth 0,
+  // so comparing to the immediate parent silently passed or failed at random.
   const wideCharts = await page.evaluate(() =>
-    [...document.querySelectorAll('.recharts-wrapper')]
-      .filter(w => w.getBoundingClientRect().width > w.parentElement.clientWidth + 1).length)
+    [...document.querySelectorAll('.recharts-wrapper')].filter(w => {
+      let box = w.parentElement
+      while (box && box.clientWidth === 0) box = box.parentElement
+      const limit = box ? box.clientWidth : document.documentElement.clientWidth
+      return w.getBoundingClientRect().width > limit + 1
+    }).length)
   log(wideCharts === 0, `${tab}: ${wideCharts} chart(s) wider than their container`)
 
   // 4 — no new console errors from the mobile rendering.

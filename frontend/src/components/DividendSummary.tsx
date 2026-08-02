@@ -7,6 +7,7 @@ import { cn } from '@/lib/utils'
 import { api } from '@/lib/api'
 import { useCurrencySymbol } from '@/lib/CurrencyContext'
 import type { DividendSummaryResponse } from '@/lib/api'
+import { ScrollableTable } from '@/components/ui/ScrollableTable'
 
 const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
@@ -154,15 +155,15 @@ export function DividendSummary() {
             </div>
           ) : (
             <>
-              <div className="overflow-x-auto">
+              <ScrollableTable label="Dividend income by month">
                 <table className="w-full text-sm">
                   <thead>
                     <tr>
                       <th className="text-left font-medium text-muted-foreground px-2 py-1.5">Year</th>
                       {MONTH_LABELS.map(m => (
-                        <th key={m} className="text-center font-medium text-muted-foreground px-1 py-1.5 min-w-[52px]">{m}</th>
+                        <th key={m} className="text-center font-medium text-muted-foreground px-1 py-1.5 min-w-[40px] sm:min-w-[52px]">{m}</th>
                       ))}
-                      <th className="text-center font-medium text-muted-foreground px-2 py-1.5 min-w-[70px] border-l">Total</th>
+                      <th className="text-center font-medium text-muted-foreground px-2 py-1.5 min-w-[52px] sm:min-w-[70px] border-l">Total</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -209,7 +210,7 @@ export function DividendSummary() {
                     ))}
                   </tbody>
                 </table>
-              </div>
+              </ScrollableTable>
               <p className="text-xs text-muted-foreground mt-3 italic">{provenanceNote}</p>
             </>
           )}

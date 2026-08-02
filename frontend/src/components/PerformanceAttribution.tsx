@@ -14,6 +14,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { CollapsibleCardHeader } from '@/components/ui/CollapsibleCardHeader'
 import { useFormatCurrency } from '@/lib/CurrencyContext'
 import type { PerformanceAttributionResponse } from '@/lib/api'
+import { useIsCompact } from '@/lib/useMediaQuery'
 
 interface PerformanceAttributionProps {
   data: PerformanceAttributionResponse | undefined
@@ -23,6 +24,7 @@ interface PerformanceAttributionProps {
 
 export function PerformanceAttribution({ data, isLoading, isError }: PerformanceAttributionProps) {
   const formatCurrency = useFormatCurrency()
+  const isCompact = useIsCompact()
   const [open, setOpen] = useState(false)
 
   // Build summary text for the header
@@ -47,7 +49,13 @@ export function PerformanceAttribution({ data, isLoading, isError }: Performance
     return [...positive, ...negative]
   })()
 
-  const chartHeight = Math.min(900, Math.max(300, sorted.length * 36))
+  // Height stays a number here, unlike every other chart: it is *data*-driven — one
+  // row per security — so a CSS height would squash thirty bars into 240px. Only the
+  // per-row allowance and the ceiling are re-parameterised for a phone.
+  const chartHeight = Math.min(
+    isCompact ? 600 : 900,
+    Math.max(240, sorted.length * (isCompact ? 28 : 36)),
+  )
 
   return (
     <Card>
@@ -61,7 +69,7 @@ export function PerformanceAttribution({ data, isLoading, isError }: Performance
       {open && (
         <CardContent id="performance-attribution-content">
           {isLoading ? (
-            <div className="h-[400px] w-full animate-pulse rounded-md bg-muted" />
+            <div className="h-[280px] w-full animate-pulse rounded-md bg-muted sm:h-[400px]" />
           ) : isError ? (
             // A server error must not impersonate "no P&L changes" — see
             // PortfolioValueChart's error state for the same pattern.
@@ -77,7 +85,7 @@ export function PerformanceAttribution({ data, isLoading, isError }: Performance
               <BarChart
                 data={sorted}
                 layout="vertical"
-                margin={{ top: 5, right: 30, left: 10, bottom: 5 }}
+                margin={{ top: 5, right: isCompact ? 8 : 30, left: 0, bottom: 5 }}
               >
                 <CartesianGrid strokeDasharray="3 3" horizontal={false} />
                 <XAxis
@@ -93,7 +101,7 @@ export function PerformanceAttribution({ data, isLoading, isError }: Performance
                 <YAxis
                   type="category"
                   dataKey="symbol"
-                  width={70}
+                  width={isCompact ? 48 : 70}
                   fontSize={12}
                   tick={{ fill: 'currentColor' }}
                 />

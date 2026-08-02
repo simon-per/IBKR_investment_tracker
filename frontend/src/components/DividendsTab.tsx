@@ -20,6 +20,7 @@ import { DividendKpiCards } from './DividendKpiCards'
 import { DividendYearComparison } from './DividendYearComparison'
 import { useTheme } from './ThemeProvider'
 import { cn } from '@/lib/utils'
+import { useIsCompact } from '@/lib/useMediaQuery'
 import { ScrollableTable } from '@/components/ui/ScrollableTable'
 
 /**
@@ -83,6 +84,7 @@ export function DividendsTab() {
   const { theme } = useTheme()
   const curSym = useCurrencySymbol()
   const formatCurrency = useFormatCurrency()
+  const isCompact = useIsCompact()
 
   const { data, isLoading, isError } = useQuery({
     queryKey: ['dividends', 'breakdown', year],
@@ -276,7 +278,7 @@ export function DividendsTab() {
             )}
 
             {isLoading ? (
-              <div className="h-80 animate-pulse rounded bg-muted" />
+              <div className="h-[240px] animate-pulse rounded bg-muted sm:h-[320px]" />
             ) : !data || !hasAnything ? (
               <div className="flex h-32 items-center justify-center text-center text-sm text-muted-foreground">
                 No dividends recorded {year === 'all' ? 'yet' : `for ${year}`}. They arrive with
@@ -284,7 +286,11 @@ export function DividendsTab() {
               </div>
             ) : (
               <>
-                <ResponsiveContainer width="100%" height={320}>
+                {/* Every other month on a phone (`interval={1}` below): twelve labels
+                    in ~290px of plot area collide. This retires the "tick labels are
+                    cramped at 390px" rough edge STATUS.md used to carry. */}
+                <div className="h-[240px] w-full sm:h-[320px]">
+                <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={chartData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
                     <CartesianGrid strokeDasharray="3 3" className="stroke-muted" vertical={false} />
                     <XAxis
@@ -293,14 +299,14 @@ export function DividendsTab() {
                       tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }}
                       tickLine={false}
                       axisLine={{ stroke: 'hsl(var(--border))' }}
-                      interval={year === 'all' ? 'preserveStartEnd' : 0}
+                      interval={year === 'all' ? 'preserveStartEnd' : isCompact ? 1 : 0}
                     />
                     <YAxis
                       tickFormatter={formatAxisTick}
                       tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }}
                       tickLine={false}
                       axisLine={false}
-                      width={60}
+                      width={isCompact ? 40 : 60}
                     />
                     <Tooltip content={renderTooltip} cursor={{ fill: 'hsl(var(--muted))', opacity: 0.35 }} />
                     {stackSymbols.map((s, i) => (
@@ -335,6 +341,7 @@ export function DividendsTab() {
                       ))}
                   </BarChart>
                 </ResponsiveContainer>
+                </div>
 
                 {/* The three qualifier explanations used to live in `title=`, which no
                     touch device can reach — and they are the difference between reading
@@ -387,7 +394,7 @@ export function DividendsTab() {
                     half-width panel beside dead space looks like a load failure. */}
                 <div
                   className={cn(
-                    'grid gap-6 border-t border-border pt-5',
+                    'grid gap-6 border-t border-border pt-5 [&>*]:min-w-0',
                     hasGrowth && upcoming.length > 0 && 'lg:grid-cols-2',
                   )}
                 >

@@ -34,7 +34,7 @@ interface RiskMetricsCardsProps {
 
 /** A dash, not a zero — every absent metric here means "unknown", never "none". */
 function Absent() {
-  return <div className="text-2xl font-bold text-muted-foreground">—</div>
+  return <div className="text-lg font-bold tabular-nums sm:text-2xl text-muted-foreground">—</div>
 }
 
 /** `2026-03-14` → `14 Mar` without dragging a locale into it. */
@@ -49,7 +49,7 @@ function shortDate(iso: string): string {
 export function RiskMetricsCards({ metrics, isLoading }: RiskMetricsCardsProps) {
   if (isLoading) {
     return (
-      <div className="grid gap-4 md:grid-cols-3 lg:grid-cols-5">
+      <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 lg:grid-cols-5">
         {[1, 2, 3, 4, 5].map((i) => (
           <Card key={i}>
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
@@ -75,7 +75,7 @@ export function RiskMetricsCards({ metrics, isLoading }: RiskMetricsCardsProps) 
   const inDrawdown = metrics.currentDrawdownPct < -0.05
 
   return (
-    <div className="grid gap-4 md:grid-cols-3 lg:grid-cols-5">
+    <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 lg:grid-cols-5">
       {/* Volatility */}
       <Card>
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
@@ -84,7 +84,7 @@ export function RiskMetricsCards({ metrics, isLoading }: RiskMetricsCardsProps) 
         </CardHeader>
         <CardContent>
           {metrics.volatilityPct !== null ? (
-            <div className="text-2xl font-bold">{metrics.volatilityPct.toFixed(1)}%</div>
+            <div className="text-lg font-bold tabular-nums sm:text-2xl">{metrics.volatilityPct.toFixed(1)}%</div>
           ) : (
             <Absent />
           )}
@@ -105,7 +105,7 @@ export function RiskMetricsCards({ metrics, isLoading }: RiskMetricsCardsProps) 
         <CardContent>
           {metrics.sortino !== null ? (
             <div
-              className={`text-2xl font-bold ${
+              className={`text-lg font-bold tabular-nums sm:text-2xl ${
                 metrics.sortino >= 1
                   ? 'text-green-600'
                   : metrics.sortino >= 0
@@ -134,7 +134,7 @@ export function RiskMetricsCards({ metrics, isLoading }: RiskMetricsCardsProps) 
         </CardHeader>
         <CardContent>
           {beta?.beta != null ? (
-            <div className="text-2xl font-bold">{beta.beta.toFixed(2)}</div>
+            <div className="text-lg font-bold tabular-nums sm:text-2xl">{beta.beta.toFixed(2)}</div>
           ) : (
             <Absent />
           )}
@@ -159,7 +159,7 @@ export function RiskMetricsCards({ metrics, isLoading }: RiskMetricsCardsProps) 
           />
         </CardHeader>
         <CardContent>
-          <div className={`text-2xl font-bold ${inDrawdown ? 'text-red-600' : 'text-green-600'}`}>
+          <div className={`text-lg font-bold tabular-nums sm:text-2xl ${inDrawdown ? 'text-red-600' : 'text-green-600'}`}>
             {metrics.currentDrawdownPct.toFixed(2)}%
           </div>
           <p className="text-xs text-muted-foreground">
@@ -182,7 +182,7 @@ export function RiskMetricsCards({ metrics, isLoading }: RiskMetricsCardsProps) 
         </CardHeader>
         <CardContent>
           {metrics.effectiveHoldings !== null ? (
-            <div className="text-2xl font-bold">{metrics.effectiveHoldings.toFixed(1)}</div>
+            <div className="text-lg font-bold tabular-nums sm:text-2xl">{metrics.effectiveHoldings.toFixed(1)}</div>
           ) : (
             <Absent />
           )}

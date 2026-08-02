@@ -313,26 +313,36 @@ export function Dashboard() {
     <div className="min-h-screen bg-background">
       {/* Header */}
       <div className="border-b">
-        <div className="w-full px-4 py-4">
-          <div className="flex items-center justify-between">
-            <div>
-              <h1 className="text-3xl font-bold tracking-tight">Portfolio Analyzer</h1>
-              <p className="text-muted-foreground mt-1">
+        <div className="w-full px-4 py-3 sm:py-4">
+          {/* Wraps below `sm`: the title block and the four controls cannot share a
+              358px row, and `justify-between` on a row that cannot wrap is what pushed
+              the cluster past the viewport edge. `items-start` so the controls sit
+              level with the title rather than with the bottom of the status block. */}
+          <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
+            <div className="min-w-0">
+              <h1 className="text-xl font-bold tracking-tight sm:text-3xl">Portfolio Analyzer</h1>
+              {/* Hidden below `sm`: the strapline costs a line of an 844px screen and
+                  tells a returning user nothing they do not already know. */}
+              <p className="text-muted-foreground mt-1 hidden sm:block">
                 Track your IBKR portfolio with cost basis and market value
               </p>
               {schedulerStatus && schedulerStatus.status === 'running' && (
-                <div className="flex items-center gap-3 mt-2 text-xs text-muted-foreground">
-                  <Clock className="h-3 w-3" />
+                // Short timestamps at every width, not short only on phones: two full
+                // toLocaleString() values are ~50 characters each, and "8/2/26, 8:00 AM"
+                // answers "did the sync run" just as well on a desktop. One format,
+                // nothing to drift.
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-2 text-xs text-muted-foreground">
+                  <Clock className="h-3 w-3 shrink-0" />
                   {schedulerStatus.last_sync ? (
                     <span>
-                      Last sync: {new Date(schedulerStatus.last_sync.timestamp).toLocaleString()} ({schedulerStatus.last_sync.status})
+                      Last sync: {new Date(schedulerStatus.last_sync.timestamp).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })} ({schedulerStatus.last_sync.status})
                     </span>
                   ) : (
                     <span>No sync has run yet</span>
                   )}
                   {schedulerStatus.jobs.length > 0 && schedulerStatus.jobs[0].next_run_time && (
                     <span>
-                      · Next: {new Date(schedulerStatus.jobs[0].next_run_time).toLocaleString()}
+                      · Next: {new Date(schedulerStatus.jobs[0].next_run_time).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })}
                     </span>
                   )}
                 </div>
@@ -393,22 +403,25 @@ export function Dashboard() {
               )}
               <ThemeToggle />
               <AdminKeyButton writeAuthEnabled={health?.write_auth_enabled} />
+              {/* The label is hidden below `sm`, not the button, and not moved into an
+                  overflow menu — that would be a second rendering of a four-control
+                  set. The icon plus this name carry the same meaning to a screen
+                  reader as the visible label does. */}
               <Button
                 onClick={handleSync}
                 disabled={syncMutation.isPending}
                 variant="outline"
+                className="px-3 sm:px-4"
+                aria-label={syncMutation.isPending ? 'Syncing IBKR data' : 'Sync IBKR data'}
               >
                 {syncMutation.isPending ? (
-                  <>
-                    <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
-                    Syncing...
-                  </>
+                  <RefreshCw className="h-4 w-4 animate-spin sm:mr-2" />
                 ) : (
-                  <>
-                    <Download className="mr-2 h-4 w-4" />
-                    Sync IBKR Data
-                  </>
+                  <Download className="h-4 w-4 sm:mr-2" />
                 )}
+                <span className="hidden sm:inline">
+                  {syncMutation.isPending ? 'Syncing...' : 'Sync IBKR Data'}
+                </span>
               </Button>
             </div>
           </div>
@@ -442,27 +455,42 @@ export function Dashboard() {
       </div>
 
       {/* Main Content */}
-      <div className="w-full px-4 py-6">
-        <Tabs defaultValue="performance" className="space-y-8">
-          {/* Eight equal columns only once there is room for them: at 390px each
-              cell was ~53px while the triggers are whitespace-nowrap, so the
-              labels overlapped into an unreadable smear on every tab. Below `sm`
-              the columns size to their content and the list scrolls instead.
-              Stays `grid` rather than `flex` because TabsList's own base class is
-              `inline-flex`, which wins over `flex` in Tailwind's output order. */}
-          <TabsList
-            label="Portfolio sections"
-            className="grid w-full max-w-4xl auto-cols-max grid-flow-col overflow-x-auto sm:auto-cols-fr"
-          >
-            <TabsTrigger value="performance">Performance</TabsTrigger>
-            <TabsTrigger value="activity">Activity</TabsTrigger>
-            <TabsTrigger value="allocation">Allocation</TabsTrigger>
-            <TabsTrigger value="dividends">Dividends</TabsTrigger>
-            <TabsTrigger value="fundamentals">Fundamentals</TabsTrigger>
-            <TabsTrigger value="watchlist">Watchlist</TabsTrigger>
-            <TabsTrigger value="forecast">Forecast</TabsTrigger>
-            <TabsTrigger value="tax">Tax</TabsTrigger>
-          </TabsList>
+      <div className="w-full px-4 py-4 sm:py-6">
+        <Tabs defaultValue="performance" className="space-y-6 sm:space-y-8">
+          {/* Sticky and full-bleed below `sm`, exactly today's eight-column grid above
+              it.
+
+              Eight sections do not fit in 358px — each cell was ~53px while the
+              triggers are whitespace-nowrap, so the labels overlapped into a smear —
+              so the strip scrolls. It runs to the screen edge (`-mx-4` here, the gutter
+              restored as `px-4` *inside* the scroller) so the next pill is visibly
+              half-cut: that is the "there is more" cue, and unlike an edge fade it
+              cannot lie about which end still has content. It stays put while a
+              3,000px panel scrolls under it because it is the one control used
+              constantly on a phone.
+
+              `p-0` before `px-4 py-2` so tailwind-merge drops TabsList's base `p-1`
+              outright rather than the result depending on Tailwind's emit order. */}
+          <div className="sticky top-0 z-30 -mx-4 border-b bg-background sm:static sm:mx-0 sm:border-0 sm:bg-transparent">
+            <TabsList
+              label="Portfolio sections"
+              // `justify-start` matters and is not cosmetic: TabsList's base is
+              // `justify-center`, and a centred flex row wider than its scroller
+              // overflows equally on BOTH sides — the leading overflow is unreachable
+              // because scrollLeft cannot go negative. With eight tabs in 358px that
+              // put "Performance" ~150px off the left edge, permanently untappable.
+              className="flex w-full justify-start gap-1 overflow-x-auto rounded-none p-0 px-4 py-2 scroll-px-4 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:grid sm:max-w-4xl sm:auto-cols-fr sm:grid-flow-col sm:gap-0 sm:rounded-md sm:p-1"
+            >
+              <TabsTrigger value="performance">Performance</TabsTrigger>
+              <TabsTrigger value="activity">Activity</TabsTrigger>
+              <TabsTrigger value="allocation">Allocation</TabsTrigger>
+              <TabsTrigger value="dividends">Dividends</TabsTrigger>
+              <TabsTrigger value="fundamentals">Fundamentals</TabsTrigger>
+              <TabsTrigger value="watchlist">Watchlist</TabsTrigger>
+              <TabsTrigger value="forecast">Forecast</TabsTrigger>
+              <TabsTrigger value="tax">Tax</TabsTrigger>
+            </TabsList>
+          </div>
 
           {/* Performance Tab */}
           <TabsContent value="performance" className="space-y-8">
@@ -490,21 +518,32 @@ export function Dashboard() {
             {/* Portfolio Value Chart */}
             <Card>
               <CardHeader>
-                <div className="flex items-center justify-between">
-                  <div>
+                {/* Stacks below `sm`. Nine range buttons come to ~465px and the
+                    benchmark picker another 40 — against ~324px of card interior at
+                    390px, which is what put the whole page into horizontal scroll. */}
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+                  <div className="min-w-0">
                     <CardTitle>Portfolio Value Over Time</CardTitle>
                     <CardDescription>
                       Cost basis (invested) vs Market value (current worth) in {baseCurrency}
                     </CardDescription>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <div className="flex gap-1">
+                  <div className="flex min-w-0 items-center gap-2">
+                    {/* `min-w-0` is load-bearing: without it this flex child refuses to
+                        shrink below its content width and overflows the card whatever
+                        `overflow-x-auto` says. All nine ranges stay reachable — a
+                        shortened mobile set would need a second control *and* a second
+                        copy of TIME_RANGES. Snap points because the pills are
+                        near-uniform width; the tab strip deliberately does not snap,
+                        because its labels are not. */}
+                    <div className="flex min-w-0 flex-1 snap-x snap-mandatory gap-1 overflow-x-auto scroll-px-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:flex-none sm:snap-none sm:overflow-visible">
                       {TIME_RANGES.map((range) => (
                         <Button
                           key={range}
                           variant={selectedRange === range ? 'default' : 'outline'}
                           size="sm"
                           onClick={() => setSelectedRange(range)}
+                          className="shrink-0 snap-start"
                         >
                           {range}
                         </Button>
@@ -523,7 +562,9 @@ export function Dashboard() {
                 {performanceMetrics && (
                   <div className="space-y-2">
                     <div className="flex items-center gap-6 text-sm">
-                      <div className="flex items-center gap-2">
+                      {/* Wraps: label + currency + percent fits at 390px in EUR but not
+                          with "CHF 12,345.67", and the three are one unbreakable run. */}
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                         <span
                           className="text-muted-foreground"
                           title="Change in total holdings value over the period. This includes money you added — it is not a return; see Period Gain for that."
@@ -539,7 +580,9 @@ export function Dashboard() {
                       </div>
                     </div>
                     <div className="flex items-center gap-6 text-sm">
-                      <div className="flex items-center gap-2">
+                      {/* Wraps: label + currency + percent fits at 390px in EUR but not
+                          with "CHF 12,345.67", and the three are one unbreakable run. */}
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                         <span
                           className="text-muted-foreground"
                           title="What the holdings actually earned over the period: value change plus proceeds of anything sold, less money put in. Realized gains count."
@@ -627,20 +670,22 @@ export function Dashboard() {
           meant ssh'ing to the box. */}
       {health && (
         <footer className="border-t">
-          <div className="w-full px-4 py-3 text-xs text-muted-foreground">
+          {/* A flex row rather than inline spans with `ml-*`: those margins survive a
+              wrap and indent the start of the next line. */}
+          <div className="flex w-full flex-wrap items-center gap-x-2 gap-y-1 px-4 py-3 text-xs text-muted-foreground">
             <span>Portfolio Analyzer v{health.version}</span>
             {health.commit && health.commit !== 'unknown' && (
-              <span className="ml-2 font-mono">{health.commit.slice(0, 7)}</span>
+              <span className="font-mono">{health.commit.slice(0, 7)}</span>
             )}
             {/* Both call out a *disabled* safeguard, never a working one: a scheduler
                 that has quietly stopped looks exactly like a healthy site. */}
             {!health.scheduler_enabled && (
-              <span className="ml-3 text-amber-700 dark:text-amber-400">
+              <span className="text-amber-700 dark:text-amber-400">
                 · scheduler disabled — no automatic syncs
               </span>
             )}
             {!health.write_auth_enabled && (
-              <span className="ml-3 text-amber-700 dark:text-amber-400">
+              <span className="text-amber-700 dark:text-amber-400">
                 · write API unauthenticated
               </span>
             )}

@@ -24,7 +24,7 @@ export function PortfolioSummaryCards({
 
   if (isLoading) {
     return (
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
+      <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-5">
         {[1, 2, 3, 4, 5].map((i) => (
           <Card key={i}>
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
@@ -65,14 +65,20 @@ export function PortfolioSummaryCards({
   const isRealizedProfit = summary.total_realized_gain_loss_eur >= 0
 
   return (
-    <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
-      <Card>
+    /* Two-up rather than one card per row below `md`: stacked, the three KPI rows came
+       to ~1,660px of scrolling past numbers before the chart — about two phone screens,
+       and the opposite of the reading order this page wants. */
+    <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-5">
+      {/* The hero. Market Value spans both columns on a phone so it keeps the full
+          324px and its `text-2xl`, and the other four tile underneath — which is what
+          makes the top of the screen read like a portfolio rather than a dashboard. */}
+      <Card className="col-span-2 lg:col-span-1">
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
           <CardTitle className="text-sm font-medium">Market Value</CardTitle>
           <Wallet className="h-4 w-4 text-muted-foreground" />
         </CardHeader>
         <CardContent>
-          <div className="text-2xl font-bold">
+          <div className="text-2xl font-bold tabular-nums">
             {formatCurrency(summary.total_market_value_eur)}
           </div>
           {periodChangePct != null ? (
@@ -100,7 +106,7 @@ export function PortfolioSummaryCards({
           <Target className="h-4 w-4 text-muted-foreground" />
         </CardHeader>
         <CardContent>
-          <div className="text-2xl font-bold">
+          <div className="text-lg font-bold tabular-nums sm:text-2xl">
             {formatCurrency(summary.total_cost_basis_eur)}
           </div>
           <p className="text-xs text-muted-foreground">
@@ -119,7 +125,7 @@ export function PortfolioSummaryCards({
           )}
         </CardHeader>
         <CardContent>
-          <div className={`text-2xl font-bold ${isProfit ? 'text-green-600' : 'text-red-600'}`}>
+          <div className={`text-lg font-bold tabular-nums sm:text-2xl ${isProfit ? 'text-green-600' : 'text-red-600'}`}>
             {formatCurrency(summary.total_gain_loss_eur)}
           </div>
           <p className="text-xs text-muted-foreground">
@@ -138,7 +144,7 @@ export function PortfolioSummaryCards({
           )}
         </CardHeader>
         <CardContent>
-          <div className={`text-2xl font-bold ${isRealizedProfit ? 'text-green-600' : 'text-red-600'}`}>
+          <div className={`text-lg font-bold tabular-nums sm:text-2xl ${isRealizedProfit ? 'text-green-600' : 'text-red-600'}`}>
             {formatCurrency(summary.total_realized_gain_loss_eur)}
           </div>
           <p className="text-xs text-muted-foreground">
@@ -154,7 +160,7 @@ export function PortfolioSummaryCards({
           <CardTitle className="text-sm font-medium">Positions</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="text-2xl font-bold">{summary.num_positions}</div>
+          <div className="text-lg font-bold tabular-nums sm:text-2xl">{summary.num_positions}</div>
           <p className="text-xs text-muted-foreground">
             Unique securities held
           </p>

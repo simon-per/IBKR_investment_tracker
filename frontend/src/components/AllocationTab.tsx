@@ -329,9 +329,13 @@ function AllocationTreemap({
         <CardDescription>{description} · Click a section to see positions</CardDescription>
       </CardHeader>
       <CardContent>
-        <div className="flex gap-6 items-start">
+        {/* Stacks below `sm`. Side by side, the 200px legend leaves the treemap ~86px
+            of a 390px screen — and CustomTreemapContent suppresses every label under
+            60x30, so the chart rendered as unlabelled colour blocks. Stacked, the
+            treemap is full width and the labels come back on their own. */}
+        <div className="flex flex-col gap-4 sm:flex-row sm:gap-6 sm:items-start">
           {/* Treemap */}
-          <div className="flex-1 min-w-0" style={{ height: 400 }}>
+          <div className="h-[240px] w-full min-w-0 sm:h-[400px] sm:flex-1">
             <ResponsiveContainer width="100%" height="100%">
               <Treemap
                 data={treemapData}
@@ -363,12 +367,12 @@ function AllocationTreemap({
           </div>
 
           {/* Legend */}
-          <div className="w-[200px] shrink-0 space-y-1.5 pt-2">
+          <div className="w-full space-y-1.5 sm:w-[200px] sm:shrink-0 sm:pt-2">
             {entries.map(([name, cat], i) => (
               <button
                 key={name}
                 onClick={() => setSelected(selected === name ? null : name)}
-                className={`flex items-center gap-2 w-full text-left py-1 px-1.5 rounded transition-colors ${
+                className={`flex min-h-11 items-center gap-2 w-full text-left py-1 px-1.5 rounded transition-colors sm:min-h-0 ${
                   selected === name ? 'bg-muted' : 'hover:bg-muted/50'
                 }`}
               >
@@ -535,7 +539,11 @@ export function AllocationTab() {
       />
 
       {/* Geographic and Asset Type side by side */}
-      <div className="grid gap-6 lg:grid-cols-2">
+      {/* `[&>*]:min-w-0` because a grid item defaults to `min-width: auto`, so it
+          refuses to shrink below its content's min-content width — one wide table
+          inside made this single-column track 392px in a 358px page and pushed the
+          whole document sideways. The track, not the card, is what has to yield. */}
+      <div className="grid gap-6 [&>*]:min-w-0 lg:grid-cols-2">
         <AllocationTreemap
           title="Geographic Breakdown"
           description="Portfolio allocation by region"

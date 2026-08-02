@@ -11,6 +11,15 @@ import {
 import type { PortfolioValuePoint, BenchmarkValuePoint } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 import { useFormatCurrency, useCurrencySymbol } from '@/lib/CurrencyContext'
+import { useIsCompact } from '@/lib/useMediaQuery'
+import { niceTicks } from '@/lib/niceTicks'
+
+/**
+ * One height for the chart and its three placeholder states, so a range switch or a
+ * fetch failure cannot make the page jump. 600px was the only value at every width,
+ * which is 71% of an 844px phone screen.
+ */
+const CHART_BOX = 'h-[280px] sm:h-[420px] lg:h-[600px]'
 
 export interface BenchmarkDataset {
   data: BenchmarkValuePoint[]
@@ -34,6 +43,9 @@ export function PortfolioValueChart({ data, benchmarks = [], isLoading, isError 
   const [showProfit, setShowProfit] = useState(true)
   const [visibleBenchmarks, setVisibleBenchmarks] = useState<Set<string>>(new Set())
   const seenBenchmarkKeys = useRef<Set<string>>(new Set())
+  // Axis width, tick density and margins are Recharts props, not CSS — the one part of
+  // going responsive that a media query cannot reach.
+  const isCompact = useIsCompact()
 
   // Auto-enable benchmarks when they first appear in the data
   useEffect(() => {
@@ -88,16 +100,23 @@ export function PortfolioValueChart({ data, benchmarks = [], isLoading, isError 
 
   const availableBenchmarks = benchmarks.filter(b => b.data.length > 0)
 
-  // Custom tick formatter for X axis - show first day of each month
+  /**
+   * X tick labels.
+   *
+   * This used to return a label only on the 1st of a month and `''` otherwise. That
+   * defeats recharts' own thinning, which drops ticks by *index*: over two years it
+   * kept up to 24 full-length labels while the ticks between them were empty strings,
+   * so `minTickGap` had nothing to measure and the labels collided.
+   *
+   * Every tick is labelled now and recharts thins by measured text width. Consequence
+   * to expect on desktop too: ticks no longer land on month firsts. The conservative
+   * alternative — keep the day-1 rule, raise `interval` — does not fix 2Y at 390px, so
+   * it does not fix the problem.
+   */
   const formatXAxisTick = (value: string) => {
     const date = new Date(value)
-    const day = date.getDate()
-
-    // Only show label for first day of month
-    if (day === 1) {
-      return date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
-    }
-    return ''
+    if (Number.isNaN(date.getTime())) return ''
+    return date.toLocaleDateString('en-US', { month: 'short', year: '2-digit' })
   }
 
   // Custom tick formatter for Y axis
@@ -118,6 +137,7 @@ export function PortfolioValueChart({ data, benchmarks = [], isLoading, isError 
         ticks: [0, 10000, 20000, 30000, 40000, 50000]
       }
     }
+
 
     // Find the min and max values only from visible lines
     const allValues: number[] = []
@@ -152,37 +172,15 @@ export function PortfolioValueChart({ data, benchmarks = [], isLoading, isError 
     const domainMin = minValue - range * paddingPercent
     const domainMax = maxValue + range * paddingPercent
 
-    // Determine appropriate tick step based on range
-    let tickStep: number
-    if (range < 1000) {
-      tickStep = 200
-    } else if (range < 5000) {
-      tickStep = 1000
-    } else if (range < 20000) {
-      tickStep = 2500
-    } else {
-      tickStep = 10000
-    }
-
-    // Round domain to nice numbers
-    const domainMinRounded = Math.floor(domainMin / tickStep) * tickStep
-    const domainMaxRounded = Math.ceil(domainMax / tickStep) * tickStep
-
-    // Generate ticks
-    const ticks: number[] = []
-    for (let i = domainMinRounded; i <= domainMaxRounded; i += tickStep) {
-      ticks.push(i)
-    }
-
-    return {
-      domain: [domainMinRounded, domainMaxRounded] as [number, number],
-      ticks
-    }
-  }, [chartData, showCostBasis, showMarketValue, showProfit, visibleBenchmarks, availableBenchmarks])
+    // The tick count is a property of how tall the chart is, not of the data. This
+    // used to be a fixed 200/1000/2500/10000 step ladder chosen from the range alone,
+    // which is how eight labels ended up 35px apart in a 280px-tall phone chart.
+    return niceTicks(domainMin, domainMax, isCompact ? 4 : 8)
+  }, [chartData, showCostBasis, showMarketValue, showProfit, visibleBenchmarks, availableBenchmarks, isCompact])
 
   if (isLoading) {
     return (
-      <div className="w-full h-[600px] flex items-center justify-center bg-muted/10 rounded-lg">
+      <div className={`w-full ${CHART_BOX} flex items-center justify-center bg-muted/10 rounded-lg`}>
         <div className="text-muted-foreground">Loading chart data...</div>
       </div>
     )
@@ -192,7 +190,7 @@ export function PortfolioValueChart({ data, benchmarks = [], isLoading, isError 
   // below can't fix a backend that isn't answering.
   if (isError) {
     return (
-      <div className="w-full h-[600px] flex items-center justify-center bg-muted/10 rounded-lg border border-dashed">
+      <div className={`w-full ${CHART_BOX} flex items-center justify-center bg-muted/10 rounded-lg border border-dashed`}>
         <div className="text-center">
           <p className="text-muted-foreground">Couldn't load the chart</p>
           <p className="text-sm text-muted-foreground mt-2">
@@ -205,7 +203,7 @@ export function PortfolioValueChart({ data, benchmarks = [], isLoading, isError 
 
   if (!data || data.length === 0) {
     return (
-      <div className="w-full h-[600px] flex items-center justify-center bg-muted/10 rounded-lg border border-dashed">
+      <div className={`w-full ${CHART_BOX} flex items-center justify-center bg-muted/10 rounded-lg border border-dashed`}>
         <div className="text-center">
           <p className="text-muted-foreground">No portfolio data available</p>
           <p className="text-sm text-muted-foreground mt-2">
@@ -218,8 +216,8 @@ export function PortfolioValueChart({ data, benchmarks = [], isLoading, isError 
 
   return (
     <div className="space-y-4">
-      {/* Toggle Buttons */}
-      <div className="flex gap-3 flex-wrap items-center">
+      {/* Toggle Buttons. Already wrapping; the min-height is the touch target. */}
+      <div className="flex gap-2 flex-wrap items-center sm:gap-3 [&>button]:min-h-11 sm:[&>button]:min-h-0">
         <span className="text-sm text-muted-foreground">Show:</span>
         <button
           onClick={() => setShowCostBasis(!showCostBasis)}
@@ -271,9 +269,13 @@ export function PortfolioValueChart({ data, benchmarks = [], isLoading, isError 
         ))}
       </div>
 
-      {/* Chart */}
-      <ResponsiveContainer width="100%" height={600}>
-        <LineChart data={chartData} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
+      {/* Chart. The height is CSS on the wrapper rather than a `height={600}` prop, so
+          one class string covers the chart and its three placeholder states. */}
+      <div className={`w-full ${CHART_BOX}`}>
+      <ResponsiveContainer width="100%" height="100%">
+        {/* `left: 20` double-padded a chart that already has a Y axis — 20px of a
+            324px card. */}
+        <LineChart data={chartData} margin={{ top: 5, right: isCompact ? 8 : 30, left: 0, bottom: 5 }}>
           <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
           <XAxis
             dataKey="date"
@@ -281,6 +283,9 @@ export function PortfolioValueChart({ data, benchmarks = [], isLoading, isError 
             tick={{ fill: 'hsl(var(--muted-foreground))' }}
             tickFormatter={formatXAxisTick}
             interval="preserveStartEnd"
+            // Every tick is labelled now, so recharts can thin by measured text width.
+            // See formatXAxisTick for why the old day-1 rule made that impossible.
+            minTickGap={isCompact ? 44 : 60}
           />
           <YAxis
             className="text-xs"
@@ -288,12 +293,17 @@ export function PortfolioValueChart({ data, benchmarks = [], isLoading, isError 
             tickFormatter={formatYAxisTick}
             domain={yAxisConfig.domain}
             ticks={yAxisConfig.ticks}
+            // "€12k" is ~34px; the default 60 spends a fifth of a phone's plot area.
+            width={isCompact ? 44 : 60}
           />
           <Tooltip
             contentStyle={{
               backgroundColor: 'hsl(var(--card))',
               border: '1px solid hsl(var(--border))',
               borderRadius: '8px',
+              // Recharts clamps a tooltip to the viewBox, so it never causes overflow —
+              // but unbounded it fills the whole plot area at 390px.
+              maxWidth: '70vw',
             }}
             formatter={(value: number | undefined) => value !== undefined ? formatCurrency(value) : ''}
           />
@@ -348,6 +358,7 @@ export function PortfolioValueChart({ data, benchmarks = [], isLoading, isError 
           )}
         </LineChart>
       </ResponsiveContainer>
+      </div>
     </div>
   )
 }
