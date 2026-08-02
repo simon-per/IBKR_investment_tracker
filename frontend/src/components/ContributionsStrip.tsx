@@ -43,7 +43,9 @@ export function ContributionsStrip({ data, isLoading, isError }: ContributionsSt
   const formatCurrency = useFormatCurrency()
 
   if (isLoading) {
-    return <div className="ml-auto h-8 w-80 animate-pulse rounded bg-muted" />
+    // `w-80` was 320px against ~308px of card interior at 390px, so the skeleton
+    // itself pushed the page sideways before any data arrived.
+    return <div className="ml-0 h-8 w-full max-w-[20rem] animate-pulse rounded bg-muted sm:ml-auto" />
   }
 
   // Rendering nothing on a failed fetch made the whole strip silently vanish, which is
@@ -51,7 +53,7 @@ export function ContributionsStrip({ data, isLoading, isError }: ContributionsSt
   // silent failure the rest of the app now refuses.
   if (isError) {
     return (
-      <div className="ml-auto flex items-center gap-1.5 pb-0.5 text-xs text-muted-foreground">
+      <div className="ml-0 flex items-center gap-1.5 pb-0.5 text-xs text-muted-foreground sm:ml-auto">
         <PiggyBank className="h-3.5 w-3.5" />
         <span>Avg Monthly unavailable — the backend didn't respond</span>
       </div>
@@ -75,7 +77,9 @@ export function ContributionsStrip({ data, isLoading, isError }: ContributionsSt
       + `real deposits instead, which a position switch cannot inflate.`
 
   return (
-    <div className="ml-auto flex flex-wrap items-end gap-x-5 gap-y-2">
+    // `ml-auto` only from `sm`: below it the strip is the sole item on its own wrapped
+    // row, so pushing it right just left a ragged gutter under the period metrics.
+    <div className="ml-0 flex flex-wrap items-end gap-x-5 gap-y-2 sm:ml-auto">
       <div
         className="flex items-center gap-1.5 pb-0.5 text-xs text-muted-foreground"
         title={labelTitle}

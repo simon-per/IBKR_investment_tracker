@@ -182,7 +182,16 @@ export function ActivityTab() {
           </div>
 
           <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-3">
-            <div className="flex flex-wrap gap-1" role="group" aria-label="Time range">
+            {/* Scrolls below `sm` rather than wrapping: seven range buttons come to
+                ~384px against ~308px of card interior at 390px, so wrapping cost a
+                second row — and the kind group below cost two more. The negative
+                margin plus matching padding let the row reach the card edge, so the
+                next pill is visibly half-cut instead of the group looking complete. */}
+            <div
+              className="-mx-1 flex snap-x snap-mandatory gap-1 overflow-x-auto px-1 sm:flex-wrap sm:overflow-visible"
+              role="group"
+              aria-label="Time range"
+            >
               {RANGES.map(r => (
                 <Button
                   key={r}
@@ -190,13 +199,18 @@ export function ActivityTab() {
                   variant={range === r ? 'default' : 'outline'}
                   aria-pressed={range === r}
                   onClick={() => withReset(setRange)(r)}
+                  className="shrink-0 snap-start"
                 >
                   {r}
                 </Button>
               ))}
             </div>
 
-            <div className="flex flex-wrap gap-1" role="group" aria-label="Event types">
+            <div
+              className="-mx-1 flex snap-x snap-mandatory gap-1 overflow-x-auto px-1 sm:flex-wrap sm:overflow-visible"
+              role="group"
+              aria-label="Event types"
+            >
               {ALL_KINDS.map(kind => {
                 const Icon = KIND_ICONS[kind]
                 // Empty selection means everything, so nothing is highlighted and no
@@ -209,9 +223,16 @@ export function ActivityTab() {
                     variant={active ? 'default' : 'outline'}
                     aria-pressed={active}
                     onClick={() => toggleKind(kind)}
+                    className="shrink-0 snap-start px-2.5 sm:px-3"
                   >
-                    <Icon className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
-                    {KIND_LABELS[kind]}
+                    {/* Icon-only below `sm`: "Corporate actions" and its three siblings
+                        come to ~430px of labels, and the icons are already the thing
+                        that distinguishes them. The label survives for screen readers,
+                        so this sheds pixels rather than meaning — the same trade
+                        DividendYearComparison makes for its bar at this width. */}
+                    <Icon className="h-4 w-4 sm:mr-1.5 sm:h-3.5 sm:w-3.5" aria-hidden="true" />
+                    <span className="hidden sm:inline">{KIND_LABELS[kind]}</span>
+                    <span className="sr-only sm:hidden">{KIND_LABELS[kind]}</span>
                   </Button>
                 )
               })}
@@ -222,7 +243,7 @@ export function ActivityTab() {
                 e.preventDefault()
                 withReset(setSymbol)(symbolDraft.trim().toUpperCase())
               }}
-              className="flex items-center gap-2"
+              className="flex flex-wrap items-center gap-2"
             >
               <label htmlFor="activity-symbol" className="sr-only">
                 Filter by ticker
@@ -322,8 +343,10 @@ export function ActivityTab() {
                 </table>
               </ScrollableTable>
 
+              {/* Wraps: "1–100 of 12,345" plus Previous/Next is ~300px against ~308px
+                  of card interior, so a long total is one digit from clipping. */}
               {totalPages > 1 && (
-                <div className="mt-4 flex items-center justify-between text-sm text-muted-foreground">
+                <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm text-muted-foreground">
                   <span>
                     {data.offset + 1}–{Math.min(data.offset + data.limit, data.total)} of{' '}
                     {data.total.toLocaleString('en-US')}

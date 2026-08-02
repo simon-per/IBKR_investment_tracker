@@ -226,7 +226,7 @@ export function DividendsTab() {
               )}
             </CardDescription>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <label htmlFor="dividend-year" className="sr-only">
               Year
             </label>
@@ -336,6 +336,11 @@ export function DividendsTab() {
                   </BarChart>
                 </ResponsiveContainer>
 
+                {/* The three qualifier explanations used to live in `title=`, which no
+                    touch device can reach — and they are the difference between reading
+                    a projection as a measurement and not. The legend already wraps, so
+                    they are simply visible now, matching DividendCalendar and
+                    DividendYearComparison, which both spell theirs out. */}
                 <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-muted-foreground">
                   {stackSymbols.map((s) => (
                     <span key={s} className="inline-flex items-center gap-1.5">
@@ -350,23 +355,27 @@ export function DividendsTab() {
                         translucent = forecast
                       </span>
                       {securities.some((r) => r.forecast_basis === 'gross_estimate') && (
-                        <span title="Those rows are projected from published gross dividends per share, because nothing has been received from them yet — withholding tax is not deducted">
-                          <span className="text-amber-600 dark:text-amber-500">*</span> gross estimate
+                        <span>
+                          <span className="text-amber-600 dark:text-amber-500">*</span> projected
+                          from gross dividends per share — nothing received yet, so withholding
+                          is not deducted and these run a little high
                         </span>
                       )}
                       {securities.some(
                         (r) => r.forecast_net_eur > 0 && (r.forecast_samples ?? 9) <= 2
                       ) && (
-                        <span title="The schedule for those rows was inferred from only one or two past payments, so the cadence is a guess rather than an observed pattern">
-                          <span className="text-amber-600 dark:text-amber-500">n=2</span> thin
-                          inference
+                        <span>
+                          <span className="text-amber-600 dark:text-amber-500">n=2</span> cadence
+                          inferred from one or two payments — a guess, not an observed pattern
                         </span>
                       )}
                     </>
                   )}
                   {securities.some((r) => r.trailing_yield_partial && r.trailing_yield_pct != null) && (
-                    <span title="Those positions were held for less than the full trailing year, so a partial year's income is divided by the full position value and the yield reads low. Not annualized, because that would invent income.">
-                      <span className="text-muted-foreground">†</span> partial-year yield
+                    <span>
+                      <span className="text-muted-foreground">†</span> held less than the full
+                      year, so partial income over a full position value reads low — deliberately
+                      not annualized
                     </span>
                   )}
                 </div>

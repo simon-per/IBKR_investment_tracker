@@ -69,7 +69,7 @@ export function TaxTab() {
                 {data?.base_currency ?? 'base currency'}.
               </CardDescription>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <label htmlFor="tax-year" className="text-sm text-muted-foreground">
                 Year
               </label>

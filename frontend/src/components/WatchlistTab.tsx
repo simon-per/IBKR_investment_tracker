@@ -230,7 +230,7 @@ export function WatchlistTab() {
       {/* Add Stock + Sync Controls */}
       <Card>
         <CardHeader>
-          <div className="flex items-center justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <CardTitle>Watchlist</CardTitle>
             <Button
               variant="outline"
@@ -245,18 +245,28 @@ export function WatchlistTab() {
         </CardHeader>
         <CardContent>
           <form onSubmit={handleAdd} className="flex gap-2">
+            <label htmlFor="watchlist-ticker" className="sr-only">
+              Yahoo Finance ticker
+            </label>
             <input
+              id="watchlist-ticker"
               type="text"
               value={tickerInput}
               onChange={(e) => setTickerInput(e.target.value)}
-              placeholder="Enter Yahoo Finance ticker (e.g. NVDA, MSFT, ASML.AS)"
-              className="flex-1 px-3 py-2 rounded-md border border-input bg-background text-sm"
+              placeholder="Ticker, e.g. NVDA"
+              className="min-w-0 flex-1 px-3 py-2 rounded-md border border-input bg-background text-sm"
             />
             <Button type="submit" disabled={addMutation.isPending || !tickerInput.trim()} size="sm">
               <Plus className="h-4 w-4 mr-1" />
               {addMutation.isPending ? 'Adding...' : 'Add'}
             </Button>
           </form>
+          {/* The suffix rule was in the placeholder, where it was clipped mid-word at
+              390px and — worse everywhere — vanished the moment you started typing,
+              which is exactly when it matters. */}
+          <p className="mt-2 text-xs text-muted-foreground">
+            Yahoo Finance ticker. Non-US listings carry a suffix, e.g. <code>ASML.AS</code>.
+          </p>
 
           {addMutation.isError && (
             <p className="text-sm text-red-600 dark:text-red-400 mt-2">
@@ -472,12 +482,15 @@ export function WatchlistTab() {
                             }}
                           >
                             <PopoverTrigger asChild>
+                              {/* 28px was under any touch guideline and the icon carried
+                                  no accessible name at all. */}
                               <Button
                                 variant="ghost"
                                 size="sm"
-                                className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
+                                aria-label={`Edit notes and target price for ${item.symbol || item.yahoo_ticker}`}
+                                className="h-9 w-9 p-0 text-muted-foreground hover:text-foreground"
                               >
-                                <Pencil className="h-3.5 w-3.5" />
+                                <Pencil className="h-4 w-4" />
                               </Button>
                             </PopoverTrigger>
                             <PopoverContent className="w-72" align="end">
@@ -532,9 +545,10 @@ export function WatchlistTab() {
                             size="sm"
                             onClick={() => removeMutation.mutate(item.id)}
                             disabled={removeMutation.isPending}
-                            className="h-7 w-7 p-0 text-muted-foreground hover:text-red-600"
+                            aria-label={`Remove ${item.symbol || item.yahoo_ticker} from the watchlist`}
+                            className="h-9 w-9 p-0 text-muted-foreground hover:text-red-600"
                           >
-                            <Trash2 className="h-3.5 w-3.5" />
+                            <Trash2 className="h-4 w-4" />
                           </Button>
                         </div>
                       </td>
