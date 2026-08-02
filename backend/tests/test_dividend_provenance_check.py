@@ -14,6 +14,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 import pytest
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.pool import StaticPool
 
@@ -88,6 +89,44 @@ async def test_estimates_newer_than_the_mapping_are_fine():
         _mapping(session, "SBI", "TSE", "SBI.TO", datetime(2026, 7, 27))
         _estimate(session, 33, datetime(2026, 7, 30))       # refetched after the fix
         await session.flush()
+
+        assert await SchedulerService().find_dividends_predating_their_mapping(session) == []
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_mapping_with_unknown_stamps_is_not_reported():
+    """
+    NULL timestamps mean "we don't know when this was set", not "just changed".
+
+    `o8d5f2a9b3c4` adds the columns and leaves pre-existing rows NULL for exactly
+    this reason. It backfilled CURRENT_TIMESTAMP once, which dated every mapping to
+    the migration's own run time and made every estimate computed before it look
+    like it came from another ticker — three held payers warned on every
+    market-data sync while their rows were correct.
+
+    This pins the half a runtime assertion can reach: that NULL is the quiet value
+    the migration is relying on. What the migration itself writes is a property of
+    a file that has already run everywhere, so it is guarded by the reasoning in
+    its own docstring rather than by a test.
+    """
+    engine, session = await _db()
+    try:
+        _held(session, 33, "SBI", "TSE")
+        _estimate(session, 33, datetime(2026, 7, 25))
+        _mapping(session, "SBI", "TSE", "SBI.TO", datetime(2026, 7, 27))
+        await session.flush()
+
+        # The migration adds the columns without a server_default, so rows that
+        # predate it hold NULL. The ORM cannot express that — the model's
+        # server_default=func.now() fills in whenever the attribute is None — which
+        # is also why a NULL can only ever mean "written before the columns
+        # existed", never a row this application inserted.
+        await session.execute(
+            update(TickerMapping).values(created_at=None, updated_at=None)
+        )
 
         assert await SchedulerService().find_dividends_predating_their_mapping(session) == []
     finally:
