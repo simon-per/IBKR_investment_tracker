@@ -21,7 +21,7 @@ import { DividendYearComparison } from './DividendYearComparison'
 import { useTheme } from './ThemeProvider'
 import { cn } from '@/lib/utils'
 import { useIsCompact } from '@/lib/useMediaQuery'
-import { ScrollableTable } from '@/components/ui/ScrollableTable'
+import { DataTable, type Column } from '@/components/ui/DataTable'
 
 /**
  * Categorical palette from the validated reference set, stepped per theme and
@@ -77,6 +77,165 @@ function SourceBadge({ row }: { row: DividendSecurityRow }) {
   )
 }
 
+/**
+ * The per-position dividend columns, described once for both renderings.
+ *
+ * Two of these exist only on the phone. Gross and withholding were previously reachable
+ * only through the Net cell's `title=` — a hover, so on a touch device those figures
+ * did not exist at all. As `desktop: 'hide'` detail columns they are on the card and
+ * still out of the desktop table's ten.
+ */
+function dividendColumns(deps: {
+  formatCurrency: (v: number) => string
+  duplicated: Set<string>
+  showForecast: boolean
+}): Column<DividendSecurityRow>[] {
+  const { formatCurrency, duplicated, showForecast } = deps
+  return [
+    {
+      key: 'symbol',
+      header: 'Symbol',
+      shortHeader: 'Symbol',
+      mobile: 'title',
+      cellClassName: 'font-medium',
+      cell: (row) => (
+        <>
+          {row.symbol}
+          {duplicated.has(row.symbol) && row.exchange && (
+            <span className="ml-1 text-xs font-normal text-muted-foreground">{row.exchange}</span>
+          )}
+        </>
+      ),
+    },
+    {
+      key: 'description',
+      header: 'Description',
+      shortHeader: 'Description',
+      mobile: 'meta',
+      cellClassName: 'max-w-[14rem] truncate text-muted-foreground',
+      cell: (row) => row.description,
+    },
+    {
+      key: 'source',
+      header: 'Source',
+      shortHeader: 'Source',
+      mobile: 'badge',
+      cell: (row) => <SourceBadge row={row} />,
+    },
+    {
+      key: 'net',
+      header: 'Net',
+      shortHeader: 'Net',
+      align: 'right',
+      mobile: 'value',
+      cell: (row) => formatCurrency(row.net_eur),
+    },
+    {
+      key: 'yield',
+      header: 'Yield',
+      shortHeader: 'Yield',
+      align: 'right',
+      mobile: 'delta',
+      hint: {
+        description: "Trailing 12-month net over the position's current market value.",
+      },
+      cell: (row, view) =>
+        row.trailing_yield_pct != null ? (
+          <>
+            {row.trailing_yield_pct.toFixed(2)}%
+            {row.trailing_yield_partial && <span className="ml-0.5 text-muted-foreground">†</span>}
+          </>
+        ) : view === 'table' ? (
+          '—'
+        ) : null,
+    },
+    {
+      key: 'payouts',
+      header: 'Payouts',
+      shortHeader: 'Payouts',
+      align: 'right',
+      cell: (row) => (
+        <>
+          {row.payouts}
+          {showForecast && row.forecast_payouts > 0 && (
+            <span className="text-muted-foreground"> +{row.forecast_payouts}</span>
+          )}
+        </>
+      ),
+    },
+    {
+      key: 'share',
+      header: 'Share',
+      shortHeader: 'Share',
+      align: 'right',
+      cellClassName: 'text-muted-foreground',
+      hint: { description: "Share of this period's dividend income, including projections." },
+      cell: (row) => (row.share_pct != null ? `${row.share_pct.toFixed(1)}%` : '—'),
+    },
+    {
+      key: 'forecast',
+      header: 'Forecast',
+      shortHeader: 'Forecast',
+      align: 'right',
+      cellClassName: 'text-muted-foreground',
+      cell: (row) =>
+        showForecast && row.forecast_net_eur > 0 ? (
+          <>
+            +{formatCurrency(row.forecast_net_eur)}
+            {row.forecast_basis === 'gross_estimate' && (
+              <span className="ml-0.5 text-amber-600 dark:text-amber-500">*</span>
+            )}
+            {row.forecast_samples != null && row.forecast_samples <= 2 && (
+              <span className="ml-0.5 text-amber-600 dark:text-amber-500">
+                n={row.forecast_samples}
+              </span>
+            )}
+          </>
+        ) : (
+          '—'
+        ),
+    },
+    {
+      key: 'next',
+      header: 'Next',
+      shortHeader: 'Next',
+      align: 'right',
+      cellClassName: 'text-muted-foreground',
+      cell: (row) =>
+        showForecast && row.next_pay_date ? monthLabel(row.next_pay_date.slice(0, 7), true) : '—',
+    },
+    {
+      key: 'yoc',
+      header: 'YoC',
+      shortHeader: 'Yield on cost',
+      align: 'right',
+      cellClassName: 'text-muted-foreground',
+      hint: {
+        description:
+          'Yield on cost: trailing 12-month net over what the position cost — higher than the current yield on a holding that has appreciated.',
+      },
+      cell: (row) =>
+        row.yield_on_cost_pct != null ? `${row.yield_on_cost_pct.toFixed(2)}%` : '—',
+    },
+    {
+      key: 'gross',
+      header: 'Gross',
+      shortHeader: 'Gross',
+      align: 'right',
+      desktop: 'hide',
+      cell: (row) => formatCurrency(row.gross_eur),
+    },
+    {
+      key: 'withholding',
+      header: 'Withholding',
+      shortHeader: 'Withholding',
+      align: 'right',
+      desktop: 'hide',
+      cell: (row) => formatCurrency(row.withholding_eur),
+    },
+  ]
+}
+
 export function DividendsTab() {
   const currentYear = new Date().getFullYear()
   const [year, setYear] = useState<number | 'all'>(currentYear)
@@ -94,6 +253,7 @@ export function DividendsTab() {
   })
 
   const palette = theme === 'dark' ? SERIES_DARK : SERIES_LIGHT
+
 
   // Extracted so it can be unit-tested: this transformation already carried one
   // silent bug (ranking by a key space the data didn't use), and with no browser
@@ -190,6 +350,11 @@ export function DividendsTab() {
   // A ticker listed on two venues is two securities and two rows; only the table
   // needs the venue, and only where it actually disambiguates.
   const duplicated = useMemo(() => duplicatedSymbols(securities), [securities])
+
+  const columns = useMemo(
+    () => dividendColumns({ formatCurrency, duplicated, showForecast }),
+    [formatCurrency, duplicated, showForecast]
+  )
 
   const upcoming = useMemo(
     () => (showForecast ? data?.upcoming ?? [] : []),
@@ -409,136 +574,14 @@ export function DividendsTab() {
                   <DividendCalendar upcoming={upcoming} colorOf={colorOf} />
                 </div>
 
-                <ScrollableTable label="Per-position dividend table" className="border-t border-border pt-5">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b border-border text-xs text-muted-foreground">
-                        <th className="px-2 py-1.5 text-left font-medium">Symbol</th>
-                        <th className="px-2 py-1.5 text-left font-medium">Description</th>
-                        <th className="px-2 py-1.5 text-left font-medium">Source</th>
-                        <th className="px-2 py-1.5 text-right font-medium">Payouts</th>
-                        <th className="px-2 py-1.5 text-right font-medium">Net</th>
-                        <th className="px-2 py-1.5 text-right font-medium">Share</th>
-                        <th className="px-2 py-1.5 text-right font-medium">Forecast</th>
-                        <th className="px-2 py-1.5 text-right font-medium">Next</th>
-                        <th
-                          className="px-2 py-1.5 text-right font-medium"
-                          title="Trailing 12-month net over the position's current market value"
-                        >
-                          Yield
-                        </th>
-                        <th
-                          className="px-2 py-1.5 text-right font-medium"
-                          title="Yield on cost: trailing 12-month net over what the position cost — higher than the current yield on a holding that has appreciated"
-                        >
-                          YoC
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {securities.map((row) => (
-                        <tr key={row.security_id} className="border-b border-border/50">
-                          <td className="px-2 py-1.5 font-medium">
-                            {row.symbol}
-                            {duplicated.has(row.symbol) && row.exchange && (
-                              <span className="ml-1 text-xs font-normal text-muted-foreground">
-                                {row.exchange}
-                              </span>
-                            )}
-                          </td>
-                          <td className="max-w-[14rem] truncate px-2 py-1.5 text-muted-foreground" title={row.description}>
-                            {row.description}
-                          </td>
-                          <td className="px-2 py-1.5">
-                            <SourceBadge row={row} />
-                          </td>
-                          <td className="px-2 py-1.5 text-right tabular-nums">
-                            {row.payouts}
-                            {showForecast && row.forecast_payouts > 0 && (
-                              <span className="text-muted-foreground"> +{row.forecast_payouts}</span>
-                            )}
-                          </td>
-                          <td
-                            className="px-2 py-1.5 text-right tabular-nums"
-                            title={`Gross ${formatCurrency(row.gross_eur)} · withholding ${formatCurrency(row.withholding_eur)}`}
-                          >
-                            {formatCurrency(row.net_eur)}
-                          </td>
-                          <td
-                            className="px-2 py-1.5 text-right tabular-nums text-muted-foreground"
-                            title="Share of this period's dividend income, including projections"
-                          >
-                            {row.share_pct != null ? `${row.share_pct.toFixed(1)}%` : '—'}
-                          </td>
-                          <td
-                            className="px-2 py-1.5 text-right tabular-nums text-muted-foreground"
-                            title={
-                              row.forecast_basis === 'gross_estimate'
-                                ? 'Projected from published gross dividends per share — withholding tax is not deducted, so this runs a little high'
-                                : row.forecast_basis === 'net'
-                                  ? 'Projected from dividends actually received, net of withholding'
-                                  : undefined
-                            }
-                          >
-                            {showForecast && row.forecast_net_eur > 0 ? (
-                              <>
-                                +{formatCurrency(row.forecast_net_eur)}
-                                {row.forecast_basis === 'gross_estimate' && (
-                                  <span className="ml-0.5 text-amber-600 dark:text-amber-500">*</span>
-                                )}
-                                {row.forecast_samples != null && row.forecast_samples <= 2 && (
-                                  <span
-                                    className="ml-0.5 text-amber-600 dark:text-amber-500"
-                                    title={
-                                      `Inferred from only ${row.forecast_samples} past payment(s)` +
-                                      (row.forecast_cadence_days
-                                        ? `, ${row.forecast_cadence_days} days apart`
-                                        : '') +
-                                      ' — treat the schedule as a guess'
-                                    }
-                                  >
-                                    n={row.forecast_samples}
-                                  </span>
-                                )}
-                              </>
-                            ) : (
-                              '—'
-                            )}
-                          </td>
-                          <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground">
-                            {showForecast && row.next_pay_date
-                              ? monthLabel(row.next_pay_date.slice(0, 7), true)
-                              : '—'}
-                          </td>
-                          <td
-                            className="px-2 py-1.5 text-right tabular-nums"
-                            title={
-                              row.trailing_yield_partial && row.trailing_yield_pct != null
-                                ? `Held only ${row.days_held_in_ttm ?? '<365'} of the last 365 days, ` +
-                                  `so a partial year's income is divided by the full position ` +
-                                  `value — the real yield is higher`
-                                : undefined
-                            }
-                          >
-                            {row.trailing_yield_pct != null ? (
-                              <>
-                                {row.trailing_yield_pct.toFixed(2)}%
-                                {row.trailing_yield_partial && (
-                                  <span className="ml-0.5 text-muted-foreground">†</span>
-                                )}
-                              </>
-                            ) : (
-                              '—'
-                            )}
-                          </td>
-                          <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground">
-                            {row.yield_on_cost_pct != null ? `${row.yield_on_cost_pct.toFixed(2)}%` : '—'}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </ScrollableTable>
+                <DataTable
+                  rows={securities}
+                  columns={columns}
+                  getRowKey={(row) => row.security_id}
+                  label="Per-position dividend table"
+                  density="compact"
+                  className="border-t border-border pt-5"
+                />
               </>
             )}
           </>

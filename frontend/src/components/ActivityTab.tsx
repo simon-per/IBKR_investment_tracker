@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
-import { ScrollableTable } from '@/components/ui/ScrollableTable'
+import { DataTable, type Column } from '@/components/ui/DataTable'
 import { Download, ArrowLeftRight, Banknote, Coins, Split } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { api } from '@/lib/api'
@@ -100,6 +100,102 @@ function subtypeBadge(row: ActivityRow): { text: string; className: string } {
 }
 
 /**
+ * The ledger's eight columns, described once for both renderings.
+ *
+ * Note the title: a cash flow has no symbol at all, so it falls back to its own badge
+ * text ("Deposit", "Transfer · not money in") rather than leaving the card headless.
+ * The desktop table can print an em dash in a cell; a card cannot.
+ */
+function activityColumns(deps: {
+  curSym: string
+  baseCurrency: string
+}): Column<ActivityRow>[] {
+  const { curSym, baseCurrency } = deps
+  return [
+    {
+      key: 'symbol',
+      header: 'Symbol',
+      shortHeader: 'Symbol',
+      mobile: 'title',
+      cellClassName: 'font-medium',
+      cell: (row, view) =>
+        row.symbol ?? (view === 'table' ? '—' : subtypeBadge(row).text),
+    },
+    {
+      key: 'date',
+      header: 'Date',
+      shortHeader: 'Date',
+      mobile: 'meta',
+      cellClassName: 'whitespace-nowrap tabular-nums',
+      cell: (row) => row.date,
+    },
+    {
+      key: 'description',
+      header: 'Detail',
+      shortHeader: 'Detail',
+      mobile: 'meta',
+      // 22rem is 352px — wider than the whole card interior at 390px, so it only ever
+      // constrained the desktop cell.
+      cellClassName: 'max-w-[22rem] truncate text-muted-foreground',
+      cell: (row) => row.description,
+    },
+    {
+      key: 'kind',
+      header: 'Type',
+      shortHeader: 'Type',
+      mobile: 'badge',
+      cell: (row) => {
+        const badge = subtypeBadge(row)
+        return (
+          <span className={cn('whitespace-nowrap rounded px-1.5 py-0.5 text-xs font-medium', badge.className)}>
+            {badge.text}
+          </span>
+        )
+      },
+    },
+    {
+      key: 'amount',
+      header: `Amount (${baseCurrency})`,
+      shortHeader: `Amount (${baseCurrency})`,
+      align: 'right',
+      mobile: 'value',
+      tone: (row) => signClass(row.amount_base),
+      cellClassName: 'font-medium',
+      cell: (row) => (row.amount_base == null ? '—' : `${curSym}${num(row.amount_base)}`),
+    },
+    {
+      key: 'realized',
+      header: 'Realized',
+      shortHeader: 'Realized',
+      align: 'right',
+      mobile: 'delta',
+      tone: (row) => signClass(row.realized_pnl_base),
+      // A table cell cannot be empty, so the desktop keeps its em dash. In the card's
+      // delta slot a lone dash reads as an error rather than as "not applicable".
+      cell: (row, view) =>
+        row.realized_pnl_base == null
+          ? view === 'table' ? '—' : null
+          : `${curSym}${num(row.realized_pnl_base)}`,
+    },
+    {
+      key: 'quantity',
+      header: 'Quantity',
+      shortHeader: 'Quantity',
+      align: 'right',
+      cell: (row) => qty(row.quantity),
+    },
+    {
+      key: 'price',
+      header: 'Price',
+      shortHeader: 'Price',
+      align: 'right',
+      cell: (row) =>
+        row.price == null ? '—' : `${num(row.price)} ${row.currency ?? ''}`.trim(),
+    },
+  ]
+}
+
+/**
  * The account's transaction ledger.
  *
  * `trades`, `corporate_actions`, `cash_flows` and `dividend_payments` were all ingested,
@@ -156,6 +252,11 @@ export function ActivityTab() {
     setKinds(current =>
       current.includes(kind) ? current.filter(k => k !== kind) : [...current, kind]
     )
+  )
+
+  const columns = useMemo(
+    () => activityColumns({ curSym, baseCurrency: data?.base_currency ?? '' }),
+    [curSym, data?.base_currency]
   )
 
   const totalPages = data ? Math.max(1, Math.ceil(data.total / data.limit)) : 1
@@ -290,58 +391,14 @@ export function ActivityTab() {
             </p>
           ) : (
             <>
-              <ScrollableTable label="Activity table">
-                <table className="w-full text-sm">
-                  <caption className="sr-only">
-                    Account activity from {data.start_date} to {data.end_date}, newest first
-                  </caption>
-                  <thead>
-                    <tr className="border-b text-left text-muted-foreground">
-                      <th scope="col" className="py-2 pr-3 font-medium">Date</th>
-                      <th scope="col" className="py-2 pr-3 font-medium">Type</th>
-                      <th scope="col" className="py-2 pr-3 font-medium">Symbol</th>
-                      <th scope="col" className="py-2 pr-3 font-medium">Detail</th>
-                      <th scope="col" className="py-2 pr-3 text-right font-medium">Quantity</th>
-                      <th scope="col" className="py-2 pr-3 text-right font-medium">Price</th>
-                      <th scope="col" className="py-2 pr-3 text-right font-medium">
-                        Amount ({data.base_currency})
-                      </th>
-                      <th scope="col" className="py-2 text-right font-medium">Realized</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.items.map(row => {
-                      const badge = subtypeBadge(row)
-                      return (
-                        <tr key={row.ib_key ?? `${row.kind}-${row.date}`} className="border-b last:border-0">
-                          <td className="whitespace-nowrap py-2 pr-3 tabular-nums">{row.date}</td>
-                          <td className="py-2 pr-3">
-                            <span className={cn('whitespace-nowrap rounded px-1.5 py-0.5 text-xs font-medium', badge.className)}>
-                              {badge.text}
-                            </span>
-                          </td>
-                          <td className="py-2 pr-3 font-medium">{row.symbol ?? '—'}</td>
-                          <td className="max-w-[22rem] truncate py-2 pr-3 text-muted-foreground" title={row.description}>
-                            {row.description}
-                          </td>
-                          <td className="py-2 pr-3 text-right tabular-nums">
-                            {qty(row.quantity)}
-                          </td>
-                          <td className="py-2 pr-3 text-right tabular-nums">
-                            {row.price == null ? '—' : `${num(row.price)} ${row.currency ?? ''}`.trim()}
-                          </td>
-                          <td className={cn('py-2 pr-3 text-right font-medium tabular-nums', signClass(row.amount_base))}>
-                            {row.amount_base == null ? '—' : `${curSym}${num(row.amount_base)}`}
-                          </td>
-                          <td className={cn('py-2 text-right tabular-nums', signClass(row.realized_pnl_base))}>
-                            {row.realized_pnl_base == null ? '—' : `${curSym}${num(row.realized_pnl_base)}`}
-                          </td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
-              </ScrollableTable>
+              <DataTable
+                rows={data.items}
+                columns={columns}
+                getRowKey={(row) => row.ib_key ?? `${row.kind}-${row.date}`}
+                label="Activity table"
+                density="normal"
+                caption={`Account activity from ${data.start_date} to ${data.end_date}, newest first`}
+              />
 
               {/* Wraps: "1–100 of 12,345" plus Previous/Next is ~300px against ~308px
                   of card interior, so a long total is one digit from clipping. */}

@@ -9,6 +9,7 @@ import { useFormatCurrency } from '@/lib/CurrencyContext'
 import { RefreshCw, X } from 'lucide-react'
 import { RebalanceCard } from './RebalanceCard'
 import { CurrencyExposureCard } from './CurrencyExposureCard'
+import { DataTable, type Column } from '@/components/ui/DataTable'
 
 // Semantic colors for sectors
 const SECTOR_COLORS: Record<string, string> = {
@@ -201,6 +202,60 @@ function mergeAllocation(
   return result
 }
 
+/** The drill-down's five columns, described once for both renderings. */
+function drillDownColumns(deps: {
+  formatCurrency: (v: number) => string
+}): Column<AllocationCategory['positions'][number]>[] {
+  const { formatCurrency } = deps
+  return [
+    {
+      key: 'symbol',
+      header: 'Symbol',
+      shortHeader: 'Symbol',
+      mobile: 'title',
+      cellClassName: 'font-medium',
+      cell: (pos) => pos.symbol,
+    },
+    {
+      key: 'description',
+      header: 'Description',
+      shortHeader: 'Description',
+      mobile: 'meta',
+      cellClassName: 'text-muted-foreground max-w-[200px] truncate',
+      cell: (pos) => pos.description,
+    },
+    {
+      key: 'value',
+      header: 'Value',
+      shortHeader: 'Value',
+      align: 'right',
+      mobile: 'value',
+      cell: (pos) => formatCurrency(pos.market_value_eur),
+    },
+    {
+      key: 'weight',
+      header: 'Weight',
+      shortHeader: 'Weight',
+      align: 'right',
+      mobile: 'delta',
+      cell: (pos) => `${pos.weight.toFixed(1)}%`,
+    },
+    {
+      key: 'type',
+      header: 'Type',
+      shortHeader: 'Type',
+      align: 'right',
+      mobile: 'badge',
+      cell: (pos) =>
+        pos.is_etf_contribution ? (
+          <span className="text-xs bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 px-1.5 py-0.5 rounded">
+            ETF est.
+          </span>
+        ) : null,
+    },
+  ]
+}
+
 // Drill-down panel showing positions within a category
 function DrillDownPanel({
   categoryName,
@@ -228,36 +283,13 @@ function DrillDownPanel({
         </div>
       </CardHeader>
       <CardContent>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b text-muted-foreground">
-                <th className="text-left py-2 font-medium">Symbol</th>
-                <th className="text-left py-2 font-medium">Description</th>
-                <th className="text-right py-2 font-medium">Weight</th>
-                <th className="text-right py-2 font-medium">Value</th>
-                <th className="text-right py-2 font-medium">Type</th>
-              </tr>
-            </thead>
-            <tbody>
-              {category.positions.map((pos) => (
-                <tr key={pos.symbol} className="border-b border-muted/50 last:border-0">
-                  <td className="py-2 font-medium">{pos.symbol}</td>
-                  <td className="py-2 text-muted-foreground max-w-[200px] truncate">{pos.description}</td>
-                  <td className="py-2 text-right tabular-nums">{pos.weight.toFixed(1)}%</td>
-                  <td className="py-2 text-right tabular-nums">{formatCurrency(pos.market_value_eur)}</td>
-                  <td className="py-2 text-right">
-                    {pos.is_etf_contribution && (
-                      <span className="text-xs bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 px-1.5 py-0.5 rounded">
-                        ETF est.
-                      </span>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <DataTable
+          rows={category.positions}
+          columns={drillDownColumns({ formatCurrency })}
+          getRowKey={(pos) => pos.symbol}
+          label={`${categoryName} positions`}
+          density="normal"
+        />
       </CardContent>
     </Card>
   )

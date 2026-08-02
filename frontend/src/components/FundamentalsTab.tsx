@@ -4,8 +4,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Button } from '@/components/ui/button'
 import { api } from '@/lib/api'
 import type { FundamentalMetrics, EarningsCalendarItem, EarningsHistoryItem } from '@/lib/api'
-import { SortableTh } from '@/components/ui/SortableTh'
-import { ScrollableTable } from '@/components/ui/ScrollableTable'
+import { DataTable, type Column } from '@/components/ui/DataTable'
+import { useIsSideBySide } from '@/lib/useMediaQuery'
 import { RefreshCw } from 'lucide-react'
 
 type SortKey = 'symbol' | 'trailing_pe' | 'forward_pe' | 'peg_ratio' | 'price_to_sales' |
@@ -76,38 +76,6 @@ function compareValues(a: number | string | null, b: number | string | null, dir
   return 0
 }
 
-function SortHeader({
-  label,
-  sortKey,
-  currentSort,
-  currentDir,
-  onSort,
-  title,
-}: {
-  label: string
-  sortKey: SortKey
-  currentSort: SortKey
-  currentDir: SortDir
-  onSort: (key: SortKey) => void
-  title?: string
-}) {
-  // Was onClick on the <th> itself: no tabIndex, no key handler, so none of these
-  // columns could be sorted without a mouse, and nothing announced the sort state.
-  return (
-    <SortableTh
-      column={sortKey}
-      label={label}
-      activeColumn={currentSort}
-      direction={currentDir}
-      onSort={onSort}
-      align="right"
-      title={title}
-      className="py-2 px-2 whitespace-nowrap"
-      iconClassName="h-3 w-3"
-    />
-  )
-}
-
 function EtfSection({ etfs }: { etfs: FundamentalMetrics[] }) {
   if (etfs.length === 0) return null
   return (
@@ -133,6 +101,163 @@ function EtfSection({ etfs }: { etfs: FundamentalMetrics[] }) {
   )
 }
 
+/**
+ * The fundamentals metrics, described once for both renderings.
+ *
+ * Nothing here is a "headline" figure the way a market value is, so market cap takes
+ * the card's value slot and there is no delta — the shape DataTable has to tolerate
+ * rather than fake.
+ *
+ * The five `title=` explanations that used to sit on the headers are `hint`s now, so
+ * they reach the phone through the glossary instead of dying with the hover.
+ */
+function metricsColumns(): Column<FundamentalMetrics, SortKey>[] {
+  const peg = (row: FundamentalMetrics) =>
+    row.peg_ratio ??
+    (row.trailing_pe && row.fwd_eps_growth && row.fwd_eps_growth > 0
+      ? row.trailing_pe / (row.fwd_eps_growth * 100)
+      : null)
+
+  return [
+    {
+      key: 'symbol',
+      header: 'Symbol',
+      shortHeader: 'Symbol',
+      sortKey: 'symbol',
+      mobile: 'title',
+      cell: (row, view) =>
+        view === 'table' ? (
+          <>
+            <div className="font-medium">{row.symbol}</div>
+            <div className="text-xs text-muted-foreground truncate max-w-[180px]">{row.description}</div>
+          </>
+        ) : (
+          row.symbol
+        ),
+    },
+    {
+      key: 'description',
+      header: 'Description',
+      shortHeader: 'Description',
+      desktop: 'hide',
+      mobile: 'meta',
+      cell: (row) => row.description,
+    },
+    {
+      key: 'market_cap',
+      header: 'Mkt Cap',
+      shortHeader: 'Market cap',
+      sortKey: 'market_cap',
+      align: 'right',
+      mobile: 'value',
+      cell: (row) => (
+        <>
+          {formatMarketCap(row.market_cap)}
+          {row.data_currency ? (
+            <span className="text-muted-foreground text-xs ml-1">{row.data_currency}</span>
+          ) : (
+            ''
+          )}
+        </>
+      ),
+    },
+    {
+      key: 'trailing_pe',
+      header: 'P/E',
+      shortHeader: 'P/E',
+      sortKey: 'trailing_pe',
+      align: 'right',
+      tone: (row) => peColor(row.trailing_pe),
+      cell: (row) => formatRatio(row.trailing_pe),
+    },
+    {
+      key: 'forward_pe',
+      header: 'Fwd P/E',
+      shortHeader: 'Fwd P/E',
+      sortKey: 'forward_pe',
+      align: 'right',
+      tone: (row) => peColor(row.forward_pe),
+      cell: (row) => formatRatio(row.forward_pe),
+    },
+    {
+      key: 'peg_ratio',
+      header: 'PEG',
+      shortHeader: 'PEG',
+      sortKey: 'peg_ratio',
+      align: 'right',
+      tone: (row) => pegColor(peg(row)),
+      hint: {
+        description:
+          'P/E divided by forward EPS growth rate (analyst consensus next-12M estimate). Below 1 = potentially undervalued.',
+      },
+      cell: (row) => formatRatio(peg(row)),
+    },
+    {
+      key: 'price_to_sales',
+      header: 'P/S',
+      shortHeader: 'P/S',
+      sortKey: 'price_to_sales',
+      align: 'right',
+      cell: (row) => formatRatio(row.price_to_sales),
+    },
+    {
+      key: 'revenue_growth',
+      header: 'Rev Growth',
+      shortHeader: 'Revenue growth',
+      sortKey: 'revenue_growth',
+      align: 'right',
+      tone: (row) => growthColor(row.revenue_growth),
+      hint: {
+        description:
+          'TTM (trailing twelve months) revenue growth: sum of 4 most recent quarters vs prior 4 quarters. Falls back to Yahoo Finance revenueGrowth if fewer than 8 quarters available.',
+      },
+      cell: (row) => formatPct(row.revenue_growth),
+    },
+    {
+      key: 'earnings_growth',
+      header: 'EPS Growth',
+      shortHeader: 'EPS growth',
+      sortKey: 'earnings_growth',
+      align: 'right',
+      tone: (row) => growthColor(row.earnings_growth),
+      hint: {
+        description:
+          "TTM (trailing twelve months) EPS growth: sum of 4 most recent quarters vs prior 4 quarters. Falls back to Yahoo Finance earningsGrowth if fewer than 8 quarters available. Note: PEG uses Yahoo's separate 5-year analyst estimate, not this figure.",
+      },
+      cell: (row) => formatPct(row.earnings_growth),
+    },
+    {
+      key: 'fwd_revenue_growth',
+      header: 'Fwd Rev',
+      shortHeader: 'Fwd revenue growth',
+      sortKey: 'fwd_revenue_growth',
+      align: 'right',
+      tone: (row) => growthColor(row.fwd_revenue_growth),
+      hint: { description: 'Next fiscal year revenue growth analyst consensus estimate.' },
+      cell: (row) => formatPct(row.fwd_revenue_growth),
+    },
+    {
+      key: 'fwd_eps_growth',
+      header: 'Fwd EPS',
+      shortHeader: 'Fwd EPS growth',
+      sortKey: 'fwd_eps_growth',
+      align: 'right',
+      tone: (row) => growthColor(row.fwd_eps_growth),
+      hint: { description: 'Next fiscal year EPS growth analyst consensus estimate.' },
+      cell: (row) => formatPct(row.fwd_eps_growth),
+    },
+    {
+      key: 'profit_margins',
+      header: 'Margins',
+      shortHeader: 'Margins',
+      sortKey: 'profit_margins',
+      align: 'right',
+      tone: (row) => marginColor(row.profit_margins),
+      cell: (row) => formatPct(row.profit_margins),
+    },
+  ]
+}
+
 function MetricsTable({ data }: { data: FundamentalMetrics[] }) {
   const [sortKey, setSortKey] = useState<SortKey>('symbol')
   const [sortDir, setSortDir] = useState<SortDir>('asc')
@@ -153,87 +278,32 @@ function MetricsTable({ data }: { data: FundamentalMetrics[] }) {
     return [...stocks].sort((a, b) => compareValues(a[sortKey], b[sortKey], sortDir))
   }, [stocks, sortKey, sortDir])
 
+  const columns = useMemo(() => metricsColumns(), [])
+
   return (
     <>
-      <ScrollableTable label="Fundamentals table">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b text-muted-foreground">
-              <SortableTh
-                column="symbol"
-                label="Symbol"
-                activeColumn={sortKey}
-                direction={sortDir}
-                onSort={handleSort}
-                className="py-2 px-2"
-                iconClassName="h-3 w-3"
-              />
-              <SortHeader label="P/E" sortKey="trailing_pe" currentSort={sortKey} currentDir={sortDir} onSort={handleSort} />
-              <SortHeader label="Fwd P/E" sortKey="forward_pe" currentSort={sortKey} currentDir={sortDir} onSort={handleSort} />
-              <SortHeader label="PEG" sortKey="peg_ratio" currentSort={sortKey} currentDir={sortDir} onSort={handleSort} title="P/E divided by forward EPS growth rate (analyst consensus next-12M estimate). Below 1 = potentially undervalued." />
-              <SortHeader label="P/S" sortKey="price_to_sales" currentSort={sortKey} currentDir={sortDir} onSort={handleSort} />
-              <SortHeader label="Rev Growth" sortKey="revenue_growth" currentSort={sortKey} currentDir={sortDir} onSort={handleSort} title="TTM (trailing twelve months) revenue growth: sum of 4 most recent quarters vs prior 4 quarters. Falls back to Yahoo Finance revenueGrowth if fewer than 8 quarters available." />
-              <SortHeader label="EPS Growth" sortKey="earnings_growth" currentSort={sortKey} currentDir={sortDir} onSort={handleSort} title="TTM (trailing twelve months) EPS growth: sum of 4 most recent quarters vs prior 4 quarters. Falls back to Yahoo Finance earningsGrowth if fewer than 8 quarters available. Note: PEG uses Yahoo's separate 5-year analyst estimate, not this figure." />
-              <SortHeader label="Fwd Rev" sortKey="fwd_revenue_growth" currentSort={sortKey} currentDir={sortDir} onSort={handleSort} title="Next fiscal year revenue growth analyst consensus estimate." />
-              <SortHeader label="Fwd EPS" sortKey="fwd_eps_growth" currentSort={sortKey} currentDir={sortDir} onSort={handleSort} title="Next fiscal year EPS growth analyst consensus estimate." />
-              <SortHeader label="Margins" sortKey="profit_margins" currentSort={sortKey} currentDir={sortDir} onSort={handleSort} />
-              <SortHeader label="Mkt Cap" sortKey="market_cap" currentSort={sortKey} currentDir={sortDir} onSort={handleSort} />
-            </tr>
-          </thead>
-          <tbody>
-            {sorted.map((row) => (
-              <tr key={row.security_id} className="border-b border-muted/50 last:border-0 hover:bg-muted/30 transition-colors">
-                <td className="py-2 px-2">
-                  <div className="font-medium">{row.symbol}</div>
-                  <div className="text-xs text-muted-foreground truncate max-w-[180px]">{row.description}</div>
-                </td>
-                <td className={`py-2 px-2 text-right tabular-nums ${peColor(row.trailing_pe)}`}>
-                  {formatRatio(row.trailing_pe)}
-                </td>
-                <td className={`py-2 px-2 text-right tabular-nums ${peColor(row.forward_pe)}`}>
-                  {formatRatio(row.forward_pe)}
-                </td>
-                <td className={`py-2 px-2 text-right tabular-nums ${pegColor(
-                  row.peg_ratio ?? (row.trailing_pe && row.fwd_eps_growth && row.fwd_eps_growth > 0
-                    ? row.trailing_pe / (row.fwd_eps_growth * 100)
-                    : null)
-                )}`}>
-                  {formatRatio(
-                    row.peg_ratio ?? (row.trailing_pe && row.fwd_eps_growth && row.fwd_eps_growth > 0
-                      ? row.trailing_pe / (row.fwd_eps_growth * 100)
-                      : null)
-                  )}
-                </td>
-                <td className="py-2 px-2 text-right tabular-nums">
-                  {formatRatio(row.price_to_sales)}
-                </td>
-                <td className={`py-2 px-2 text-right tabular-nums ${growthColor(row.revenue_growth)}`}>
-                  {formatPct(row.revenue_growth)}
-                </td>
-                <td className={`py-2 px-2 text-right tabular-nums ${growthColor(row.earnings_growth)}`}>
-                  {formatPct(row.earnings_growth)}
-                </td>
-                <td className={`py-2 px-2 text-right tabular-nums ${growthColor(row.fwd_revenue_growth)}`}>
-                  {formatPct(row.fwd_revenue_growth)}
-                </td>
-                <td className={`py-2 px-2 text-right tabular-nums ${growthColor(row.fwd_eps_growth)}`}>
-                  {formatPct(row.fwd_eps_growth)}
-                </td>
-                <td className={`py-2 px-2 text-right tabular-nums ${marginColor(row.profit_margins)}`}>
-                  {formatPct(row.profit_margins)}
-                </td>
-                <td className="py-2 px-2 text-right tabular-nums">
-                  {formatMarketCap(row.market_cap)}{row.data_currency ? <span className="text-muted-foreground text-xs ml-1">{row.data_currency}</span> : ''}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </ScrollableTable>
+      <DataTable
+        rows={sorted}
+        columns={columns}
+        getRowKey={(row) => row.security_id}
+        label="Fundamentals table"
+        density="normal"
+        minWidthClassName="min-w-[52rem]"
+        sort={{ column: sortKey, direction: sortDir, onSort: handleSort }}
+      />
       <EtfSection etfs={etfs} />
     </>
   )
 }
+
+/** Ten cards is a page you can thumb through; the measured fit is a desktop nicety. */
+const DEFAULT_HISTORY_PAGE_SIZE = 10
+
+/** Row and chrome heights of the DESKTOP table, in px. Only valid for that rendering. */
+const HISTORY_ROW_H = 37
+const HISTORY_THEAD_H = 37
+const HISTORY_PAGINATION_H = 48
+const HISTORY_CONTENT_PAD = 24
 
 function EarningsCalendar({ data }: { data: EarningsCalendarItem[] }) {
   const PAGE_SIZE = 10
@@ -303,6 +373,69 @@ function EarningsCalendar({ data }: { data: EarningsCalendarItem[] }) {
   )
 }
 
+/**
+ * The earnings-history columns. A module constant rather than a factory: nothing here
+ * closes over a hook, which is exactly why it can be one.
+ */
+const EARNINGS_COLUMNS: Column<EarningsHistoryItem>[] = [
+  {
+    key: 'symbol',
+    header: 'Symbol',
+    shortHeader: 'Symbol',
+    mobile: 'title',
+    cellClassName: 'font-medium',
+    cell: (row) => row.symbol,
+  },
+  {
+    key: 'date',
+    header: 'Date',
+    shortHeader: 'Date',
+    mobile: 'meta',
+    cellClassName: 'text-muted-foreground',
+    cell: (row) =>
+      new Date(row.earnings_date).toLocaleDateString('en-US', {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+      }),
+  },
+  {
+    key: 'surprise',
+    header: 'Surprise',
+    shortHeader: 'Surprise',
+    align: 'right',
+    mobile: 'value',
+    cell: (row) => (row.surprise_percent !== null ? `${row.surprise_percent.toFixed(1)}%` : '-'),
+  },
+  {
+    key: 'result',
+    header: 'Result',
+    shortHeader: 'Result',
+    align: 'center',
+    mobile: 'badge',
+    cell: (row) =>
+      row.beat_or_miss ? (
+        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${surpriseColor(row.beat_or_miss)}`}>
+          {row.beat_or_miss}
+        </span>
+      ) : null,
+  },
+  {
+    key: 'eps_estimate',
+    header: 'EPS Est.',
+    shortHeader: 'EPS Est.',
+    align: 'right',
+    cell: (row) => (row.eps_estimate !== null ? `$${row.eps_estimate.toFixed(2)}` : '-'),
+  },
+  {
+    key: 'reported_eps',
+    header: 'Reported',
+    shortHeader: 'Reported',
+    align: 'right',
+    cell: (row) => (row.reported_eps !== null ? `$${row.reported_eps.toFixed(2)}` : '-'),
+  },
+]
+
 function EarningsSurpriseHistory({ data, pageSize = 10 }: { data: EarningsHistoryItem[], pageSize?: number }) {
   const [page, setPage] = useState(0)
   useEffect(() => { setPage(0) }, [pageSize])
@@ -319,47 +452,14 @@ function EarningsSurpriseHistory({ data, pageSize = 10 }: { data: EarningsHistor
 
   return (
     <div className="flex flex-col flex-1">
-      <div className="flex-1 overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b text-muted-foreground">
-              <th className="text-left py-2 px-2 font-medium">Symbol</th>
-              <th className="text-left py-2 px-2 font-medium">Date</th>
-              <th className="text-right py-2 px-2 font-medium">EPS Est.</th>
-              <th className="text-right py-2 px-2 font-medium">Reported</th>
-              <th className="text-right py-2 px-2 font-medium">Surprise</th>
-              <th className="text-center py-2 px-2 font-medium">Result</th>
-            </tr>
-          </thead>
-          <tbody>
-            {pageData.map((row, idx) => (
-              <tr key={`${row.security_id}-${row.earnings_date}-${idx}`} className="border-b border-muted/50 last:border-0">
-                <td className="py-2 px-2 font-medium">{row.symbol}</td>
-                <td className="py-2 px-2 text-muted-foreground">
-                  {new Date(row.earnings_date).toLocaleDateString('en-US', {
-                    year: 'numeric', month: 'short', day: 'numeric',
-                  })}
-                </td>
-                <td className="py-2 px-2 text-right tabular-nums">
-                  {row.eps_estimate !== null ? `$${row.eps_estimate.toFixed(2)}` : '-'}
-                </td>
-                <td className="py-2 px-2 text-right tabular-nums">
-                  {row.reported_eps !== null ? `$${row.reported_eps.toFixed(2)}` : '-'}
-                </td>
-                <td className="py-2 px-2 text-right tabular-nums">
-                  {row.surprise_percent !== null ? `${row.surprise_percent.toFixed(1)}%` : '-'}
-                </td>
-                <td className="py-2 px-2 text-center">
-                  {row.beat_or_miss && (
-                    <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${surpriseColor(row.beat_or_miss)}`}>
-                      {row.beat_or_miss}
-                    </span>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <div className="flex-1">
+        <DataTable
+          rows={pageData}
+          columns={EARNINGS_COLUMNS}
+          getRowKey={(row, idx) => `${row.security_id}-${row.earnings_date}-${idx}`}
+          label="Earnings surprise history"
+          density="normal"
+        />
       </div>
       {totalPages > 1 && (
         <div className="flex items-center justify-between text-sm text-muted-foreground mt-auto pt-3">
@@ -436,25 +536,38 @@ export function FundamentalsTab() {
 
   const leftCardRef = useRef<HTMLDivElement>(null)
   const rightHeaderRef = useRef<HTMLDivElement>(null)
-  const [historyPageSize, setHistoryPageSize] = useState(10)
+  const [historyPageSize, setHistoryPageSize] = useState(DEFAULT_HISTORY_PAGE_SIZE)
+
+  // The earnings grid is `lg:grid-cols-2`, so the two cards only sit side by side at
+  // >=1024px. Below that they stack and the left card's height says nothing about the
+  // space this one has — the page size became whatever Upcoming Earnings happened to
+  // be tall, which on a phone is unrelated to anything. The row heights below are the
+  // DESKTOP table's, and below `sm` the rows are cards roughly twice as tall, so the
+  // arithmetic was wrong twice over there.
+  const sideBySide = useIsSideBySide()
 
   useEffect(() => {
+    if (!sideBySide) {
+      setHistoryPageSize(DEFAULT_HISTORY_PAGE_SIZE)
+      return
+    }
     const leftCard = leftCardRef.current
     if (!leftCard) return
     const update = () => {
       const leftH = leftCard.offsetHeight
       const rightHeaderH = rightHeaderRef.current?.offsetHeight ?? 0
-      const CONTENT_PAD = 24
-      const THEAD = 37
-      const ROW_H = 37
-      const PAGINATION = 48
-      const available = leftH - rightHeaderH - CONTENT_PAD - THEAD - PAGINATION
-      setHistoryPageSize(Math.max(1, Math.floor(available / ROW_H)))
+      const available =
+        leftH - rightHeaderH - HISTORY_CONTENT_PAD - HISTORY_THEAD_H - HISTORY_PAGINATION_H
+      setHistoryPageSize(Math.max(1, Math.floor(available / HISTORY_ROW_H)))
     }
+    // Known and deliberately not fixed here: above `lg` the grid stretches both cards
+    // to the row height, so a larger page size grows this card, grows the row, grows
+    // leftCard.offsetHeight and feeds back in. It is bounded by data.length, but it is
+    // a loop waiting for the right data.
     const ro = new ResizeObserver(update)
     ro.observe(leftCard)
     return () => ro.disconnect()
-  }, [])
+  }, [sideBySide])
 
   const needsSync = status && status.securities_without_data > 0
 
