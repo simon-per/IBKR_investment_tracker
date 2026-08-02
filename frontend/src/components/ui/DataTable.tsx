@@ -50,6 +50,20 @@ export type Align = 'left' | 'right' | 'center'
  */
 export type MobileSlot = 'title' | 'meta' | 'value' | 'delta' | 'badge' | 'detail' | 'hide'
 
+/**
+ * Which rendering a `cell` is being asked for.
+ *
+ * It exists because the desktop tables stack a secondary line inside a cell — symbol
+ * over exchange, description over ISIN — where the card wants those as separate lines
+ * or detail pairs. One function still owns the column in both modes, so a column
+ * cannot exist in one and not the other; only the *layout* differs.
+ *
+ * A `cell` must render the same information either way. Dropping a value in one view
+ * is what `mobile: 'hide'` / `desktop: 'hide'` are for, and those are the forms the
+ * tests can see.
+ */
+export type CellView = 'table' | 'cards'
+
 export interface ColumnHint {
   description: string
   formula?: string
@@ -65,7 +79,7 @@ export interface Column<Row, SortKey extends string = never> {
    */
   shortHeader?: string
   align?: Align
-  cell: (row: Row) => React.ReactNode
+  cell: (row: Row, view: CellView) => React.ReactNode
   /**
    * Semantic colour, applied in BOTH modes. Layout belongs in `cellClassName`/`align`;
    * a green/red that lives only on the `<td>` is exactly the drift this split prevents
@@ -313,7 +327,7 @@ function WideTable<Row, SortKey extends string>({
                     col.cellClassName,
                   )}
                 >
-                  {col.cell(row)}
+                  {col.cell(row, 'table')}
                 </td>
               ))}
               {rowActions && <td className={pad}>{rowActions(row)}</td>}
@@ -393,11 +407,11 @@ function CompactRow<Row, SortKey extends string>({
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
           {title && (
-            <div className="truncate font-medium leading-tight">{title.cell(row)}</div>
+            <div className="truncate font-medium leading-tight">{title.cell(row, 'cards')}</div>
           )}
           {metas.map(col => (
             <div key={col.key} className="truncate text-xs text-muted-foreground">
-              {col.cell(row)}
+              {col.cell(row, 'cards')}
             </div>
           ))}
         </div>
@@ -405,11 +419,11 @@ function CompactRow<Row, SortKey extends string>({
           <div className="shrink-0 text-right tabular-nums">
             {value && (
               <div className={cn('font-medium leading-tight', value.tone?.(row))}>
-                {value.cell(row)}
+                {value.cell(row, 'cards')}
               </div>
             )}
             {delta && (
-              <div className={cn('text-xs', delta.tone?.(row))}>{delta.cell(row)}</div>
+              <div className={cn('text-xs', delta.tone?.(row))}>{delta.cell(row, 'cards')}</div>
             )}
           </div>
         )}
@@ -418,7 +432,7 @@ function CompactRow<Row, SortKey extends string>({
       {badges.length > 0 && (
         <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
           {badges.map(col => (
-            <React.Fragment key={col.key}>{col.cell(row)}</React.Fragment>
+            <React.Fragment key={col.key}>{col.cell(row, 'cards')}</React.Fragment>
           ))}
         </div>
       )}
@@ -429,7 +443,7 @@ function CompactRow<Row, SortKey extends string>({
             <div key={col.key} className="flex min-w-0 items-baseline justify-between gap-2">
               <dt className="truncate text-muted-foreground">{columnLabel(col)}</dt>
               <dd className={cn('shrink-0 tabular-nums', col.tone?.(row))}>
-                {col.cell(row)}
+                {col.cell(row, 'cards')}
               </dd>
             </div>
           ))}

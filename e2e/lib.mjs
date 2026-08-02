@@ -30,10 +30,34 @@ export function reporter() {
   }
 }
 
+/** An iPhone-class viewport — the size the mobile layout is designed against. */
+export const PHONE = {
+  width: 390,
+  height: 844,
+  isMobile: true,
+  hasTouch: true,
+  deviceScaleFactor: 3,
+}
+
 /** A page that records console errors and uncaught exceptions for later assertion. */
-export async function openPage({ width = 1500, height = 1000 } = {}) {
+export async function openPage({
+  width = 1500,
+  height = 1000,
+  isMobile,
+  hasTouch,
+  deviceScaleFactor,
+} = {}) {
   const browser = await chromium.launch()
-  const page = await browser.newPage({ viewport: { width, height } })
+  const page = await browser.newPage({
+    viewport: { width, height },
+    // Spread only when asked for, so every existing caller gets byte-identical context
+    // options. `isMobile` switches Chromium to the mobile viewport model (visual
+    // viewport plus meta-viewport handling), which changes how documentElement
+    // .scrollWidth is reported — the exact number mobile.mjs asserts on.
+    ...(isMobile !== undefined && { isMobile }),
+    ...(hasTouch !== undefined && { hasTouch }),
+    ...(deviceScaleFactor !== undefined && { deviceScaleFactor }),
+  })
   const errors = []
   page.on('console', m => { if (m.type() === 'error') errors.push(m.text()) })
   page.on('pageerror', e => errors.push('pageerror: ' + e.message))

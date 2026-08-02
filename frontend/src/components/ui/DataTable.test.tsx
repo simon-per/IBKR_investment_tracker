@@ -101,11 +101,12 @@ describe('DataTable renders one description two ways', () => {
 
     for (const col of COLUMNS) {
       for (const row of ROWS) {
-        const text = String(col.cell(row))
         if (col.desktop !== 'hide') {
+          const text = String(col.cell(row, 'table'))
           expect(tableView.textContent, `${col.key} missing from the table`).toContain(text)
         }
         if ((col.mobile ?? 'detail') !== 'hide') {
+          const text = String(col.cell(row, 'cards'))
           expect(cardView.textContent, `${col.key} missing from the cards`).toContain(text)
         }
       }

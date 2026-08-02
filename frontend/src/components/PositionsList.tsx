@@ -3,8 +3,7 @@ import type { Position } from '@/lib/api'
 import { formatPercent } from '@/lib/utils'
 import { useFormatCurrency } from '@/lib/CurrencyContext'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { SortableTh } from '@/components/ui/SortableTh'
-import { ScrollableTable } from '@/components/ui/ScrollableTable'
+import { DataTable, type Column } from '@/components/ui/DataTable'
 
 interface PositionsListProps {
   positions: Position[]
@@ -49,6 +48,170 @@ const getRatingScore = (consensus: string | undefined): number => {
     default:
       return 999
   }
+}
+
+const exchangeOf = (p: Position) => p.exchange || 'N/A'
+
+const gainTone = (p: Position) =>
+  p.gain_loss_eur >= 0 ? 'text-green-600' : 'text-red-600'
+
+/**
+ * The positions table, described once for both renderings.
+ *
+ * A factory rather than a module constant because every cell closes over the currency
+ * formatter and the portfolio total — which is also what lets a test import the exact
+ * array the component renders instead of a copy of it.
+ *
+ * Note where the two views legitimately differ. The desktop table stacks the exchange
+ * under the symbol and the ISIN under the description; the card puts the symbol on its
+ * title line and the other two in the detail grid, so those get `desktop: 'hide'`
+ * companions. The *values* come from one place either way.
+ */
+export function positionColumns(deps: {
+  formatCurrency: (value: number) => string
+  totalMarketValue: number
+}): Column<Position, SortColumn>[] {
+  const { formatCurrency, totalMarketValue } = deps
+  const weightOf = (p: Position) =>
+    totalMarketValue > 0 ? (p.market_value_eur / totalMarketValue) * 100 : 0
+
+  return [
+    {
+      key: 'symbol',
+      header: 'Symbol',
+      shortHeader: 'Symbol',
+      sortKey: 'symbol',
+      mobile: 'title',
+      cell: (p, view) =>
+        view === 'table' ? (
+          <>
+            <div className="font-medium">{p.symbol}</div>
+            <div className="text-xs text-muted-foreground">{exchangeOf(p)}</div>
+          </>
+        ) : (
+          p.symbol
+        ),
+    },
+    {
+      key: 'description',
+      header: 'Description',
+      shortHeader: 'Description',
+      sortKey: 'description',
+      mobile: 'meta',
+      cellClassName: 'max-w-xs',
+      cell: (p, view) =>
+        view === 'table' ? (
+          <>
+            <div className="max-w-xs truncate text-sm">{p.description}</div>
+            <div className="text-xs text-muted-foreground">{p.isin}</div>
+          </>
+        ) : (
+          p.description
+        ),
+    },
+    {
+      key: 'rating',
+      header: 'Rating',
+      shortHeader: 'Rating',
+      sortKey: 'rating',
+      align: 'center',
+      mobile: 'badge',
+      cell: (p, view) =>
+        !p.analyst_rating ? (
+          // A table cell cannot be empty, so the dash is the desktop placeholder. In a
+          // card it would be a stray "-" floating in the badge row, saying nothing.
+          view === 'table' ? <div className="text-center text-xs text-muted-foreground">-</div> : null
+        ) : (
+          <div
+            className="flex flex-col items-center gap-1"
+            title={`Strong Buy: ${p.analyst_rating.strong_buy}, Buy: ${p.analyst_rating.buy}, Hold: ${p.analyst_rating.hold}, Sell: ${p.analyst_rating.sell}, Strong Sell: ${p.analyst_rating.strong_sell}`}
+          >
+            <span
+              className={`px-2 py-0.5 rounded text-xs font-medium ${getRatingBadgeColor(p.analyst_rating.consensus)}`}
+            >
+              {p.analyst_rating.consensus}
+            </span>
+            {/* The breakdown is rendered, not just in the `title=`, which is what makes
+                it readable on a phone where no hover exists. */}
+            <div className="text-[10px] text-muted-foreground flex gap-0.5">
+              <span className="text-green-600 font-semibold">{p.analyst_rating.strong_buy}</span>
+              <span>/</span>
+              <span className="text-green-500 font-semibold">{p.analyst_rating.buy}</span>
+              <span>/</span>
+              <span className="text-yellow-600 font-semibold">{p.analyst_rating.hold}</span>
+              <span>/</span>
+              <span className="text-red-500 font-semibold">{p.analyst_rating.sell}</span>
+              <span>/</span>
+              <span className="text-red-600 font-semibold">{p.analyst_rating.strong_sell}</span>
+            </div>
+          </div>
+        ),
+    },
+    {
+      key: 'market_value',
+      header: 'Market Value',
+      shortHeader: 'Market Value',
+      sortKey: 'market_value_eur',
+      align: 'right',
+      mobile: 'value',
+      cell: (p) => formatCurrency(p.market_value_eur),
+    },
+    {
+      key: 'gain_loss_percent',
+      header: '%',
+      shortHeader: 'Gain/Loss %',
+      sortKey: 'gain_loss_percent',
+      align: 'right',
+      mobile: 'delta',
+      tone: gainTone,
+      cell: (p) => formatPercent(p.gain_loss_percent),
+    },
+    {
+      key: 'quantity',
+      header: 'Quantity',
+      shortHeader: 'Quantity',
+      sortKey: 'quantity',
+      align: 'right',
+      cell: (p) => p.quantity.toFixed(2),
+    },
+    {
+      key: 'cost_basis',
+      header: 'Cost Basis',
+      shortHeader: 'Cost Basis',
+      sortKey: 'cost_basis_eur',
+      align: 'right',
+      cell: (p) => formatCurrency(p.cost_basis_eur),
+    },
+    {
+      key: 'gain_loss',
+      header: 'Gain/Loss',
+      shortHeader: 'Gain/Loss',
+      sortKey: 'gain_loss_eur',
+      align: 'right',
+      tone: gainTone,
+      cell: (p) => formatCurrency(p.gain_loss_eur),
+    },
+    {
+      key: 'weight',
+      header: 'Weight',
+      shortHeader: 'Weight',
+      sortKey: 'portfolio_percent',
+      align: 'right',
+      cellClassName: 'text-muted-foreground',
+      cell: (p) => `${weightOf(p).toFixed(2)}%`,
+    },
+    // Carried by the desktop cells above as sub-lines, so they would be duplicated
+    // there; on a phone they are the detail pairs that keep a dual-listed security
+    // (ASML is two securities) tellable apart.
+    {
+      key: 'exchange',
+      header: 'Exchange',
+      shortHeader: 'Exchange',
+      desktop: 'hide',
+      cell: exchangeOf,
+    },
+    { key: 'isin', header: 'ISIN', shortHeader: 'ISIN', desktop: 'hide', cell: (p) => p.isin },
+  ]
 }
 
 export function PositionsList({ positions, isLoading, isError }: PositionsListProps) {
@@ -129,6 +292,11 @@ export function PositionsList({ positions, isLoading, isError }: PositionsListPr
     return sorted
   }, [positions, sortColumn, sortDirection])
 
+  const columns = useMemo(
+    () => positionColumns({ formatCurrency, totalMarketValue }),
+    [formatCurrency, totalMarketValue]
+  )
+
   if (isLoading) {
     return (
       <Card>
@@ -176,105 +344,24 @@ export function PositionsList({ positions, isLoading, isError }: PositionsListPr
     )
   }
 
-  // This table's own pattern, now shared with Fundamentals and Watchlist (which each
-  // put onClick straight on the <th> and so could not be sorted from a keyboard).
-  const SortableHeader = ({ column, label, align = 'left' }: {
-    column: SortColumn; label: string; align?: 'left' | 'right' | 'center'
-  }) => (
-    <SortableTh
-      column={column}
-      label={label}
-      activeColumn={sortColumn}
-      direction={sortDirection}
-      onSort={handleSort}
-      align={align}
-      className="pb-3"
-    />
-  )
-
   return (
     <Card>
       <CardHeader>
         <CardTitle>Positions ({positions.length})</CardTitle>
       </CardHeader>
       <CardContent>
-        <ScrollableTable label="Positions table">
-          <table className="w-full">
-            <thead>
-              <tr className="border-b border-border text-left text-sm text-muted-foreground">
-                <SortableHeader column="symbol" label="Symbol" />
-                <SortableHeader column="description" label="Description" />
-                <SortableHeader column="rating" label="Rating" align="center" />
-                <SortableHeader column="quantity" label="Quantity" align="right" />
-                <SortableHeader column="cost_basis_eur" label="Cost Basis" align="right" />
-                <SortableHeader column="market_value_eur" label="Market Value" align="right" />
-                <SortableHeader column="gain_loss_eur" label="Gain/Loss" align="right" />
-                <SortableHeader column="gain_loss_percent" label="%" align="right" />
-                <SortableHeader column="portfolio_percent" label="Weight" align="right" />
-              </tr>
-            </thead>
-            <tbody>
-              {sortedPositions.map((position) => {
-                const isProfit = position.gain_loss_eur >= 0
-                const portfolioPercent = totalMarketValue > 0 ? (position.market_value_eur / totalMarketValue) * 100 : 0
-                return (
-                  <tr key={position.security_id} className="border-b border-border last:border-0">
-                    <td className="py-3">
-                      <div className="font-medium">{position.symbol}</div>
-                      <div className="text-xs text-muted-foreground">
-                        {position.exchange || 'N/A'}
-                      </div>
-                    </td>
-                    <td className="py-3">
-                      <div className="max-w-xs truncate text-sm">{position.description}</div>
-                      <div className="text-xs text-muted-foreground">{position.isin}</div>
-                    </td>
-                    <td className="py-3">
-                      {position.analyst_rating ? (
-                        <div className="flex flex-col items-center gap-1" title={`Strong Buy: ${position.analyst_rating.strong_buy}, Buy: ${position.analyst_rating.buy}, Hold: ${position.analyst_rating.hold}, Sell: ${position.analyst_rating.sell}, Strong Sell: ${position.analyst_rating.strong_sell}`}>
-                          <span className={`px-2 py-0.5 rounded text-xs font-medium ${getRatingBadgeColor(position.analyst_rating.consensus)}`}>
-                            {position.analyst_rating.consensus}
-                          </span>
-                          <div className="text-[10px] text-muted-foreground flex gap-0.5">
-                            <span className="text-green-600 font-semibold">{position.analyst_rating.strong_buy}</span>
-                            <span>/</span>
-                            <span className="text-green-500 font-semibold">{position.analyst_rating.buy}</span>
-                            <span>/</span>
-                            <span className="text-yellow-600 font-semibold">{position.analyst_rating.hold}</span>
-                            <span>/</span>
-                            <span className="text-red-500 font-semibold">{position.analyst_rating.sell}</span>
-                            <span>/</span>
-                            <span className="text-red-600 font-semibold">{position.analyst_rating.strong_sell}</span>
-                          </div>
-                        </div>
-                      ) : (
-                        <div className="text-center text-xs text-muted-foreground">-</div>
-                      )}
-                    </td>
-                    <td className="py-3 text-right tabular-nums">
-                      {position.quantity.toFixed(2)}
-                    </td>
-                    <td className="py-3 text-right tabular-nums">
-                      {formatCurrency(position.cost_basis_eur)}
-                    </td>
-                    <td className="py-3 text-right tabular-nums">
-                      {formatCurrency(position.market_value_eur)}
-                    </td>
-                    <td className={`py-3 text-right tabular-nums ${isProfit ? 'text-green-600' : 'text-red-600'}`}>
-                      {formatCurrency(position.gain_loss_eur)}
-                    </td>
-                    <td className={`py-3 text-right tabular-nums ${isProfit ? 'text-green-600' : 'text-red-600'}`}>
-                      {formatPercent(position.gain_loss_percent)}
-                    </td>
-                    <td className="py-3 text-right tabular-nums text-muted-foreground">
-                      {portfolioPercent.toFixed(2)}%
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
-        </ScrollableTable>
+        <DataTable
+          rows={sortedPositions}
+          columns={columns}
+          getRowKey={(p) => p.security_id}
+          label="Positions table"
+          density="comfortable"
+          // Quantity, cost basis, gain and weight are what a review is for; the
+          // exchange and ISIN are identifiers you go looking for, so they sit behind
+          // the disclosure rather than adding a line to all 29 cards.
+          detailLimit={4}
+          sort={{ column: sortColumn, direction: sortDirection, onSort: handleSort }}
+        />
       </CardContent>
     </Card>
   )

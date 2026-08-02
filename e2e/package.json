@@ -2,11 +2,12 @@
   "name": "ibkr-portfolio-e2e",
   "private": true,
   "type": "module",
-  "description": "Browser checks for the portfolio UI. Deliberately a separate package from frontend/ — see README.md.",
+  "description": "Browser checks for the portfolio UI. Deliberately a separate package from frontend/ \u2014 see README.md.",
   "scripts": {
     "a11y": "node a11y.mjs",
     "sweep": "node sweep.mjs",
     "errors": "node errors.mjs",
+    "mobile": "node mobile.mjs",
     "csp": "node csp.mjs",
     "chunks": "node lazychunks.mjs",
     "ledger": "node ledger.mjs"
