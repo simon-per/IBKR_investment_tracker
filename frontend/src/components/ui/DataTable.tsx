@@ -209,8 +209,15 @@ export function DataTable<Row, SortKey extends string = never>({
     <div className={className}>
       {asCards ? (
         <>
-          {sort && <CompactSortControl label={label} columns={columns} sort={sort} />}
-          {glossary && <div className="mb-2 flex justify-end">{glossary}</div>}
+          {/* Sort and glossary share one row: on their own lines they read as two
+              unrelated controls with a band of dead space between them and the first
+              card. */}
+          {(sort || glossary) && (
+            <div className="mb-3 flex items-center gap-2">
+              {sort && <CompactSortControl label={label} columns={columns} sort={sort} />}
+              {glossary}
+            </div>
+          )}
           {caption && <p className="sr-only">{caption}</p>}
           <ul aria-label={label} className="divide-y divide-border">
             {rows.map((row, index) => (
@@ -517,7 +524,7 @@ function CompactSortControl<Row, SortKey extends string>({
        target for free, no new primitive, and screen-reader semantics we do not have to
        invent. The button re-fires `onSort` with the ACTIVE column, which every table in
        this app already treats as a direction toggle. */
-    <div className="mb-3 flex items-center gap-2">
+    <div className="flex min-w-0 flex-1 items-center gap-2">
       <label htmlFor={id} className="sr-only">
         Sort {label} by
       </label>

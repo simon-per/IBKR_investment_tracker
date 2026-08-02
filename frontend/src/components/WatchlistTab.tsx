@@ -1,91 +1,17 @@
-import { useState, useMemo, useEffect } from 'react'
+import { useState, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
 import { useFormatCurrency } from '@/lib/CurrencyContext'
-import { SortableTh } from '@/components/ui/SortableTh'
-import { ScrollableTable } from '@/components/ui/ScrollableTable'
+import { DataTable } from '@/components/ui/DataTable'
+import { watchlistColumns, type WatchlistSortColumn } from './watchlistColumns'
+import type { WatchlistItem } from '@/lib/api'
 import { RefreshCw, Plus, Trash2, Pencil } from 'lucide-react'
 
-
-type SortColumn =
-  | 'symbol'
-  | 'buy_score'
-  | 'current_price'
-  | 'pct_from_52w_high'
-  | 'rsi14'
-  | 'pct_from_ma200'
-  | 'trailing_pe'
-  | 'forward_pe'
-  | 'peg_ratio'
-  | 'ev_to_ebitda'
-  | 'analyst_rating'
-  | 'revenue_growth'
-  | 'earnings_growth'
-  | 'fwd_revenue_growth'
-  | 'fwd_eps_growth'
-  | 'profit_margins'
+type SortColumn = WatchlistSortColumn
 type SortDirection = 'asc' | 'desc'
-
-function formatPercent(value: number | null): string {
-  if (value === null) return '-'
-  return `${value >= 0 ? '+' : ''}${value.toFixed(1)}%`
-}
-
-function formatMarketCap(value: number | null): string {
-  if (value === null) return '-'
-  if (value >= 1e12) return `${(value / 1e12).toFixed(1)}T`
-  if (value >= 1e9) return `${(value / 1e9).toFixed(1)}B`
-  if (value >= 1e6) return `${(value / 1e6).toFixed(0)}M`
-  return value.toLocaleString()
-}
-
-function colorClass(value: number | null, invertGood?: boolean): string {
-  if (value === null) return 'text-muted-foreground'
-  const isGood = invertGood ? value > 0 : value < 0
-  if (Math.abs(value) < 5) return 'text-foreground'
-  return isGood ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'
-}
-
-function rsiColorClass(rsi: number | null): string {
-  if (rsi === null) return 'text-muted-foreground'
-  if (rsi < 35) return 'text-green-600 dark:text-green-400'
-  if (rsi > 65) return 'text-red-600 dark:text-red-400'
-  return 'text-foreground'
-}
-
-function scoreColorClass(score: number | null): string {
-  if (score === null) return 'text-muted-foreground'
-  if (score >= 70) return 'text-green-600 dark:text-green-400'
-  if (score >= 40) return 'text-yellow-600 dark:text-yellow-400'
-  return 'text-red-600 dark:text-red-400'
-}
-
-function scoreBgClass(score: number | null): string {
-  if (score === null) return 'bg-muted'
-  if (score >= 70) return 'bg-green-100 dark:bg-green-900/40'
-  if (score >= 40) return 'bg-yellow-100 dark:bg-yellow-900/40'
-  return 'bg-red-100 dark:bg-red-900/40'
-}
-
-const RATING_LABELS: Record<string, string> = {
-  strong_buy: 'Strong Buy',
-  buy: 'Buy',
-  hold: 'Hold',
-  sell: 'Sell',
-  strong_sell: 'Strong Sell',
-}
-
-function ratingColorClass(rating: string | null): string {
-  if (!rating) return 'text-muted-foreground'
-  if (rating === 'strong_buy' || rating === 'buy') return 'text-green-600 dark:text-green-400'
-  if (rating === 'hold') return 'text-yellow-600 dark:text-yellow-400'
-  return 'text-red-600 dark:text-red-400'
-}
-
-type TooltipState = { label: string; description: string; formula?: string; x: number; y: number }
 
 export function WatchlistTab() {
   const queryClient = useQueryClient()
@@ -97,19 +23,6 @@ export function WatchlistTab() {
   const [tickerInput, setTickerInput] = useState('')
   const [sortColumn, setSortColumn] = useState<SortColumn>('buy_score')
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc')
-  const [headerTooltip, setHeaderTooltip] = useState<TooltipState | null>(null)
-
-  // Escape dismisses the header tooltip without moving focus off the column, which is
-  // what a keyboard user needs when the definition covers the row beneath it.
-  useEffect(() => {
-    if (!headerTooltip) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setHeaderTooltip(null)
-    }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [headerTooltip])
-
   const { data: items, isLoading } = useQuery({
     queryKey: ['watchlist'],
     queryFn: () => api.getWatchlist(),
@@ -188,42 +101,101 @@ export function WatchlistTab() {
     })
   }, [items, sortColumn, sortDirection])
 
-  /**
-   * The tooltips these headers carry are the **only** place PEG, RSI and TTM growth are
-   * defined anywhere in the app, and they were `onMouseEnter`-only — unreachable
-   * without a pointer. They now open on focus too, so tabbing across the header row
-   * surfaces each definition, and Escape dismisses one without moving focus.
-   */
-  const SortHeader = ({
-    column, label, className,
-    tooltip,
-  }: {
-    column: SortColumn; label: string; className?: string
-    tooltip?: { description: string; formula?: string }
-  }) => {
-    const show = (el: HTMLElement) => {
-      if (!tooltip) return
-      const rect = el.getBoundingClientRect()
-      setHeaderTooltip({ label, ...tooltip, x: rect.left + rect.width / 2, y: rect.bottom })
-    }
-    const hide = tooltip ? () => setHeaderTooltip(null) : undefined
+  const columns = useMemo(() => watchlistColumns({ formatCurrency }), [formatCurrency])
 
-    return (
-      <SortableTh
-        column={column}
-        label={label}
-        activeColumn={sortColumn}
-        direction={sortDirection}
-        onSort={handleSort}
-        className={`px-3 py-2 text-xs text-muted-foreground ${className || ''}`}
-        iconClassName="h-3 w-3"
-        onMouseEnter={tooltip ? e => show(e.currentTarget) : undefined}
-        onMouseLeave={hide}
-        onFocus={tooltip ? e => show(e.currentTarget) : undefined}
-        onBlur={hide}
-      />
-    )
-  }
+  /**
+   * Edit and delete, as one render function used by both the table and the cards —
+   * so the popover, its state and the accessible names cannot diverge between them.
+   */
+  const rowActions = (item: WatchlistItem) => (
+    <div className="flex items-center gap-0.5">
+      <Popover
+        open={editingId === item.id}
+        onOpenChange={(open) => {
+          if (open) {
+            setEditNotes(item.notes || '')
+            setEditTargetPrice(item.target_price !== null ? String(item.target_price) : '')
+            setEditingId(item.id)
+          } else {
+            setEditingId(null)
+          }
+        }}
+      >
+        <PopoverTrigger asChild>
+          {/* 28px was under any touch guideline, and the icon carried no accessible
+              name at all. */}
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-label={`Edit notes and target price for ${item.symbol || item.yahoo_ticker}`}
+            className="h-9 w-9 p-0 text-muted-foreground hover:text-foreground"
+          >
+            <Pencil className="h-4 w-4" />
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent className="w-72" align="end">
+          <div className="space-y-3">
+            <div className="text-sm font-medium">{item.symbol || item.yahoo_ticker}</div>
+            <div className="space-y-1.5">
+              <label htmlFor={`wl-notes-${item.id}`} className="text-xs text-muted-foreground">
+                Notes
+              </label>
+              <textarea
+                id={`wl-notes-${item.id}`}
+                rows={3}
+                value={editNotes}
+                onChange={(e) => setEditNotes(e.target.value)}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm resize-none"
+                placeholder="Add notes..."
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label htmlFor={`wl-tp-${item.id}`} className="text-xs text-muted-foreground">
+                Target Price {item.data_currency ? `(${item.data_currency})` : ''}
+              </label>
+              <input
+                id={`wl-tp-${item.id}`}
+                type="number"
+                step="0.01"
+                value={editTargetPrice}
+                onChange={(e) => setEditTargetPrice(e.target.value)}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                placeholder="0.00"
+              />
+            </div>
+            {updateMutation.isError && (
+              <p className="text-xs text-red-600 dark:text-red-400">Failed to save. Please try again.</p>
+            )}
+            <div className="flex justify-end gap-2">
+              <Button variant="ghost" size="sm" onClick={() => setEditingId(null)}>
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                disabled={updateMutation.isPending}
+                onClick={() => {
+                  const tp = editTargetPrice.trim() ? parseFloat(editTargetPrice) : undefined
+                  updateMutation.mutate({ id: item.id, notes: editNotes, targetPrice: tp })
+                }}
+              >
+                {updateMutation.isPending ? 'Saving...' : 'Save'}
+              </Button>
+            </div>
+          </div>
+        </PopoverContent>
+      </Popover>
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={() => removeMutation.mutate(item.id)}
+        disabled={removeMutation.isPending}
+        aria-label={`Remove ${item.symbol || item.yahoo_ticker} from the watchlist`}
+        className="h-9 w-9 p-0 text-muted-foreground hover:text-red-600"
+      >
+        <Trash2 className="h-4 w-4" />
+      </Button>
+    </div>
+  )
 
   return (
     <div className="space-y-6">
@@ -304,284 +276,27 @@ export function WatchlistTab() {
               <p className="text-sm text-red-600 dark:text-red-400">Failed to remove item. Please try again.</p>
             </div>
           )}
-          <CardContent className="p-0">
-            <ScrollableTable label="Watchlist table">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b">
-                    <SortHeader column="symbol" label="Stock" className="min-w-[160px]" />
-                    <SortHeader column="buy_score" label="Score" tooltip={{ description: "Composite score across four equally-weighted categories.", formula: "Valuation (25) + Technical (25) + Quality (25) + Analyst (25)" }} />
-                    <SortHeader column="current_price" label="Price" />
-                    <SortHeader column="analyst_rating" label="Analyst" tooltip={{ description: "Analyst consensus rating and mean price target upside. Source: Yahoo Finance." }} />
-                    <SortHeader column="pct_from_52w_high" label="% 52w High" tooltip={{ description: "How far the current price is below the 52-week high. More negative = bigger drawdown from peak.", formula: "(Price − 52w High) ÷ 52w High × 100" }} />
-                    <SortHeader column="rsi14" label="RSI" tooltip={{ description: "Relative Strength Index (14-day). Below 30 = oversold, above 70 = overbought.", formula: "Wilder RSI on 1-year daily closes" }} />
-                    <SortHeader column="pct_from_ma200" label="vs MA200" tooltip={{ description: "Distance from the 200-day moving average. Below 0% = bearish trend, above = uptrend.", formula: "(Price − MA200) ÷ MA200 × 100" }} />
-                    <SortHeader column="peg_ratio" label="PEG" tooltip={{ description: "Forward P/E divided by forward EPS growth rate. A PEG below 1 suggests the stock may be undervalued relative to its expected earnings growth.", formula: "P/E ÷ Fwd EPS Growth %" }} />
-                    <SortHeader column="trailing_pe" label="P/E" tooltip={{ description: "Price divided by earnings per share over the last 12 months.", formula: "Price ÷ TTM EPS" }} />
-                    <SortHeader column="forward_pe" label="Fwd P/E" tooltip={{ description: "Price divided by next-12-month analyst consensus EPS. Lower than trailing P/E = earnings expected to grow.", formula: "Price ÷ Next-12M EPS estimate" }} />
-                    <SortHeader column="ev_to_ebitda" label="EV/EBITDA" tooltip={{ description: "Enterprise value relative to EBITDA. Below 10 = cheap, above 20 = expensive.", formula: "Enterprise Value ÷ TTM EBITDA" }} />
-                    <SortHeader column="revenue_growth" label="Rev Grw" tooltip={{ description: "TTM revenue growth vs prior TTM (8+ quarters). Falls back to same-quarter YoY (5–7 quarters), then Yahoo Finance .info.", formula: "sum(Q1–4) ÷ sum(Q5–8) − 1, or Q[0] ÷ Q[4] − 1" }} />
-                    <SortHeader column="earnings_growth" label="EPS Grw" tooltip={{ description: "TTM EPS/Net Income growth vs prior TTM (8+ quarters). Falls back to same-quarter YoY (5–7 quarters), then Yahoo Finance .info. Note: PEG uses Yahoo's separate 5-year analyst estimate, not this figure.", formula: "sum(Q1–4) ÷ sum(Q5–8) − 1, or Q[0] ÷ Q[4] − 1" }} />
-                    <SortHeader column="fwd_revenue_growth" label="Fwd Rev" tooltip={{ description: "Analyst consensus revenue growth estimate for next 12 months.", formula: "revenue_estimate['+1y']['growth']" }} />
-                    <SortHeader column="fwd_eps_growth" label="Fwd EPS" tooltip={{ description: "Analyst consensus EPS growth estimate for next 12 months.", formula: "growth_estimates['+1y']['stockTrend']" }} />
-                    <SortHeader column="profit_margins" label="Margin" tooltip={{ description: "Net income as a percentage of revenue over the trailing 12 months.", formula: "Net Income ÷ Revenue (TTM)" }} />
-                    <th
-                      className="px-3 py-2 text-left text-xs font-medium text-muted-foreground cursor-default"
-                      onMouseEnter={(e) => {
-                        const rect = e.currentTarget.getBoundingClientRect()
-                        setHeaderTooltip({ label: 'Market Cap', description: 'Total market value of all outstanding shares. Displayed in native currency.', formula: 'Share Price × Shares Outstanding', x: rect.left + rect.width / 2, y: rect.bottom })
-                      }}
-                      onMouseLeave={() => setHeaderTooltip(null)}
-                    >
-                      Mkt Cap
-                    </th>
-                    <th className="px-3 py-2 text-left text-xs font-medium text-muted-foreground w-10"></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {sortedItems.map((item) => {
-                    const analystUpside = item.analyst_target && item.current_price && item.current_price > 0
-                      ? ((item.analyst_target - item.current_price) / item.current_price * 100)
-                      : null
-                    return (
-                    <tr key={item.id} className="border-b hover:bg-muted/50">
-                      {/* Stock */}
-                      <td className="px-3 py-2">
-                        <div>
-                          <div className="font-medium">{item.symbol || item.yahoo_ticker}</div>
-                          <div className="text-xs text-muted-foreground truncate max-w-[140px]">
-                            {item.company_name || item.yahoo_ticker}
-                          </div>
-                          {(item.notes || item.target_price !== null) && (
-                            <div className="text-[10px] text-muted-foreground/70 mt-0.5 space-x-2">
-                              {item.notes && <span className="truncate inline-block max-w-[100px] align-bottom">{item.notes}</span>}
-                              {item.target_price !== null && <span>TP: {formatCurrency(item.target_price, item.data_currency)}</span>}
-                            </div>
-                          )}
-                        </div>
-                      </td>
-
-                      {/* Buy Score */}
-                      <td className="px-3 py-2">
-                        {item.buy_score !== null ? (
-                          <span className={`inline-flex items-center justify-center w-9 h-6 rounded text-xs font-bold ${scoreColorClass(item.buy_score)} ${scoreBgClass(item.buy_score)}`}>
-                            {Math.round(item.buy_score)}
-                          </span>
-                        ) : (
-                          <span className="text-muted-foreground">-</span>
-                        )}
-                      </td>
-
-                      {/* Price */}
-                      <td className="px-3 py-2 font-medium">
-                        {formatCurrency(item.current_price, item.data_currency)}
-                      </td>
-
-                      {/* Analyst */}
-                      <td className="px-3 py-2">
-                        <div className={`text-xs font-medium ${ratingColorClass(item.analyst_rating)}`}>
-                          {item.analyst_rating ? RATING_LABELS[item.analyst_rating] || item.analyst_rating : '-'}
-                        </div>
-                        {analystUpside !== null && (
-                          <div className={`text-[10px] ${analystUpside > 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
-                            {analystUpside >= 0 ? '+' : ''}{analystUpside.toFixed(0)}% upside
-                            {item.analyst_count ? ` (${item.analyst_count})` : ''}
-                          </div>
-                        )}
-                      </td>
-
-                      {/* % from 52w High */}
-                      <td className={`px-3 py-2 font-medium ${colorClass(item.pct_from_52w_high)}`}>
-                        {formatPercent(item.pct_from_52w_high)}
-                      </td>
-
-                      {/* RSI */}
-                      <td className={`px-3 py-2 font-medium ${rsiColorClass(item.rsi14)}`}>
-                        {item.rsi14 !== null ? item.rsi14.toFixed(1) : '-'}
-                      </td>
-
-                      {/* vs 200d MA */}
-                      <td className={`px-3 py-2 font-medium ${colorClass(item.pct_from_ma200)}`}>
-                        {formatPercent(item.pct_from_ma200)}
-                      </td>
-
-                      {/* PEG — use stored value, fall back to P/E ÷ Fwd EPS growth % */}
-                      <td className="px-3 py-2">
-                        {(() => {
-                          const peg = item.peg_ratio ?? (
-                            item.trailing_pe && item.fwd_eps_growth && item.fwd_eps_growth > 0
-                              ? item.trailing_pe / (item.fwd_eps_growth * 100)
-                              : null
-                          )
-                          return peg !== null ? (
-                            <span className={peg <= 1 ? 'text-green-600 dark:text-green-400' : peg > 2 ? 'text-red-600 dark:text-red-400' : ''}>
-                              {peg.toFixed(2)}
-                            </span>
-                          ) : '-'
-                        })()}
-                      </td>
-
-                      {/* P/E */}
-                      <td className="px-3 py-2">
-                        {item.trailing_pe !== null ? item.trailing_pe.toFixed(1) : '-'}
-                      </td>
-
-                      {/* Fwd P/E */}
-                      <td className="px-3 py-2">
-                        {item.forward_pe !== null ? item.forward_pe.toFixed(1) : '-'}
-                      </td>
-
-                      {/* EV/EBITDA */}
-                      <td className="px-3 py-2">
-                        {item.ev_to_ebitda !== null ? item.ev_to_ebitda.toFixed(1) : '-'}
-                      </td>
-
-                      {/* Revenue Growth */}
-                      <td className={`px-3 py-2 ${colorClass(item.revenue_growth != null ? item.revenue_growth * 100 : null, true)}`}>
-                        {item.revenue_growth != null ? `${(item.revenue_growth * 100).toFixed(1)}%` : '-'}
-                      </td>
-
-                      {/* EPS Growth */}
-                      <td className={`px-3 py-2 ${colorClass(item.earnings_growth != null ? item.earnings_growth * 100 : null, true)}`}>
-                        {item.earnings_growth != null ? `${(item.earnings_growth * 100).toFixed(1)}%` : '-'}
-                      </td>
-
-                      {/* Fwd Revenue Growth */}
-                      <td className={`px-3 py-2 ${colorClass(item.fwd_revenue_growth != null ? item.fwd_revenue_growth * 100 : null, true)}`}>
-                        {item.fwd_revenue_growth != null ? `${(item.fwd_revenue_growth * 100).toFixed(1)}%` : '-'}
-                      </td>
-
-                      {/* Fwd EPS Growth */}
-                      <td className={`px-3 py-2 ${colorClass(item.fwd_eps_growth != null ? item.fwd_eps_growth * 100 : null, true)}`}>
-                        {item.fwd_eps_growth != null ? `${(item.fwd_eps_growth * 100).toFixed(1)}%` : '-'}
-                      </td>
-
-                      {/* Margin */}
-                      <td className="px-3 py-2">
-                        {item.profit_margins !== null ? `${(item.profit_margins * 100).toFixed(1)}%` : '-'}
-                      </td>
-
-                      {/* Market Cap */}
-                      <td className="px-3 py-2 text-muted-foreground">
-                        {formatMarketCap(item.market_cap)}
-                      </td>
-
-                      {/* Actions */}
-                      <td className="px-3 py-2">
-                        <div className="flex items-center gap-0.5">
-                          <Popover
-                            open={editingId === item.id}
-                            onOpenChange={(open) => {
-                              if (open) {
-                                setEditNotes(item.notes || '')
-                                setEditTargetPrice(item.target_price !== null ? String(item.target_price) : '')
-                                setEditingId(item.id)
-                              } else {
-                                setEditingId(null)
-                              }
-                            }}
-                          >
-                            <PopoverTrigger asChild>
-                              {/* 28px was under any touch guideline and the icon carried
-                                  no accessible name at all. */}
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                aria-label={`Edit notes and target price for ${item.symbol || item.yahoo_ticker}`}
-                                className="h-9 w-9 p-0 text-muted-foreground hover:text-foreground"
-                              >
-                                <Pencil className="h-4 w-4" />
-                              </Button>
-                            </PopoverTrigger>
-                            <PopoverContent className="w-72" align="end">
-                              <div className="space-y-3">
-                                <div className="text-sm font-medium">{item.symbol || item.yahoo_ticker}</div>
-                                <div className="space-y-1.5">
-                                  <label className="text-xs text-muted-foreground">Notes</label>
-                                  <textarea
-                                    rows={3}
-                                    value={editNotes}
-                                    onChange={(e) => setEditNotes(e.target.value)}
-                                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm resize-none"
-                                    placeholder="Add notes..."
-                                  />
-                                </div>
-                                <div className="space-y-1.5">
-                                  <label className="text-xs text-muted-foreground">
-                                    Target Price {item.data_currency ? `(${item.data_currency})` : ''}
-                                  </label>
-                                  <input
-                                    type="number"
-                                    step="0.01"
-                                    value={editTargetPrice}
-                                    onChange={(e) => setEditTargetPrice(e.target.value)}
-                                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                                    placeholder="0.00"
-                                  />
-                                </div>
-                                {updateMutation.isError && (
-                                  <p className="text-xs text-red-600 dark:text-red-400">Failed to save. Please try again.</p>
-                                )}
-                                <div className="flex justify-end gap-2">
-                                  <Button variant="ghost" size="sm" onClick={() => setEditingId(null)}>
-                                    Cancel
-                                  </Button>
-                                  <Button
-                                    size="sm"
-                                    disabled={updateMutation.isPending}
-                                    onClick={() => {
-                                      const tp = editTargetPrice.trim() ? parseFloat(editTargetPrice) : undefined
-                                      updateMutation.mutate({ id: item.id, notes: editNotes, targetPrice: tp })
-                                    }}
-                                  >
-                                    {updateMutation.isPending ? 'Saving...' : 'Save'}
-                                  </Button>
-                                </div>
-                              </div>
-                            </PopoverContent>
-                          </Popover>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => removeMutation.mutate(item.id)}
-                            disabled={removeMutation.isPending}
-                            aria-label={`Remove ${item.symbol || item.yahoo_ticker} from the watchlist`}
-                            className="h-9 w-9 p-0 text-muted-foreground hover:text-red-600"
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </Button>
-                        </div>
-                      </td>
-                    </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-            </ScrollableTable>
+          {/* `max-sm:px-4` restores the gutter the card list needs: `p-0` exists so
+              the desktop table can bleed to the card edge, which a card list must not. */}
+          <CardContent className="p-0 max-sm:px-4 max-sm:py-2">
+            <DataTable
+              rows={sortedItems}
+              columns={columns}
+              getRowKey={(i) => i.id}
+              label="Watchlist table"
+              density="roomy"
+              minWidthClassName="min-w-[64rem]"
+              // Four visible details, twelve behind the disclosure. Hiding them outright
+              // would hide the data the watchlist is for; a collapsed card is ~120px, so
+              // thirty rows is one honest vertical scroll instead of four sideways ones.
+              detailLimit={4}
+              sort={{ column: sortColumn, direction: sortDirection, onSort: handleSort }}
+              rowActions={rowActions}
+            />
           </CardContent>
         </Card>
       )}
 
-      {/* Fixed-position header tooltip — renders outside overflow container.
-          role="status" so the definition is announced when focus opens it; without
-          that, a keyboard user reaches the header and the tooltip appears silently. */}
-      {headerTooltip && (
-        <div
-          role="status"
-          className="fixed z-[9999] w-60 pointer-events-none"
-          style={{ left: headerTooltip.x, top: headerTooltip.y + 6, transform: 'translateX(-50%)' }}
-        >
-          <div className="rounded-xl bg-background/85 backdrop-blur-md border border-border/40 shadow-2xl p-3 text-xs">
-            <div className="font-semibold text-foreground mb-1">{headerTooltip.label}</div>
-            <div className="text-muted-foreground leading-relaxed">{headerTooltip.description}</div>
-            {headerTooltip.formula && (
-              <div className="mt-2 font-mono text-[10px] bg-muted/50 rounded-md px-2 py-1.5 text-muted-foreground/80">
-                {headerTooltip.formula}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
     </div>
   )
 }
