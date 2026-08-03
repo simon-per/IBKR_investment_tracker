@@ -32,6 +32,23 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
   fresh shell silently passes empty strings and `scp`/`ssh` print usage. Use literal paths, or
   re-run the script.
 
+- **Reinstall `ops/auto-deploy.sh` on the VPS.** Its `SYNC_HOURS` was wrong and is now
+  fixed in the repo — but `deploy.sh` does not touch `/root/auto-deploy.sh`, so the running
+  copy is still the broken one until someone copies it across. Until then, deploys are
+  unguarded at 00:00 and 06:00 Berlin.
+
+  ```bash
+  scp -i ~/.ssh/id_ed25519_hostinger ops/auto-deploy.sh root@portfolio.srv1211053.hstgr.cloud:/root/auto-deploy.sh
+  ssh -i ~/.ssh/id_ed25519_hostinger root@portfolio.srv1211053.hstgr.cloud 'chmod +x /root/auto-deploy.sh && grep SYNC_HOURS= /root/auto-deploy.sh'
+  ```
+
+  The guard was written on 2026-07-31, the same day the schedule moved 13:00/20:00 →
+  00:00/06:00, and it kept the **old** pair — so it guarded two slots that no longer run
+  and left the two overnight IBKR slots guarded by nothing. The wrong half of the day.
+  A shell script on the VPS is invisible to the application, so nothing could catch it at
+  runtime; `tests/test_deploy_guard_hours.py` now reads the file and fails the suite if
+  the two ever disagree again.
+
 - **Rotate the IBKR Flex token.** It travelled as a `t=` URL parameter into `sync_runs.message` and
   was served by the public `/api/scheduler/history` until the 2026-07-28 scrub. `app/redact.py` now
   redacts on write *and* on read, so it cannot recur — but redaction cannot un-leak what was already

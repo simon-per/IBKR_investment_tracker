@@ -26,11 +26,19 @@ BACKUP_ROOT="/root/ibkr-backups"
 HEALTH_URL="http://127.0.0.1:8000/health"
 KEEP_BACKUPS=10
 
-# Europe/Berlin hours at which APScheduler runs a sync (see CLAUDE.md).
-SYNC_HOURS="8 13 15 20 22"
+# Europe/Berlin hours at which APScheduler runs a sync. This list is a COPY of the
+# CronTriggers in backend/app/services/scheduler_service.py, so it can drift — and it
+# did: written on 2026-07-31, the same day 13:00 and 20:00 were retired in favour of
+# 00:00 and 06:00, it kept the old pair. The effect was the wrong half of the day
+# protected: two slots guarded that no longer run, and the two overnight IBKR slots
+# guarded by nothing. `tests/test_deploy_guard_hours.py` now reads this file and fails
+# the suite if the two ever disagree again.
+SYNC_HOURS="0 6 8 15 22"
 # Minutes either side of a slot to stay clear of. A rebuild takes ~2-5 minutes and
-# APScheduler is in-process, so a deploy overlapping a slot silently loses that
-# run — there is no misfire recovery. 10 covers the rebuild plus the job itself.
+# APScheduler is in-process, so a deploy overlapping a slot loses that run. The
+# persistent job store (2026-08-01) recovers a misfire up to 30 minutes late, so this
+# is now a second line of defence rather than the only one — but a `--no-cache` rebuild
+# can exceed that grace, so it still earns its keep. 10 covers the rebuild plus the job.
 SLOT_MARGIN_MIN=10
 
 log() { echo "[$(date -u '+%Y-%m-%d %H:%M:%S') UTC] $*" >> "$LOG"; }
