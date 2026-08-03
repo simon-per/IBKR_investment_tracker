@@ -28,10 +28,25 @@ correction to SBI.TO and went on defining a gold miner's payout schedule.
    for months. With updated_at, a dividend row older than its mapping's last
    change is a specific, checkable suspicion rather than a guess from staleness.
 
-   Backfilled to now() rather than left NULL: the rows exist, and a NULL would
-   make every security look suspect on the first run of the detector that reads
-   this. Existing mappings therefore read as "as old as this migration", which is
-   the truthful floor — nothing records when they were really set.
+   Pre-existing rows are left NULL, because nothing records when they were really
+   set and NULL is how this schema says "unknown". An earlier revision backfilled
+   CURRENT_TIMESTAMP instead, reasoning that "a NULL would make every security look
+   suspect on the first run of the detector" — which has the comparison backwards.
+   The detector warns when `newest_estimate < updated_at` and skips outright when
+   `updated_at IS NULL` (`find_dividends_predating_their_mapping`, and the same
+   guard in `manage_mappings list`), so NULL is the quiet value and now() is the
+   loud one: stamping every row with the migration's own run time made every
+   mapping read as *just changed*, and every estimate computed before it as
+   fetched under some other ticker.
+
+   That is not hypothetical — it fired on prod. All 20 rows carried the identical
+   stamp 2026-07-30 19:49:16, including two pinned by hand three days earlier, and
+   Samsung, SK Hynix and TSMC warned on every market-data sync with the estimates
+   the forecast needs. The rows were correct; only this backfill said otherwise.
+   Worse, it could not self-clear: `get_uncomputed()` keys on `shares_held IS NULL`
+   and a pre-ownership row settles at 0, so `last_computed` never moves again.
+   Purging — which the warning itself advises — would have deleted the only
+   per-share history three recently-bought payers had to project from.
 
 SQLite cannot drop a constraint in place, so (1) goes through batch_alter_table,
 which rebuilds the table. The container runs `alembic upgrade head` on every
@@ -71,14 +86,14 @@ def upgrade() -> None:
         )
 
     # --- 2. Mapping provenance -------------------------------------------
+    # Deliberately not backfilled: a pre-existing row's real timestamps are
+    # unknown, and NULL is the only value that says so. Stamping now() would date
+    # every mapping to this migration and make the provenance detector read every
+    # estimate older than it as fetched under a different ticker. Rows written from
+    # here on get honest values from the model's server_default/onupdate.
     with op.batch_alter_table('ticker_mappings') as batch:
         batch.add_column(sa.Column('created_at', sa.DateTime(), nullable=True))
         batch.add_column(sa.Column('updated_at', sa.DateTime(), nullable=True))
-    op.execute(
-        "UPDATE ticker_mappings "
-        "SET created_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP "
-        "WHERE created_at IS NULL"
-    )
 
 
 def downgrade() -> None:
