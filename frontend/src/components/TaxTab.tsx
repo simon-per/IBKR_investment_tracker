@@ -6,6 +6,7 @@ import { cn } from '@/lib/utils'
 import { api } from '@/lib/api'
 import { useCurrencySymbol } from '@/lib/CurrencyContext'
 import type { TaxReport } from '@/lib/api'
+import { DataTable, type Column } from '@/components/ui/DataTable'
 
 /**
  * Only the first-paint fallback for the year picker. The real floor is the year of the
@@ -25,6 +26,201 @@ function gainClass(amount: number): string {
   if (amount < 0) return 'text-red-600 dark:text-red-400'
   return 'text-muted-foreground'
 }
+
+type Money = (n: number) => string
+type DividendIncomeRow = TaxReport['dividend_income'][number]
+type ByCountryRow = TaxReport['dividend_by_country'][number]
+type RealizedRow = TaxReport['realized_gains'][number]
+type HoldingRow = TaxReport['holdings_snapshot'][number]
+
+/**
+ * The four tax tables, described once each for both renderings.
+ *
+ * These are the ones that exercise DataTable's `footer`. `spans` names the columns a
+ * total cell covers and the desktop `colSpan` is derived from it — better than the
+ * literal `colSpan={3}` these carried, which lies silently the moment a column is
+ * added, and which is exactly the class of quiet drift this file is otherwise careful
+ * about. The fourth table's trailing empty `<td>` is derived too, from the spans not
+ * covering the full width.
+ */
+const DIVIDEND_INCOME_COLUMNS = (money: Money): Column<DividendIncomeRow>[] => [
+  {
+    key: 'symbol',
+    header: 'Symbol',
+    shortHeader: 'Symbol',
+    mobile: 'title',
+    cellClassName: 'font-medium',
+    cell: (d) => d.symbol ?? '—',
+  },
+  {
+    key: 'description',
+    header: 'Description',
+    shortHeader: 'Description',
+    mobile: 'meta',
+    cellClassName: 'max-w-[240px] truncate text-muted-foreground',
+    cell: (d) => d.description ?? '—',
+  },
+  {
+    key: 'pay_date',
+    header: 'Pay date',
+    shortHeader: 'Pay date',
+    mobile: 'meta',
+    cell: (d) => d.pay_date,
+  },
+  {
+    key: 'net',
+    header: 'Net',
+    shortHeader: 'Net',
+    align: 'right',
+    mobile: 'value',
+    cellClassName: 'font-medium',
+    cell: (d) => money(d.net),
+  },
+  {
+    key: 'gross',
+    header: 'Gross',
+    shortHeader: 'Gross',
+    align: 'right',
+    cell: (d) => money(d.gross),
+  },
+  {
+    key: 'withholding',
+    header: 'Withholding',
+    shortHeader: 'Withholding',
+    align: 'right',
+    cellClassName: 'text-muted-foreground',
+    cell: (d) => (d.withholding ? `-${money(d.withholding)}` : money(0)),
+  },
+]
+
+const BY_COUNTRY_COLUMNS = (money: Money): Column<ByCountryRow>[] => [
+  {
+    key: 'country',
+    header: 'Country',
+    shortHeader: 'Country',
+    mobile: 'title',
+    cellClassName: 'font-medium',
+    cell: (c) => c.country,
+  },
+  {
+    key: 'net',
+    header: 'Net',
+    shortHeader: 'Net',
+    align: 'right',
+    mobile: 'value',
+    cellClassName: 'font-medium',
+    cell: (c) => money(c.net),
+  },
+  {
+    key: 'positions',
+    header: 'Positions',
+    shortHeader: 'Positions',
+    align: 'right',
+    cellClassName: 'text-muted-foreground',
+    cell: (c) => c.positions,
+  },
+  {
+    key: 'gross',
+    header: 'Gross',
+    shortHeader: 'Gross',
+    align: 'right',
+    cell: (c) => money(c.gross),
+  },
+  {
+    key: 'withholding',
+    header: 'Withholding',
+    shortHeader: 'Withholding',
+    align: 'right',
+    cell: (c) => (c.withholding ? `-${money(c.withholding)}` : money(0)),
+  },
+]
+
+const REALIZED_COLUMNS = (money: Money): Column<RealizedRow>[] => [
+  {
+    key: 'symbol',
+    header: 'Symbol',
+    shortHeader: 'Symbol',
+    mobile: 'title',
+    cellClassName: 'font-medium',
+    cell: (r) => r.symbol ?? '—',
+  },
+  {
+    key: 'trade_date',
+    header: 'Trade date',
+    shortHeader: 'Trade date',
+    mobile: 'meta',
+    cell: (r) => r.trade_date,
+  },
+  {
+    key: 'gain_loss',
+    header: 'Gain / Loss',
+    shortHeader: 'Gain / Loss',
+    align: 'right',
+    // The point of the table, so it takes the card's headline slot rather than
+    // proceeds — this is the figure a filing is checking.
+    mobile: 'value',
+    tone: (r) => gainClass(r.gain_loss),
+    cellClassName: 'font-medium',
+    cell: (r) => `${r.gain_loss >= 0 ? '+' : ''}${money(r.gain_loss)}`,
+  },
+  {
+    key: 'quantity',
+    header: 'Quantity',
+    shortHeader: 'Quantity',
+    align: 'right',
+    cell: (r) => (r.quantity != null ? r.quantity : '—'),
+  },
+  {
+    key: 'proceeds',
+    header: 'Proceeds',
+    shortHeader: 'Proceeds',
+    align: 'right',
+    cell: (r) => money(r.proceeds),
+  },
+  {
+    key: 'cost_basis',
+    header: 'Cost basis',
+    shortHeader: 'Cost basis',
+    align: 'right',
+    cellClassName: 'text-muted-foreground',
+    cell: (r) => money(r.cost_basis),
+  },
+]
+
+const HOLDINGS_COLUMNS = (money: Money): Column<HoldingRow>[] => [
+  {
+    key: 'symbol',
+    header: 'Symbol',
+    shortHeader: 'Symbol',
+    mobile: 'title',
+    cellClassName: 'font-medium',
+    cell: (h) => h.symbol ?? '—',
+  },
+  {
+    key: 'market_value',
+    header: 'Market value',
+    shortHeader: 'Market value',
+    align: 'right',
+    mobile: 'value',
+    cellClassName: 'font-medium',
+    cell: (h) => money(h.market_value),
+  },
+  {
+    key: 'quantity',
+    header: 'Quantity',
+    shortHeader: 'Quantity',
+    align: 'right',
+    cell: (h) => (h.quantity != null ? h.quantity : '—'),
+  },
+  {
+    key: 'cost_basis',
+    header: 'Cost basis',
+    shortHeader: 'Cost basis',
+    align: 'right',
+    cellClassName: 'text-muted-foreground',
+    cell: (h) => money(h.cost_basis),
+  },
+]
 
 export function TaxTab() {
   const curSym = useCurrencySymbol()
@@ -171,48 +367,26 @@ export function TaxTab() {
                   No dividend income recorded for {year}.
                 </p>
               ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b text-muted-foreground">
-                        <th className="px-2 py-1.5 text-left font-medium">Symbol</th>
-                        <th className="px-2 py-1.5 text-left font-medium">Description</th>
-                        <th className="px-2 py-1.5 text-left font-medium">Pay date</th>
-                        <th className="px-2 py-1.5 text-right font-medium">Gross</th>
-                        <th className="px-2 py-1.5 text-right font-medium">Withholding</th>
-                        <th className="px-2 py-1.5 text-right font-medium">Net</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {data.dividend_income.map((d, i) => (
-                        <tr key={i} className="border-b border-border/50">
-                          <td className="px-2 py-1.5 font-medium">{d.symbol ?? '—'}</td>
-                          <td className="max-w-[240px] truncate px-2 py-1.5 text-muted-foreground" title={d.description ?? ''}>
-                            {d.description ?? '—'}
-                          </td>
-                          <td className="px-2 py-1.5">{d.pay_date}</td>
-                          <td className="px-2 py-1.5 text-right tabular-nums">{money(d.gross)}</td>
-                          <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground">
-                            {d.withholding ? `-${money(d.withholding)}` : money(0)}
-                          </td>
-                          <td className="px-2 py-1.5 text-right font-medium tabular-nums">{money(d.net)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                    <tfoot>
-                      <tr className="border-t font-semibold">
-                        <td className="px-2 py-2" colSpan={3}>
-                          Total
-                        </td>
-                        <td className="px-2 py-2 text-right tabular-nums">{money(data.dividend_totals.gross)}</td>
-                        <td className="px-2 py-2 text-right tabular-nums">
-                          {data.dividend_totals.withholding ? `-${money(data.dividend_totals.withholding)}` : money(0)}
-                        </td>
-                        <td className="px-2 py-2 text-right tabular-nums">{money(data.dividend_totals.net)}</td>
-                      </tr>
-                    </tfoot>
-                  </table>
-                </div>
+                <DataTable
+                  rows={data.dividend_income}
+                  columns={DIVIDEND_INCOME_COLUMNS(money)}
+                  getRowKey={(_, i) => i}
+                  label="Dividend income"
+                  density="compact"
+                  footer={[
+                    { key: 'label', spans: ['symbol', 'description', 'pay_date'], content: 'Total' },
+                    { key: 'gross', spans: ['gross'], align: 'right', content: money(data.dividend_totals.gross) },
+                    {
+                      key: 'withholding',
+                      spans: ['withholding'],
+                      align: 'right',
+                      content: data.dividend_totals.withholding
+                        ? `-${money(data.dividend_totals.withholding)}`
+                        : money(0),
+                    },
+                    { key: 'net', spans: ['net'], align: 'right', content: money(data.dividend_totals.net) },
+                  ]}
+                />
               )}
             </CardContent>
           </Card>
@@ -225,34 +399,13 @@ export function TaxTab() {
                 <CardDescription>{data.dividend_country_note}</CardDescription>
               </CardHeader>
               <CardContent>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b text-muted-foreground">
-                        <th className="px-2 py-1.5 text-left font-medium">Country</th>
-                        <th className="px-2 py-1.5 text-right font-medium">Positions</th>
-                        <th className="px-2 py-1.5 text-right font-medium">Gross</th>
-                        <th className="px-2 py-1.5 text-right font-medium">Withholding</th>
-                        <th className="px-2 py-1.5 text-right font-medium">Net</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {data.dividend_by_country.map((c) => (
-                        <tr key={c.country} className="border-b border-border/50">
-                          <td className="px-2 py-1.5 font-medium">{c.country}</td>
-                          <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground">
-                            {c.positions}
-                          </td>
-                          <td className="px-2 py-1.5 text-right tabular-nums">{money(c.gross)}</td>
-                          <td className="px-2 py-1.5 text-right tabular-nums">
-                            {c.withholding ? `-${money(c.withholding)}` : money(0)}
-                          </td>
-                          <td className="px-2 py-1.5 text-right font-medium tabular-nums">{money(c.net)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                <DataTable
+                  rows={data.dividend_by_country}
+                  columns={BY_COUNTRY_COLUMNS(money)}
+                  getRowKey={(c) => c.country}
+                  label="Withholding by country"
+                  density="compact"
+                />
               </CardContent>
             </Card>
           )}
@@ -291,50 +444,25 @@ export function TaxTab() {
                   No realized sales recorded for {year}.
                 </p>
               ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b text-muted-foreground">
-                        <th className="px-2 py-1.5 text-left font-medium">Symbol</th>
-                        <th className="px-2 py-1.5 text-left font-medium">Trade date</th>
-                        <th className="px-2 py-1.5 text-right font-medium">Quantity</th>
-                        <th className="px-2 py-1.5 text-right font-medium">Proceeds</th>
-                        <th className="px-2 py-1.5 text-right font-medium">Cost basis</th>
-                        <th className="px-2 py-1.5 text-right font-medium">Gain / Loss</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {data.realized_gains.map((r, i) => (
-                        <tr key={i} className="border-b border-border/50">
-                          <td className="px-2 py-1.5 font-medium">{r.symbol ?? '—'}</td>
-                          <td className="px-2 py-1.5">{r.trade_date}</td>
-                          <td className="px-2 py-1.5 text-right tabular-nums">
-                            {r.quantity != null ? r.quantity : '—'}
-                          </td>
-                          <td className="px-2 py-1.5 text-right tabular-nums">{money(r.proceeds)}</td>
-                          <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground">{money(r.cost_basis)}</td>
-                          <td className={cn('px-2 py-1.5 text-right font-medium tabular-nums', gainClass(r.gain_loss))}>
-                            {r.gain_loss >= 0 ? '+' : ''}
-                            {money(r.gain_loss)}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                    <tfoot>
-                      <tr className="border-t font-semibold">
-                        <td className="px-2 py-2" colSpan={3}>
-                          Total
-                        </td>
-                        <td className="px-2 py-2 text-right tabular-nums">{money(data.realized_totals.proceeds)}</td>
-                        <td className="px-2 py-2 text-right tabular-nums">{money(data.realized_totals.cost_basis)}</td>
-                        <td className={cn('px-2 py-2 text-right tabular-nums', gainClass(data.realized_totals.gain_loss))}>
-                          {data.realized_totals.gain_loss >= 0 ? '+' : ''}
-                          {money(data.realized_totals.gain_loss)}
-                        </td>
-                      </tr>
-                    </tfoot>
-                  </table>
-                </div>
+                <DataTable
+                  rows={data.realized_gains}
+                  columns={REALIZED_COLUMNS(money)}
+                  getRowKey={(_, i) => i}
+                  label="Realized capital gains"
+                  density="compact"
+                  footer={[
+                    { key: 'label', spans: ['symbol', 'trade_date', 'quantity'], content: 'Total' },
+                    { key: 'proceeds', spans: ['proceeds'], align: 'right', content: money(data.realized_totals.proceeds) },
+                    { key: 'cost_basis', spans: ['cost_basis'], align: 'right', content: money(data.realized_totals.cost_basis) },
+                    {
+                      key: 'gain_loss',
+                      spans: ['gain_loss'],
+                      align: 'right',
+                      tone: gainClass(data.realized_totals.gain_loss),
+                      content: `${data.realized_totals.gain_loss >= 0 ? '+' : ''}${money(data.realized_totals.gain_loss)}`,
+                    },
+                  ]}
+                />
               )}
             </CardContent>
           </Card>
@@ -367,43 +495,25 @@ export function TaxTab() {
               ) : data.holdings_snapshot.length === 0 ? (
                 <p className="py-4 text-center text-sm text-muted-foreground">No holdings to show.</p>
               ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b text-muted-foreground">
-                        <th className="px-2 py-1.5 text-left font-medium">Symbol</th>
-                        <th className="px-2 py-1.5 text-right font-medium">Quantity</th>
-                        <th className="px-2 py-1.5 text-right font-medium">Market value</th>
-                        <th className="px-2 py-1.5 text-right font-medium">Cost basis</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {data.holdings_snapshot.map((h, i) => (
-                        <tr key={i} className="border-b border-border/50">
-                          <td className="px-2 py-1.5 font-medium">{h.symbol ?? '—'}</td>
-                          <td className="px-2 py-1.5 text-right tabular-nums">
-                            {h.quantity != null ? h.quantity : '—'}
-                          </td>
-                          <td className="px-2 py-1.5 text-right font-medium tabular-nums">{money(h.market_value)}</td>
-                          <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground">{money(h.cost_basis)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                    <tfoot>
-                      <tr className="border-t font-semibold">
-                        <td className="px-2 py-2" colSpan={2}>
-                          Total
-                        </td>
-                        <td className="px-2 py-2 text-right tabular-nums">
-                          {data.holdings_snapshot_total != null
-                            ? money(data.holdings_snapshot_total)
-                            : '—'}
-                        </td>
-                        <td className="px-2 py-2" />
-                      </tr>
-                    </tfoot>
-                  </table>
-                </div>
+                <DataTable
+                  rows={data.holdings_snapshot}
+                  columns={HOLDINGS_COLUMNS(money)}
+                  getRowKey={(_, i) => i}
+                  label="Holdings snapshot"
+                  density="compact"
+                  footer={[
+                    { key: 'label', spans: ['symbol', 'quantity'], content: 'Total' },
+                    {
+                      key: 'market_value',
+                      spans: ['market_value'],
+                      align: 'right',
+                      content:
+                        data.holdings_snapshot_total != null
+                          ? money(data.holdings_snapshot_total)
+                          : '—',
+                    },
+                  ]}
+                />
               )}
             </CardContent>
           </Card>

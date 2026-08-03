@@ -5,6 +5,7 @@ import { useQuery } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { useBaseCurrency, useCurrencySymbol } from '@/lib/CurrencyContext'
 import { useIsCompact } from '@/lib/useMediaQuery'
+import { DataTable, type Column } from '@/components/ui/DataTable'
 
 const STORAGE_KEYS = {
   monthlyContribution: 'forecast.monthlyContribution',
@@ -20,6 +21,46 @@ function readNumber(key: string, fallback: number, min: number, max: number): nu
   if (!isFinite(val) || isNaN(val) || val < min || val > max) return fallback
   return val
 }
+
+/** The projection table's four columns, described once for both renderings. */
+const projectionColumns = (
+  curSym: string
+): Column<{ year: number; futureValue: number; totalContributions: number; investmentGains: number }>[] => [
+  {
+    key: 'horizon',
+    header: 'Time Horizon',
+    shortHeader: 'Horizon',
+    mobile: 'title',
+    cellClassName: 'font-medium',
+    cell: (p) => `${p.year} ${p.year === 1 ? 'Year' : 'Years'}`,
+  },
+  {
+    key: 'value',
+    header: 'Portfolio Value',
+    shortHeader: 'Portfolio value',
+    align: 'right',
+    mobile: 'value',
+    tone: () => 'text-green-600 dark:text-green-400',
+    cellClassName: 'font-semibold',
+    cell: (p) => `${curSym}${p.futureValue.toLocaleString()}`,
+  },
+  {
+    key: 'gains',
+    header: 'Investment Gains',
+    shortHeader: 'Investment gains',
+    align: 'right',
+    mobile: 'delta',
+    tone: () => 'text-blue-600 dark:text-blue-400',
+    cell: (p) => `${curSym}${p.investmentGains.toLocaleString()}`,
+  },
+  {
+    key: 'contributions',
+    header: 'Total Contributions',
+    shortHeader: 'Total contributions',
+    align: 'right',
+    cell: (p) => `${curSym}${p.totalContributions.toLocaleString()}`,
+  },
+]
 
 export function ForecastTab() {
   const curSym = useCurrencySymbol()
@@ -387,34 +428,13 @@ export function ForecastTab() {
           <CardDescription>Portfolio growth milestones</CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b text-sm text-muted-foreground">
-                  <th className="text-left pb-3 font-medium">Time Horizon</th>
-                  <th className="text-right pb-3 font-medium">Portfolio Value</th>
-                  <th className="text-right pb-3 font-medium">Total Contributions</th>
-                  <th className="text-right pb-3 font-medium">Investment Gains</th>
-                </tr>
-              </thead>
-              <tbody>
-                {projections.map((proj) => (
-                  <tr key={proj.year} className="border-b">
-                    <td className="py-3 font-medium">{proj.year} {proj.year === 1 ? 'Year' : 'Years'}</td>
-                    <td className="py-3 text-right tabular-nums font-semibold text-green-600 dark:text-green-400">
-                      {curSym}{proj.futureValue.toLocaleString()}
-                    </td>
-                    <td className="py-3 text-right tabular-nums">
-                      {curSym}{proj.totalContributions.toLocaleString()}
-                    </td>
-                    <td className="py-3 text-right tabular-nums text-blue-600 dark:text-blue-400">
-                      {curSym}{proj.investmentGains.toLocaleString()}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <DataTable
+            rows={projections}
+            columns={projectionColumns(curSym)}
+            getRowKey={(proj) => proj.year}
+            label="Projection by time horizon"
+            density="comfortable"
+          />
         </CardContent>
       </Card>
 

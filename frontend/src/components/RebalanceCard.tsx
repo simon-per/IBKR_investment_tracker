@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Card, CardContent } from '@/components/ui/card'
 import { CollapsibleCardHeader } from '@/components/ui/CollapsibleCardHeader'
-import { ScrollableTable } from '@/components/ui/ScrollableTable'
+import { DataTable, type Column } from '@/components/ui/DataTable'
 import { useCurrencySymbol } from '@/lib/CurrencyContext'
 import {
   DEFAULT_BAND_PP,
@@ -121,6 +121,94 @@ export function RebalanceCard({ positions, isLoading, isError }: RebalanceCardPr
     setTargets(next)
   }
 
+  const columns = useMemo<Column<(typeof sorted)[number]>[]>(
+    () => [
+      {
+        key: 'position',
+        header: 'Position',
+        shortHeader: 'Position',
+        mobile: 'title',
+        cell: (row, view) =>
+          view === 'table' ? (
+            <>
+              <span className="font-medium">{row.symbol}</span>
+              <span className="block text-xs text-muted-foreground">
+                {row.unpriced ? 'No cached price' : row.description}
+              </span>
+            </>
+          ) : (
+            row.symbol
+          ),
+      },
+      {
+        key: 'description',
+        header: 'Description',
+        shortHeader: 'Description',
+        desktop: 'hide',
+        mobile: 'meta',
+        cell: (row) => (row.unpriced ? 'No cached price' : row.description),
+      },
+      {
+        key: 'value',
+        header: 'Value',
+        shortHeader: 'Value',
+        align: 'right',
+        mobile: 'value',
+        cell: (row) =>
+          row.unpriced ? '—' : `${curSym}${Math.round(row.marketValue).toLocaleString('en-US')}`,
+      },
+      {
+        key: 'drift',
+        header: 'Drift',
+        shortHeader: 'Drift',
+        align: 'right',
+        mobile: 'delta',
+        tone: (row) => driftClass(row),
+        cell: (row) => signedPp(row.driftPp),
+      },
+      {
+        key: 'current',
+        header: 'Current',
+        shortHeader: 'Current',
+        align: 'right',
+        cell: (row) => pct(row.currentPct),
+      },
+      {
+        key: 'target',
+        header: 'Target',
+        shortHeader: 'Target',
+        align: 'right',
+        // The editable cell. One definition, so the accessible name and the clearing
+        // behaviour cannot differ between the table and the card.
+        cell: (row) => (
+          <input
+            type="number"
+            min={0}
+            max={100}
+            step={0.1}
+            value={row.targetPct ?? ''}
+            onChange={(e) => setTarget(row.securityId, e.target.value)}
+            placeholder="—"
+            className="w-20 rounded border bg-background px-2 py-1 text-right tabular-nums"
+            aria-label={`Target weight for ${row.symbol}`}
+          />
+        ),
+      },
+      {
+        key: 'trade',
+        header: 'Trade to close',
+        shortHeader: 'Trade to close',
+        align: 'right',
+        cell: (row) =>
+          row.tradeValue === null
+            ? '—'
+            : `${row.tradeValue > 0 ? '+' : '−'}${curSym}${Math.round(Math.abs(row.tradeValue)).toLocaleString('en-US')}`,
+      },
+    ],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [curSym]
+  )
+
   const shortfall = targetShortfallPp(plan)
   const hasTargets = Object.keys(targets).length > 0
   /**
@@ -228,57 +316,13 @@ export function RebalanceCard({ positions, isLoading, isError }: RebalanceCardPr
                 </p>
               )}
 
-              <ScrollableTable label="Target allocation and drift by position">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b text-left text-muted-foreground">
-                      <th scope="col" className="py-2 pr-4 font-medium">Position</th>
-                      <th scope="col" className="py-2 pr-4 text-right font-medium">Value</th>
-                      <th scope="col" className="py-2 pr-4 text-right font-medium">Current</th>
-                      <th scope="col" className="py-2 pr-4 text-right font-medium">Target</th>
-                      <th scope="col" className="py-2 pr-4 text-right font-medium">Drift</th>
-                      <th scope="col" className="py-2 text-right font-medium">Trade to close</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {sorted.map((row) => (
-                      <tr key={row.securityId} className="border-b last:border-0">
-                        <td className="py-2 pr-4">
-                          <span className="font-medium">{row.symbol}</span>
-                          <span className="block text-xs text-muted-foreground">
-                            {row.unpriced ? 'No cached price' : row.description}
-                          </span>
-                        </td>
-                        <td className="py-2 pr-4 text-right tabular-nums">
-                          {row.unpriced ? '—' : `${curSym}${Math.round(row.marketValue).toLocaleString('en-US')}`}
-                        </td>
-                        <td className="py-2 pr-4 text-right tabular-nums">{pct(row.currentPct)}</td>
-                        <td className="py-2 pr-4 text-right">
-                          <input
-                            type="number"
-                            min={0}
-                            max={100}
-                            step={0.1}
-                            value={row.targetPct ?? ''}
-                            onChange={(e) => setTarget(row.securityId, e.target.value)}
-                            placeholder="—"
-                            className="w-20 rounded border bg-background px-2 py-1 text-right tabular-nums"
-                            aria-label={`Target weight for ${row.symbol}`}
-                          />
-                        </td>
-                        <td className={`py-2 pr-4 text-right tabular-nums ${driftClass(row)}`}>
-                          {signedPp(row.driftPp)}
-                        </td>
-                        <td className="py-2 text-right tabular-nums">
-                          {row.tradeValue === null
-                            ? '—'
-                            : `${row.tradeValue > 0 ? '+' : '−'}${curSym}${Math.round(Math.abs(row.tradeValue)).toLocaleString('en-US')}`}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </ScrollableTable>
+              <DataTable
+                rows={sorted}
+                columns={columns}
+                getRowKey={(row) => row.securityId}
+                label="Target allocation and drift by position"
+                density="normal"
+              />
               <p className="text-xs text-muted-foreground">
                 Drift is in percentage points of the whole portfolio. A blank target means the
                 position is unmanaged and is never advised on — it is not read as a target of

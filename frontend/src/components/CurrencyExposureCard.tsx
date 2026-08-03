@@ -93,8 +93,17 @@ export function CurrencyExposureCard({
                 </p>
               )}
 
+              {/* The one table in the app that stays a table on a phone.
+                  Every other one became a card list because it had an identity column
+                  to promote and a headline figure to lead with; a currency breakdown
+                  has neither — five short rows of five naturally narrow columns, where
+                  the comparison *between* rows is the whole point and stacking them
+                  into cards would destroy it. What it gains is a designed minimum
+                  width, so the browser scrolls it rather than squeezing every column
+                  to min-content, which is what made ScrollableTable's edge fades
+                  truthful everywhere else. */}
               <ScrollableTable label="Portfolio value by quote currency">
-                <table className="w-full text-sm">
+                <table className="w-full min-w-[22rem] text-sm">
                   <thead>
                     <tr className="border-b text-left text-muted-foreground">
                       <th scope="col" className="py-2 pr-4 font-medium">Currency</th>
