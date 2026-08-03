@@ -1,8 +1,8 @@
 # Working state
 
-**Last updated: 2026-08-03 — the UI is mobile-friendly: every table renders as a card list on a
-phone, the page no longer scrolls sideways on any tab, and `e2e/mobile.mjs` now measures it. Not yet
-deployed — see *Needs a human*.**
+**Last updated: 2026-08-03 — the UI is mobile-friendly and live: every table renders as a card list
+on a phone, the page no longer scrolls sideways on any tab, and `e2e/mobile.mjs` measures it (45/45
+against production). Nothing is outstanding on the deploy side.**
 
 `CLAUDE.md` is the durable guide — architecture, invariants, and the rules that were each a bug
 first. **This file is the perishable half**: where the work actually stands, what is known-broken,
@@ -31,23 +31,6 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
   Note the scripts define `$k`/`$h` shorthand *inside one session*; pasting a later command into a
   fresh shell silently passes empty strings and `scp`/`ssh` print usage. Use literal paths, or
   re-run the script.
-
-- **Reinstall `ops/auto-deploy.sh` on the VPS.** Its `SYNC_HOURS` was wrong and is now
-  fixed in the repo — but `deploy.sh` does not touch `/root/auto-deploy.sh`, so the running
-  copy is still the broken one until someone copies it across. Until then, deploys are
-  unguarded at 00:00 and 06:00 Berlin.
-
-  ```bash
-  scp -i ~/.ssh/id_ed25519_hostinger ops/auto-deploy.sh root@portfolio.srv1211053.hstgr.cloud:/root/auto-deploy.sh
-  ssh -i ~/.ssh/id_ed25519_hostinger root@portfolio.srv1211053.hstgr.cloud 'chmod +x /root/auto-deploy.sh && grep SYNC_HOURS= /root/auto-deploy.sh'
-  ```
-
-  The guard was written on 2026-07-31, the same day the schedule moved 13:00/20:00 →
-  00:00/06:00, and it kept the **old** pair — so it guarded two slots that no longer run
-  and left the two overnight IBKR slots guarded by nothing. The wrong half of the day.
-  A shell script on the VPS is invisible to the application, so nothing could catch it at
-  runtime; `tests/test_deploy_guard_hours.py` now reads the file and fails the suite if
-  the two ever disagree again.
 
 - **Rotate the IBKR Flex token.** It travelled as a `t=` URL parameter into `sync_runs.message` and
   was served by the public `/api/scheduler/history` until the 2026-07-28 scrub. `app/redact.py` now
@@ -230,9 +213,11 @@ What landed, and why each was worth doing:
   CSP had already been verified against the real build (see *Watch after the first deploy*), and
   re-running it there passes 4/4 — but the reusable script was measuring Vite's HMR transport.
 
-## Shipped 2026-08-03 — mobile layout — NOT YET DEPLOYED
+## Shipped 2026-08-03 — mobile layout — deployed and verified on production
 
-Eight commits, `origin/main..main`. The app is built to 390x844 now.
+Live as `c81d883`. The app is built to 390x844 now, and the checks below were re-run against
+production rather than only against the local stack — the local DB has null prices, so it cannot
+exercise the shapes that actually break.
 
 `e2e/mobile.mjs` is the new check and the reason to trust the rest: 45/45, zero horizontal overflow
 on all eight tabs. It went 36/45 on its first run against the then-current tree, naming
