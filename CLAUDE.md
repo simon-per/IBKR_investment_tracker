@@ -1212,6 +1212,71 @@ Tests: `src/lib/portfolioKpis.test.ts`, `src/lib/rebalance.test.ts`,
 
 ---
 
+## The mobile layout — one description, two renderings
+
+The app is built to work at **390x844**, and the rule that keeps it that way is that a table and its
+phone equivalent come from **one** `Column[]`, not two hand-written trees.
+
+`ui/DataTable.tsx` renders a real `<table>` inside `ScrollableTable` at `>=sm` and a card list below
+it, from the same descriptors. Thirteen tables times two renderings would be twenty-six places a
+column can be added to one and not the other — the dominant failure mode above, in its worst form:
+a diverging calculation eventually produces a number someone notices, whereas a column missing from
+the phone produces *nothing at all*, on a device the author is not looking at. So `mobile` defaults
+to `'detail'` (a new column reaches the phone unless someone explicitly hides it), `cell` takes the
+view it is rendering into rather than being duplicated, and two test files hold the line:
+`DataTable.test.tsx` drives both modes from one fixture, and `tableFamily.test.tsx` pins the
+conventions across column sets plus a source scan for any raw `<table>` outside `ui/`.
+
+**It never owns sort state.** The three sorting tables have genuinely bespoke comparators — nulls-last
+over a string|number union, a rating consensus through a score table, a memoised portfolio total —
+and pulling them in would need a `sortValue` per column, a fourth thing to keep in step with `cell`.
+Rows arrive sorted. The contract every table already implemented and nothing stated: `onSort(active)`
+flips direction, which is what makes the phone's single direction button correct.
+
+Three tables deliberately stay tables, each argued in its own file: `CurrencyExposureCard` (the
+comparison *between* rows is the point, and there is no identity column to promote), and the two
+12-month x N-year matrices (`MonthlyReturnsHeatmap`, `DividendSummary`). They get a designed
+`min-w-*` instead, because `ScrollableTable` applies none — which is why eighteen columns were being
+*squeezed to min-content* rather than scrolled, and why its edge fades were describing a problem they
+did not cause.
+
+**Four things here were each a bug first:**
+
+- **`justify-center` on a flex overflow container hides its leading items.** A centred row wider than
+  its scroller overflows on *both* sides and `scrollLeft` cannot go negative, so the first tab sat
+  ~150px off the left edge, permanently untappable. The tab strip is `justify-start` below `sm`.
+- **A grid item defaults to `min-width: auto`** and so refuses to shrink below its content's
+  min-content width. One wide table made a single-column track 392px inside a 358px page. The track
+  yields, not the card: `[&>*]:min-w-0` on the paired grids.
+- **A responsive base class loses to nothing at `>=640px`.** `p-4 sm:p-6` on `Card` would put
+  `sm:p-6` inside a media query, where it beats a plain call-site `p-0` — and sixteen KPI cards pass
+  `text-sm` to `CardTitle`, fourteen sites override card padding. Hence `--card-padding` and
+  `--card-title-size` as custom properties, in the bracket form (`p-[var(...)]`) so tailwind-merge
+  still classifies them and a call site still wins.
+- **`useMediaQuery`'s no-`matchMedia` fallback is desktop, and that is an invariant.** jsdom
+  implements neither `matchMedia` nor `ResizeObserver` nor `scrollIntoView`. Falling back to desktop
+  is what lets every pre-existing component test keep seeing the `<table>` it was written against,
+  needs no vitest setup file, and keeps `e2e/a11y.mjs`'s `aria-sort` count non-zero. Flip it and two
+  component tests plus an e2e check fail on day one.
+
+`lib/breakpoints.ts` holds the two boundaries as numbers because a Recharts axis width is a prop and
+a card list is a different DOM tree — neither is expressible as a `sm:` utility. Everything that
+*can* stay in CSS does. `breakpoints.test.ts` pins those constants against Tailwind's own scale and
+fails if `tailwind.config.js` ever gains a `screens` override, since one boundary written down in two
+languages is the same failure mode again.
+
+**`e2e/mobile.mjs` is the only thing that can see this class of bug** — horizontal overflow is a
+property of the assembled page at a real width, and jsdom loads no CSS. Read its docblock before
+"fixing" an overflow: `body { overflow-x: hidden }` clips rather than fixes, kills `position: sticky`,
+and makes the check pass vacuously. Two assertions are paired specifically to catch that.
+
+Chart heights are CSS on a wrapper plus `height="100%"`, hoisted to a module constant per file so the
+chart and its loading/error/empty states cannot drift. `PerformanceAttribution` is the exception and
+keeps a numeric height: its height is *data*-driven, one row per security, so a CSS height would
+squash thirty bars into 240px.
+
+---
+
 ## Deployment
 
 **Push to `main` → deployed automatically within 10 minutes.** `/root/auto-deploy.sh` on the VPS (root

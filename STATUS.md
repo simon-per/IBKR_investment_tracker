@@ -1,7 +1,8 @@
 # Working state
 
-**Last updated: 2026-08-01 — the overnight batch is pushed and live; verifying it found the
-scheduler job store had never once opened in production. Fixed, deployed and confirmed.**
+**Last updated: 2026-08-03 — the UI is mobile-friendly: every table renders as a card list on a
+phone, the page no longer scrolls sideways on any tab, and `e2e/mobile.mjs` now measures it. Not yet
+deployed — see *Needs a human*.**
 
 `CLAUDE.md` is the durable guide — architecture, invariants, and the rules that were each a bug
 first. **This file is the perishable half**: where the work actually stands, what is known-broken,
@@ -84,8 +85,6 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 - **"Next 12 months" stays visible with the Forecast toggle off**, because that card is inherently a
   projection and hiding it would collapse the four-up grid. The per-year panel *does* respect the
   toggle, since it is the one surface that mixes measured and projected into one bar.
-- **The monthly chart's tick labels are cramped at 390 px** (twelve months, no room). Legible, not
-  pretty.
 - **Accumulating ETFs correctly show no dividends** — DBPG, EMIM, IWDA, SXR8, VWCE, XAIX, XNAS.
   Verified, not assumed. **Don't "fix" their absence.**
 - **Activity's Market Value delta and the chart's "Value change" are the same number**, shown twice
@@ -214,6 +213,40 @@ What landed, and why each was worth doing:
   CSP had already been verified against the real build (see *Watch after the first deploy*), and
   re-running it there passes 4/4 — but the reusable script was measuring Vite's HMR transport.
 
+## Shipped 2026-08-03 — mobile layout — NOT YET DEPLOYED
+
+Eight commits, `origin/main..main`. The app is built to 390x844 now.
+
+`e2e/mobile.mjs` is the new check and the reason to trust the rest: 45/45, zero horizontal overflow
+on all eight tabs. It went 36/45 on its first run against the then-current tree, naming
+`div.flex.items-center.gap-2 w=493` — the nine chart range buttons in a 324px card, 204px of document
+overflow. Everything else was verified at both viewports: unit 268 → 308, `a11y` 17/17, `sweep`
+16/16, `errors` 15/15, `csp` 4/4, `chunks` 33/33 (so the code-split lazy panels still defer).
+
+Every table below `sm` is a card list — symbol and description left, headline figure and delta right,
+the rest as label/value pairs behind a disclosure — rendered from the **same** `Column[]` as the
+desktop table. See CLAUDE.md *The mobile layout* for the rules; what follows is only what that does
+not say.
+
+**Two bugs found that were not about width at all:**
+
+- The **Performance tab was permanently untappable on a phone**. `TabsList` is `justify-center`, and
+  a centred flex row wider than its scroller overflows on both sides with no way to scroll left.
+  Invisible to every check that opens at 1440px.
+- **`mobile.mjs`'s own sticky assertion was vacuous** as first written — a non-sticky strip scrolls
+  off the top and reports a large *negative* offset, which `<= 1` accepts.
+
+**Worth knowing before the deploy:**
+
+- **One deliberate desktop change**: `PortfolioValueChart`'s X axis no longer labels only the 1st of
+  a month, so ticks will not land on month firsts. The old rule defeated recharts' own thinning
+  (which drops ticks by *index*), leaving up to 24 full-length labels with empty strings between them.
+- **Cell padding is unified** at `px-2`/`px-3` via `density`, so a few desktop tables shift by a few
+  pixels of column gap. Deliberate; eyeball it if it looks off.
+- **KPI cards are two-up below `md`** with Market Value as a full-width hero, and their values are
+  `text-lg sm:text-2xl`. A 2-up cell has a 141px interior and `text-2xl` renders a seven-figure
+  currency string at ~182px.
+
 ## Watch after the next deploy
 
 - **The one thing still unobserved: that a *missed* slot is actually recovered.** The store is now
@@ -290,6 +323,11 @@ were deliberately **not** called — both can reach Yahoo on a cache miss.
 
 Rough priority. The auto-deploy install moved to *Needs a human* — it is the last deploy step.
 
+0. **Extract a shared `<KpiCard>`.** The sixteen hand-rolled KPI cards across
+   `PortfolioSummaryCards` / `PerformanceMetricsCards` / `RiskMetricsCards`, plus `DividendKpiCards`'
+   `Tile`, are four implementations of one job. Making the values responsive was sixteen mechanical
+   edits that should have been one. Cheap, and the dominant-failure-mode section points straight at it.
+
 1. **Fold `PRE_OWNERSHIP_HISTORY_YEARS` pruning into a scheduled job — reassess before building.**
    `prune_empty_dividends.py` is a manual CLI and the ingest window already prevents new junk, so
    there is very little left for a scheduled run to find. Investigating this on 2026-07-31 turned up
@@ -335,6 +373,9 @@ Each of these cost real time at least once.
   0.00.** So the currency-exposure card reports *no priced positions* and the rebalance panel shows 29
   unpriced rows — both correct, and both easy to mistake for a broken feature. Anything that depends on
   a valued portfolio can only be browser-verified against a production snapshot.
+- **`ResizeObserver` is stubbed inline in three test files now.** Consolidating it is a real
+  follow-up; until then copy the block from `RebalanceCard.test.tsx`, and remember a jsdom test that
+  renders anything through `DataTable` needs it because `ScrollableTable` measures overflow.
 - **uvicorn can die mid-Playwright-run with `OSError: [WinError 64] The specified network name is no
   longer available`** — a Windows asyncio-proactor reaction to an abruptly closed connection, not a code
   fault. The e2e script then reports `ERR_CONNECTION_REFUSED` and a shrunken panel, which reads exactly
@@ -368,6 +409,12 @@ detail; this exists so the next session knows what just moved without reading it
 confirmed) and gets deleted once nothing in it is outstanding: these lines are permanent, so don't
 "tidy up" the overlap by deleting the wrong one.
 
+- **2026-08-03** — made the UI mobile-friendly at 390x844. One `Column[]` per table now renders as a
+  desktop table or a getquin-style card list (`ui/DataTable.tsx`), so the two cannot drift; the shell,
+  nav, charts and KPI grids reflow; `e2e/mobile.mjs` measures it at 45/45. Found two bugs that were
+  not about width — the Performance tab was untappable on a phone (`justify-center` in a flex
+  scroller hides its leading items) and a Forecast projections table nobody had noticed. Suites
+  268 → 308; every e2e script green bar `ledger`. Not deployed.
 - **2026-08-01** — pushed the overnight batch on request; it auto-deployed at 07:32 UTC and verified
   clean. Reading the container logs to close out the "watch after the next deploy" list found the
   **persistent scheduler job store had never once opened**: the compose bind mount named the `.db`
@@ -394,5 +441,3 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
   poisoned estimates purged on prod, mapping changes now retire the rows they produced, source-aware
   dividend key, provenance detector, batched price/lot writes, forecast/yield qualifiers. Suite
   313 → 357, deployed and verified. Lost the 08:00 full_sync to a deploy landing in the slot.
-- **2026-07-29** — correctness sweep (16 fixes) plus dividend growth (MoM/YoY) and the DividendsTab
-  rebuild; scheduler gated behind `SCHEDULER_ENABLED`; STATUS.md split out of CLAUDE.md.

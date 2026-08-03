@@ -1,8 +1,8 @@
 # Browser checks
 
-Six Playwright scripts covering what unit tests structurally cannot see: keyboard and ARIA on the
-real page, the production CSP, the shape of the built bundle, and how the UI behaves when the
-backend is down.
+Seven Playwright scripts covering what unit tests structurally cannot see: keyboard and ARIA on the
+real page, the production CSP, the shape of the built bundle, how the UI behaves when the backend is
+down, and whether the page fits a phone.
 
 These earned their place. The prod-snapshot + browser pass they came from found **three defects that
 442 passing backend tests did not** — trades converted with only the EUR→base factor (a CAD realized
@@ -36,6 +36,7 @@ daily jobs against the live Flex token and Yahoo.
 | `npm run csp` | `vite preview` on 4173 (**built output**, not the dev server) |
 | `npm run ledger` | dev server + backend on a **production snapshot** |
 | `npm run errors` | dev server, backend **deliberately stopped** |
+| `npm run mobile` | dev server **+ backend with data**, at 390x844 |
 | `npm run chunks` | `npm run build && npx vite preview --port 4173` in `frontend/`; no backend |
 
 `BASE` and `PREVIEW` override the URLs.
@@ -49,6 +50,22 @@ Any populated database is enough here (unlike `ledger.mjs` below) — it needs p
 ones. **`backend/portfolio.db` is gitignored and untracked**, so a fresh clone has none and the backend
 creates an empty one on first start; `a11y` then fails the `aria-sort` and target-input checks for want
 of rows, which looks exactly like a regression. Point `DATABASE_URL` at a populated copy first.
+
+`mobile.mjs` is the phone check, and horizontal overflow is the reason it exists: it is a property of
+the assembled page at a real width, jsdom loads no CSS so nothing under `frontend/src/` can observe
+it, and every other script here opens at 1440px or wider. Per tab it asserts no horizontal page
+scroll, **names the offending element and its width** when there is one, that charts fit their box,
+and no console errors; then tap targets against WCAG 2.2's 24px floor and that the tab strip stays
+pinned.
+
+Two of its assertions are deliberately paired. The lazy way to stop the page scrolling sideways is
+`body { overflow-x: hidden }` — which does not remove an overflow but clips it, and which forces the
+block axis to `overflow-y: auto` and so kills `position: sticky`. That shortcut passes "no horizontal
+scroll" and fails "strip stays pinned". Do not satisfy one without reading the other.
+
+**It passes vacuously with no data**, exactly like `a11y` does: every panel is then an empty state,
+and an empty state cannot overflow. Point `DATABASE_URL` at a populated copy first. `SCREENSHOT=1`
+writes `mobile-<tab>.png` beside the script.
 
 `ledger.mjs` asserts against real account shapes — transfers badged *not money in*, fractional
 quantities, a deposit row. The local `backend/portfolio.db` predates trades, cash flows and the IBKR

@@ -205,7 +205,9 @@ export function RebalanceCard({ positions, isLoading, isError }: RebalanceCardPr
             : `${row.tradeValue > 0 ? '+' : '−'}${curSym}${Math.round(Math.abs(row.tradeValue)).toLocaleString('en-US')}`,
       },
     ],
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // `setTarget` is deliberately out of the deps: it only ever calls setTargets with a
+    // functional update, so a stale closure over it cannot go wrong, and including it
+    // would rebuild every column on each keystroke.
     [curSym]
   )
 

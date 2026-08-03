@@ -260,7 +260,7 @@ describe('the hint glossary', () => {
   })
 
   it('renders no glossary button when no column defines a hint', () => {
-    const columns = COLUMNS.map(({ hint: _hint, ...c }) => c)
+    const columns = COLUMNS.map(c => ({ ...c, hint: undefined }))
     render(<DataTable rows={ROWS} columns={columns} getRowKey={r => r.id} label="t" mode="cards" />)
     expect(screen.queryByLabelText(/columns mean/)).toBeNull()
   })

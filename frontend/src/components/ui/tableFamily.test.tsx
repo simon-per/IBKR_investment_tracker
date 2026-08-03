@@ -23,8 +23,7 @@ import { watchlistColumns } from '../watchlistColumns'
  * a stub that throws on null tests the stub, not the column.
  */
 const money = (n: number) => `€${n.toFixed(2)}`
-const moneyOrDash = (value: number | null, _currency: string | null = null) =>
-  value === null ? '-' : `€${value.toFixed(2)}`
+const moneyOrDash = (value: number | null) => (value === null ? '-' : `€${value.toFixed(2)}`)
 
 /**
  * Only the column sets exported as factories can be checked. The four tax tables and
