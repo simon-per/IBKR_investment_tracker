@@ -526,6 +526,16 @@ Each of these cost real time at least once.
   warn — `TZ=America/New_York` prints the same time — so any script reasoning about the Berlin sync
   slots from the shell clock is two hours out in summer, in the direction that permits a collision.
   Use Python's `zoneinfo` (`ops/finish-deploy.sh` has the helper).
+- **Renaming the working-copy directory breaks `backend/venv`, and the documented test command is the
+  one thing that hides it.** `activate`/`activate.bat` hardcode `VIRTUAL_ENV` and every `.exe`
+  console-script shim embeds the interpreter's absolute path, so after a rename
+  `venv\Scripts\activate && uvicorn ...` and a bare `alembic upgrade head` fail while
+  `./venv/Scripts/python.exe -m pytest` keeps passing — python.exe resolves its own prefix, the shims
+  do not. Recreate rather than patch, and **`pip freeze` first**: `requirements.txt` floats
+  `yfinance`, `lxml` and `pyxirr`, so reinstalling from it quietly drifts the local env (the frozen
+  set here was `yfinance==1.1.0`, i.e. exactly the documented floor). Then
+  `python -m venv venv --clear` and install the freeze. A plain `python -m venv venv` regenerates
+  `activate` and leaves the shims broken, which is the worst of the three states.
 
 ## Recent sessions (last 5)
 
