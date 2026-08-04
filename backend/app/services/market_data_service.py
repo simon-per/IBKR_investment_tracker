@@ -641,7 +641,7 @@ class MarketDataService:
                 count = await self.sync_security_prices(security, days_back=days_back)
                 total_prices += count
                 processed += 1
-                logger.info(f"Fetched {count} price points for {security.symbol}")
+                logger.info(f"Wrote {count} price rows for {security.symbol}")
             except Exception as e:
                 error_msg = f"Failed to fetch prices for {security.symbol}: {str(e)}"
                 logger.error(error_msg)
@@ -765,17 +765,15 @@ class MarketDataService:
             days_back: How many days back to fetch (default: 730 = 2 years)
 
         Returns:
-            Number of new price records fetched
+            Number of price rows written — new plus provisional ones restated.
+
+            This used to return the number of rows *in the window*, which is what made
+            a pass report `prices_fetched: 234` for ~80 actual writes, and it also cost
+            a second full-range SELECT per security to compute a number nobody could
+            act on. The docstring already promised writes; now it tells the truth. A
+            warm cache legitimately returns 0 and no caller treats that as a failure.
         """
         end_date = date.today()
         start_date = end_date - timedelta(days=days_back)
 
-        # Fetch and cache all prices in range
-        await self.fetch_and_cache_prices(security, start_date, end_date)
-
-        # Count how many prices we have for this security
-        prices = await self.market_price_repo.get_price_range(
-            security.id, start_date, end_date
-        )
-
-        return len(prices)
+        return await self.fetch_and_cache_prices(security, start_date, end_date)
