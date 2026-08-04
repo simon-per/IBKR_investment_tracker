@@ -1,5 +1,6 @@
 import { TrendingUp, TrendingDown, Wallet, Target } from 'lucide-react'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardContent } from '@/components/ui/card'
+import { KpiCard, KpiCardSkeleton } from '@/components/ui/KpiCard'
 import { DeltaChip } from './DeltaChip'
 import type { PortfolioSummary } from '@/lib/api'
 import { formatPercent } from '@/lib/utils'
@@ -25,16 +26,7 @@ export function PortfolioSummaryCards({
   if (isLoading) {
     return (
       <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-5">
-        {[1, 2, 3, 4, 5].map((i) => (
-          <Card key={i}>
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Loading...</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="h-8 bg-muted animate-pulse rounded" />
-            </CardContent>
-          </Card>
-        ))}
+        <KpiCardSkeleton count={5} />
       </div>
     )
   }
@@ -72,100 +64,62 @@ export function PortfolioSummaryCards({
       {/* The hero. Market Value spans both columns on a phone so it keeps the full
           324px and its `text-2xl`, and the other four tile underneath — which is what
           makes the top of the screen read like a portfolio rather than a dashboard. */}
-      <Card className="col-span-2 lg:col-span-1">
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <CardTitle className="text-sm font-medium">Market Value</CardTitle>
-          <Wallet className="h-4 w-4 text-muted-foreground" />
-        </CardHeader>
-        <CardContent>
-          <div className="text-2xl font-bold tabular-nums">
-            {formatCurrency(summary.total_market_value_eur)}
+      <KpiCard
+        hero
+        label="Market Value"
+        icon={<Wallet className="h-4 w-4 text-muted-foreground" />}
+        value={formatCurrency(summary.total_market_value_eur)}
+        // `footer`, not `sub`: the chip carries its own colours and must not inherit the
+        // muted footnote class.
+        footer={periodChangePct != null ? (
+          <div className="flex items-center gap-1.5">
+            {/* flatBand 0: unlike dividend income, every move in portfolio value is
+                signal — muting a 3% quarter as "flat" would understate it. */}
+            <DeltaChip
+              pct={periodChangePct}
+              flatBand={0}
+              label={periodLabel ? `over ${periodLabel}` : undefined}
+              title="Change in total holdings value over the selected chart range. Includes money added — see Period Gain for the return."
+            />
           </div>
-          {periodChangePct != null ? (
-            <div className="flex items-center gap-1.5">
-              {/* flatBand 0: unlike dividend income, every move in portfolio value is
-                  signal — muting a 3% quarter as "flat" would understate it. */}
-              <DeltaChip
-                pct={periodChangePct}
-                flatBand={0}
-                label={periodLabel ? `over ${periodLabel}` : undefined}
-                title="Change in total holdings value over the selected chart range. Includes money added — see Period Gain for the return."
-              />
-            </div>
-          ) : (
-            <p className="text-xs text-muted-foreground">
-              Current portfolio value
-            </p>
-          )}
-        </CardContent>
-      </Card>
+        ) : undefined}
+        sub={periodChangePct != null ? undefined : 'Current portfolio value'}
+      />
 
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <CardTitle className="text-sm font-medium">Cost Basis</CardTitle>
-          <Target className="h-4 w-4 text-muted-foreground" />
-        </CardHeader>
-        <CardContent>
-          <div className="text-lg font-bold tabular-nums sm:text-2xl">
-            {formatCurrency(summary.total_cost_basis_eur)}
-          </div>
-          <p className="text-xs text-muted-foreground">
-            Total amount invested
-          </p>
-        </CardContent>
-      </Card>
+      <KpiCard
+        label="Cost Basis"
+        icon={<Target className="h-4 w-4 text-muted-foreground" />}
+        value={formatCurrency(summary.total_cost_basis_eur)}
+        sub="Total amount invested"
+      />
 
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <CardTitle className="text-sm font-medium">Unrealized Gain/Loss</CardTitle>
-          {isProfit ? (
-            <TrendingUp className="h-4 w-4 text-green-600" />
-          ) : (
-            <TrendingDown className="h-4 w-4 text-red-600" />
-          )}
-        </CardHeader>
-        <CardContent>
-          <div className={`text-lg font-bold tabular-nums sm:text-2xl ${isProfit ? 'text-green-600' : 'text-red-600'}`}>
-            {formatCurrency(summary.total_gain_loss_eur)}
-          </div>
-          <p className="text-xs text-muted-foreground">
-            {formatPercent(summary.total_gain_loss_percent)}
-          </p>
-        </CardContent>
-      </Card>
+      <KpiCard
+        label="Unrealized Gain/Loss"
+        icon={isProfit
+          ? <TrendingUp className="h-4 w-4 text-green-600" />
+          : <TrendingDown className="h-4 w-4 text-red-600" />}
+        value={formatCurrency(summary.total_gain_loss_eur)}
+        tone={isProfit ? 'positive' : 'negative'}
+        sub={formatPercent(summary.total_gain_loss_percent)}
+      />
 
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <CardTitle className="text-sm font-medium">Realized Gain/Loss</CardTitle>
-          {isRealizedProfit ? (
-            <TrendingUp className="h-4 w-4 text-green-600" />
-          ) : (
-            <TrendingDown className="h-4 w-4 text-red-600" />
-          )}
-        </CardHeader>
-        <CardContent>
-          <div className={`text-lg font-bold tabular-nums sm:text-2xl ${isRealizedProfit ? 'text-green-600' : 'text-red-600'}`}>
-            {formatCurrency(summary.total_realized_gain_loss_eur)}
-          </div>
-          <p className="text-xs text-muted-foreground">
-            {summary.num_closed_positions === 0
-              ? 'No closed positions yet'
-              : `From ${summary.num_closed_positions} closed position${summary.num_closed_positions === 1 ? '' : 's'}`}
-          </p>
-        </CardContent>
-      </Card>
+      <KpiCard
+        label="Realized Gain/Loss"
+        icon={isRealizedProfit
+          ? <TrendingUp className="h-4 w-4 text-green-600" />
+          : <TrendingDown className="h-4 w-4 text-red-600" />}
+        value={formatCurrency(summary.total_realized_gain_loss_eur)}
+        tone={isRealizedProfit ? 'positive' : 'negative'}
+        sub={summary.num_closed_positions === 0
+          ? 'No closed positions yet'
+          : `From ${summary.num_closed_positions} closed position${summary.num_closed_positions === 1 ? '' : 's'}`}
+      />
 
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <CardTitle className="text-sm font-medium">Positions</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="text-lg font-bold tabular-nums sm:text-2xl">{summary.num_positions}</div>
-          <p className="text-xs text-muted-foreground">
-            Unique securities held
-          </p>
-        </CardContent>
-      </Card>
+      <KpiCard
+        label="Positions"
+        value={summary.num_positions}
+        sub="Unique securities held"
+      />
     </div>
   )
 }

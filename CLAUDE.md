@@ -151,6 +151,7 @@ recomputes by hand is the one that is wrong. The known instances:
 | `_safe_float` | the watchlist rounded to 4dp, fundamentals did not — the same P/E read differently on two screens |
 | `sync_stale_*` | fundamentals unioned "missing" with "stale"; **analyst ratings took only "stale"**, so a new security could never be rated |
 | the market-data securities loop | the scheduled job gained a Yahoo rate-limit breaker on 2026-08-04; **`POST /api/market-data/sync` kept its own copy without one**, so the *public* path went on asking after a 429. Extracted to `MarketDataService.sync_securities` |
+| the KPI card | sixteen hand-written copies across three files, each with its own idea of what an absent value looks like (`—` in one file, `N/A` in another) — so making the values responsive was sixteen mechanical edits. Extracted to `ui/KpiCard.tsx` |
 
 **The lens that finds them**, and which found the last four: walk the AST for function names defined in
 more than one module, ignore trivial bodies, and read each cluster. Router-to-service pairs and

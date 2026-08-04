@@ -1,5 +1,5 @@
 import { TrendingUp, TrendingDown, Activity, Target, Shield, PieChart } from 'lucide-react'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { KpiCard, KpiCardSkeleton } from '@/components/ui/KpiCard'
 
 interface PerformanceMetricsCardsProps {
   metrics: {
@@ -20,16 +20,7 @@ export function PerformanceMetricsCards({ metrics, isLoading }: PerformanceMetri
   if (isLoading) {
     return (
       <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 lg:grid-cols-6">
-        {[1, 2, 3, 4, 5, 6].map((i) => (
-          <Card key={i}>
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Loading...</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="h-8 bg-muted animate-pulse rounded" />
-            </CardContent>
-          </Card>
-        ))}
+        <KpiCardSkeleton count={6} />
       </div>
     )
   }
@@ -43,115 +34,63 @@ export function PerformanceMetricsCards({ metrics, isLoading }: PerformanceMetri
 
   return (
     <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 lg:grid-cols-6">
-      {/* Annual Return (XIRR) */}
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <CardTitle className="text-sm font-medium">
-            {metrics.xirrMethod === 'simple_period' ? 'Period Return' : 'Annual Return (XIRR)'}
-          </CardTitle>
-          {isPositiveXIRR ? (
-            <TrendingUp className="h-4 w-4 text-green-600" />
-          ) : (
-            <TrendingDown className="h-4 w-4 text-red-600" />
-          )}
-        </CardHeader>
-        <CardContent>
-          {metrics.xirr !== null ? (
-            <div className={`text-lg font-bold tabular-nums sm:text-2xl ${isPositiveXIRR ? 'text-green-600' : 'text-red-600'}`}>
-              {isPositiveXIRR ? '+' : ''}{metrics.xirr.toFixed(2)}%
-            </div>
-          ) : (
-            <div className="text-lg font-bold tabular-nums sm:text-2xl text-muted-foreground">N/A</div>
-          )}
-          <p className="text-xs text-muted-foreground">
-            Money-weighted, adjusted for deposits
-          </p>
-        </CardContent>
-      </Card>
+      {/* Annual Return (XIRR). A window under 30 days reports simple_period instead, and
+          the label follows it rather than annualising a few days of noise. */}
+      <KpiCard
+        label={metrics.xirrMethod === 'simple_period' ? 'Period Return' : 'Annual Return (XIRR)'}
+        icon={isPositiveXIRR
+          ? <TrendingUp className="h-4 w-4 text-green-600" />
+          : <TrendingDown className="h-4 w-4 text-red-600" />}
+        value={metrics.xirr !== null
+          ? `${isPositiveXIRR ? '+' : ''}${metrics.xirr.toFixed(2)}%`
+          : null}
+        tone={isPositiveXIRR ? 'positive' : 'negative'}
+        sub="Money-weighted, adjusted for deposits"
+      />
 
-      {/* Max Drawdown */}
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <CardTitle className="text-sm font-medium">Max Drawdown</CardTitle>
-          <TrendingDown className="h-4 w-4 text-red-600" />
-        </CardHeader>
-        <CardContent>
-          <div className="text-lg font-bold tabular-nums sm:text-2xl text-red-600">
-            {metrics.maxDrawdown.toFixed(2)}%
-          </div>
-          <p className="text-xs text-muted-foreground">
-            Largest peak-to-trough decline
-          </p>
-        </CardContent>
-      </Card>
+      <KpiCard
+        label="Max Drawdown"
+        icon={<TrendingDown className="h-4 w-4 text-red-600" />}
+        value={`${metrics.maxDrawdown.toFixed(2)}%`}
+        tone="negative"
+        sub="Largest peak-to-trough decline"
+      />
 
-      {/* Sharpe Ratio */}
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <CardTitle className="text-sm font-medium">Sharpe Ratio</CardTitle>
-          <Activity className="h-4 w-4 text-muted-foreground" />
-        </CardHeader>
-        <CardContent>
-          <div className={`text-lg font-bold tabular-nums sm:text-2xl ${isPositiveSharpe ? 'text-green-600' : 'text-red-600'}`}>
-            {metrics.sharpeRatio.toFixed(2)}
-          </div>
-          <p className="text-xs text-muted-foreground">
-            Risk-adjusted return
-          </p>
-        </CardContent>
-      </Card>
+      <KpiCard
+        label="Sharpe Ratio"
+        icon={<Activity className="h-4 w-4 text-muted-foreground" />}
+        value={metrics.sharpeRatio.toFixed(2)}
+        tone={isPositiveSharpe ? 'positive' : 'negative'}
+        sub="Risk-adjusted return"
+      />
 
-      {/* Win Rate */}
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <CardTitle className="text-sm font-medium">Win Rate</CardTitle>
-          <Target className="h-4 w-4 text-muted-foreground" />
-        </CardHeader>
-        <CardContent>
-          <div className="text-lg font-bold tabular-nums sm:text-2xl">
-            {metrics.winRate.toFixed(1)}%
-          </div>
-          <p className="text-xs text-muted-foreground">
-            {metrics.profitablePositions} of {metrics.totalPositions} profitable
-          </p>
-        </CardContent>
-      </Card>
+      <KpiCard
+        label="Win Rate"
+        icon={<Target className="h-4 w-4 text-muted-foreground" />}
+        value={`${metrics.winRate.toFixed(1)}%`}
+        sub={`${metrics.profitablePositions} of ${metrics.totalPositions} profitable`}
+      />
 
-      {/* Calmar Ratio */}
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <CardTitle className="text-sm font-medium">Calmar Ratio</CardTitle>
-          <Shield className="h-4 w-4 text-muted-foreground" />
-        </CardHeader>
-        <CardContent>
-          {metrics.calmarRatio !== null ? (
-            <div className={`text-lg font-bold tabular-nums sm:text-2xl ${metrics.calmarRatio >= 1 ? 'text-green-600' : metrics.calmarRatio >= 0 ? 'text-yellow-600' : 'text-red-600'}`}>
-              {metrics.calmarRatio.toFixed(2)}
-            </div>
-          ) : (
-            <div className="text-lg font-bold tabular-nums sm:text-2xl text-muted-foreground">N/A</div>
-          )}
-          <p className="text-xs text-muted-foreground">
-            Return / drawdown
-          </p>
-        </CardContent>
-      </Card>
+      <KpiCard
+        label="Calmar Ratio"
+        icon={<Shield className="h-4 w-4 text-muted-foreground" />}
+        value={metrics.calmarRatio !== null ? metrics.calmarRatio.toFixed(2) : null}
+        tone={metrics.calmarRatio === null ? 'muted'
+          : metrics.calmarRatio >= 1 ? 'positive'
+          : metrics.calmarRatio >= 0 ? 'warning'
+          : 'negative'}
+        sub="Return / drawdown"
+      />
 
-      {/* Top 5 Concentration */}
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <CardTitle className="text-sm font-medium">Top 5 Weight</CardTitle>
-          <PieChart className="h-4 w-4 text-muted-foreground" />
-        </CardHeader>
-        <CardContent>
-          <div className={`text-lg font-bold tabular-nums sm:text-2xl ${metrics.top5Weight > 70 ? 'text-red-600' : metrics.top5Weight > 50 ? 'text-yellow-600' : 'text-green-600'}`}>
-            {metrics.top5Weight.toFixed(1)}%
-          </div>
-          <p className="text-xs text-muted-foreground">
-            Concentration risk
-          </p>
-        </CardContent>
-      </Card>
+      <KpiCard
+        label="Top 5 Weight"
+        icon={<PieChart className="h-4 w-4 text-muted-foreground" />}
+        value={`${metrics.top5Weight.toFixed(1)}%`}
+        tone={metrics.top5Weight > 70 ? 'negative'
+          : metrics.top5Weight > 50 ? 'warning'
+          : 'positive'}
+        sub="Concentration risk"
+      />
     </div>
   )
 }

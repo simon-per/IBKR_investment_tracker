@@ -1,5 +1,5 @@
 import { Activity, Gauge, Layers, Scale, TrendingDown } from 'lucide-react'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { KpiCard, KpiCardSkeleton } from '@/components/ui/KpiCard'
 
 /**
  * Beta needs a benchmark, and there are three separate reasons it can be
@@ -32,10 +32,12 @@ interface RiskMetricsCardsProps {
   isLoading?: boolean
 }
 
-/** A dash, not a zero — every absent metric here means "unknown", never "none". */
-function Absent() {
-  return <div className="text-lg font-bold tabular-nums sm:text-2xl text-muted-foreground">—</div>
-}
+/**
+ * A dash, not a zero — every absent metric here means "unknown", never "none". The rule
+ * now lives in `KpiCard`: passing `value={null}` renders it, so the four files that each
+ * had their own idea of an absent value (an em dash here, `N/A` in PerformanceMetrics)
+ * cannot drift again.
+ */
 
 /** `2026-03-14` → `14 Mar` without dragging a locale into it. */
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
@@ -50,16 +52,7 @@ export function RiskMetricsCards({ metrics, isLoading }: RiskMetricsCardsProps) 
   if (isLoading) {
     return (
       <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 lg:grid-cols-5">
-        {[1, 2, 3, 4, 5].map((i) => (
-          <Card key={i}>
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Loading...</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="h-8 bg-muted animate-pulse rounded" />
-            </CardContent>
-          </Card>
-        ))}
+        <KpiCardSkeleton count={5} />
       </div>
     )
   }
@@ -76,123 +69,68 @@ export function RiskMetricsCards({ metrics, isLoading }: RiskMetricsCardsProps) 
 
   return (
     <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 lg:grid-cols-5">
-      {/* Volatility */}
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <CardTitle className="text-sm font-medium">Volatility</CardTitle>
-          <Activity className="h-4 w-4 text-muted-foreground" />
-        </CardHeader>
-        <CardContent>
-          {metrics.volatilityPct !== null ? (
-            <div className="text-lg font-bold tabular-nums sm:text-2xl">{metrics.volatilityPct.toFixed(1)}%</div>
-          ) : (
-            <Absent />
-          )}
-          <p className="text-xs text-muted-foreground">
-            {metrics.volatilityPct !== null
-              ? 'Annualised, the risk Sharpe divides by'
-              : 'Not enough history in this range'}
-          </p>
-        </CardContent>
-      </Card>
+      <KpiCard
+        label="Volatility"
+        icon={<Activity className="h-4 w-4 text-muted-foreground" />}
+        value={metrics.volatilityPct !== null ? `${metrics.volatilityPct.toFixed(1)}%` : null}
+        sub={metrics.volatilityPct !== null
+          ? 'Annualised, the risk Sharpe divides by'
+          : 'Not enough history in this range'}
+      />
 
-      {/* Sortino */}
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <CardTitle className="text-sm font-medium">Sortino Ratio</CardTitle>
-          <Gauge className="h-4 w-4 text-muted-foreground" />
-        </CardHeader>
-        <CardContent>
-          {metrics.sortino !== null ? (
-            <div
-              className={`text-lg font-bold tabular-nums sm:text-2xl ${
-                metrics.sortino >= 1
-                  ? 'text-green-600'
-                  : metrics.sortino >= 0
-                    ? 'text-yellow-600'
-                    : 'text-red-600'
+      <KpiCard
+        label="Sortino Ratio"
+        icon={<Gauge className="h-4 w-4 text-muted-foreground" />}
+        value={metrics.sortino !== null ? metrics.sortino.toFixed(2) : null}
+        tone={metrics.sortino === null ? 'muted'
+          : metrics.sortino >= 1 ? 'positive'
+          : metrics.sortino >= 0 ? 'warning'
+          : 'negative'}
+        sub={metrics.sortino !== null
+          ? 'Return per unit of downside only'
+          : 'No down days to measure against'}
+      />
+
+      {/* Beta vs the primary benchmark. Three distinct reasons it can be absent, and the
+          footnote is what tells them apart — the value is a dash in all three. */}
+      <KpiCard
+        label="Beta"
+        icon={<Scale className="h-4 w-4 text-muted-foreground" />}
+        value={beta?.beta != null ? beta.beta.toFixed(2) : null}
+        sub={beta === null
+          ? 'Pick a benchmark to compare against'
+          : beta.beta === null
+            ? `Needs ${beta.minSampleDays} flow-free days (${beta.sampleDays} so far)`
+            : `vs ${beta.benchmarkName}${
+                beta.correlation !== null ? ` · r ${beta.correlation.toFixed(2)}` : ''
               }`}
-            >
-              {metrics.sortino.toFixed(2)}
-            </div>
-          ) : (
-            <Absent />
-          )}
-          <p className="text-xs text-muted-foreground">
-            {metrics.sortino !== null
-              ? 'Return per unit of downside only'
-              : 'No down days to measure against'}
-          </p>
-        </CardContent>
-      </Card>
-
-      {/* Beta vs the primary benchmark */}
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <CardTitle className="text-sm font-medium">Beta</CardTitle>
-          <Scale className="h-4 w-4 text-muted-foreground" />
-        </CardHeader>
-        <CardContent>
-          {beta?.beta != null ? (
-            <div className="text-lg font-bold tabular-nums sm:text-2xl">{beta.beta.toFixed(2)}</div>
-          ) : (
-            <Absent />
-          )}
-          <p className="text-xs text-muted-foreground">
-            {beta === null
-              ? 'Pick a benchmark to compare against'
-              : beta.beta === null
-                ? `Needs ${beta.minSampleDays} flow-free days (${beta.sampleDays} so far)`
-                : `vs ${beta.benchmarkName}${
-                    beta.correlation !== null ? ` · r ${beta.correlation.toFixed(2)}` : ''
-                  }`}
-          </p>
-        </CardContent>
-      </Card>
+      />
 
       {/* Current drawdown, with the worst one for context */}
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <CardTitle className="text-sm font-medium">Current Drawdown</CardTitle>
-          <TrendingDown
-            className={`h-4 w-4 ${inDrawdown ? 'text-red-600' : 'text-muted-foreground'}`}
-          />
-        </CardHeader>
-        <CardContent>
-          <div className={`text-lg font-bold tabular-nums sm:text-2xl ${inDrawdown ? 'text-red-600' : 'text-green-600'}`}>
-            {metrics.currentDrawdownPct.toFixed(2)}%
-          </div>
-          <p className="text-xs text-muted-foreground">
-            {metrics.maxDrawdownPct === 0
-              ? 'Never below its opening value'
-              : metrics.recoveredDate !== null
-                ? `Recovered ${shortDate(metrics.recoveredDate)} from ${metrics.maxDrawdownPct.toFixed(1)}%`
-                : `Worst ${metrics.maxDrawdownPct.toFixed(1)}%${
-                    metrics.troughDate ? ` on ${shortDate(metrics.troughDate)}` : ''
-                  }`}
-          </p>
-        </CardContent>
-      </Card>
+      <KpiCard
+        label="Current Drawdown"
+        icon={<TrendingDown
+          className={`h-4 w-4 ${inDrawdown ? 'text-red-600' : 'text-muted-foreground'}`}
+        />}
+        value={`${metrics.currentDrawdownPct.toFixed(2)}%`}
+        tone={inDrawdown ? 'negative' : 'positive'}
+        sub={metrics.maxDrawdownPct === 0
+          ? 'Never below its opening value'
+          : metrics.recoveredDate !== null
+            ? `Recovered ${shortDate(metrics.recoveredDate)} from ${metrics.maxDrawdownPct.toFixed(1)}%`
+            : `Worst ${metrics.maxDrawdownPct.toFixed(1)}%${
+                metrics.troughDate ? ` on ${shortDate(metrics.troughDate)}` : ''
+              }`}
+      />
 
-      {/* Effective holdings */}
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <CardTitle className="text-sm font-medium">Effective Holdings</CardTitle>
-          <Layers className="h-4 w-4 text-muted-foreground" />
-        </CardHeader>
-        <CardContent>
-          {metrics.effectiveHoldings !== null ? (
-            <div className="text-lg font-bold tabular-nums sm:text-2xl">{metrics.effectiveHoldings.toFixed(1)}</div>
-          ) : (
-            <Absent />
-          )}
-          <p className="text-xs text-muted-foreground">
-            {metrics.effectiveHoldings !== null
-              ? `of ${metrics.totalPositions} held, by weight`
-              : 'No priced positions'}
-          </p>
-        </CardContent>
-      </Card>
+      <KpiCard
+        label="Effective Holdings"
+        icon={<Layers className="h-4 w-4 text-muted-foreground" />}
+        value={metrics.effectiveHoldings !== null ? metrics.effectiveHoldings.toFixed(1) : null}
+        sub={metrics.effectiveHoldings !== null
+          ? `of ${metrics.totalPositions} held, by weight`
+          : 'No priced positions'}
+      />
     </div>
   )
 }

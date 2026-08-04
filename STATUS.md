@@ -143,6 +143,34 @@ Deployed as `0117d76` (chart axis) plus follow-ups. All verified against product
   ~80 real writes, via a second full-range SELECT per security whose result nobody could
   act on. The docstring already promised writes.
 
+## Shipped 2026-08-04 (late) — the sixteen KPI cards are one component
+
+*Worth doing next* item 0, done. `ui/KpiCard.tsx` replaces the hand-written card in
+`PortfolioSummaryCards` (5), `PerformanceMetricsCards` (6) and `RiskMetricsCards` (5) — 526 lines of
+component down to 357 plus a 111-line primitive, and more to the point one place to edit instead of
+sixteen. `RiskMetricsCards.test.tsx`'s existing 13 assertions pass **unchanged** against the
+primitive, which is what says the render was reproduced rather than reinterpreted.
+
+Two judgements worth knowing:
+
+- **`DividendKpiCards`' `Tile` was deliberately left alone**, though the old entry named it as a
+  fourth copy. It is not the same card: `bg-card/50` rather than `bg-card`, an `text-xs` label, a
+  `font-semibold` value, and a footer row whose `flex-wrap` and `min-h` exist because the
+  month + MoM + YoY chips are wider than a 155px phone tile and pushed the page into horizontal
+  scroll unwrapped. Folding it in would have merged two things that only look alike and changed the
+  Dividends tab's appearance for no gain.
+- **One visible change: `N/A` became `—`** on Annual Return and Calmar Ratio when those are null.
+  Three of the four files already agreed an absent metric must not render as `0`, and then disagreed
+  on how to say so — an em dash in `RiskMetrics`, `N/A` twice in `PerformanceMetrics`. Absence is now
+  a single code path (`value={null}`), and it also **refuses to colour a dash**: a caller computing
+  `tone` from a number it has not null-checked would otherwise paint the missing value green.
+
+`KpiCard.test.tsx` carries the primitive's contract plus the backstop — a source scan for the value
+class outside `ui/`, the `noRawTables` pattern from `tableFamily.test.tsx`. It uses
+`import.meta.glob`, not `node:fs`: the frontend tsconfig is browser-targeted with no `@types/node`,
+so fs type-checks under vitest and then **fails `npm run build`**, breaking the deploy rather than
+the suite. Frontend 316 → 329.
+
 ## Known rough edges (accepted, not bugs)
 
 - **The Dividends KPI strip does not follow the year filter.** Its labels are absolute ("2026 so
@@ -524,11 +552,6 @@ were deliberately **not** called — both can reach Yahoo on a cache miss.
 ## Worth doing next
 
 Rough priority. The auto-deploy install moved to *Needs a human* — it is the last deploy step.
-
-0. **Extract a shared `<KpiCard>`.** The sixteen hand-rolled KPI cards across
-   `PortfolioSummaryCards` / `PerformanceMetricsCards` / `RiskMetricsCards`, plus `DividendKpiCards`'
-   `Tile`, are four implementations of one job. Making the values responsive was sixteen mechanical
-   edits that should have been one. Cheap, and the dominant-failure-mode section points straight at it.
 
 1. **Fold `PRE_OWNERSHIP_HISTORY_YEARS` pruning into a scheduled job — reassess before building.**
    `prune_empty_dividends.py` is a manual CLI and the ingest window already prevents new junk, so
