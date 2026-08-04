@@ -150,6 +150,27 @@ function dividendColumns(deps: {
         ) : null,
     },
     {
+      key: 'fwdYield',
+      header: 'Fwd yield',
+      shortHeader: 'Fwd yield',
+      align: 'right',
+      mobile: 'delta',
+      hint: {
+        description:
+          "Projected next-12-month income over the position's current market value. " +
+          'Weight these by market value and they average to the portfolio yield on the ' +
+          'Performance tab — this column is that figure’s audit. Unlike Forecast beside ' +
+          'it, this always covers the next twelve months rather than the selected year, ' +
+          'so a row can show no forecast here and still carry a yield.',
+      },
+      cell: (row, view) =>
+        row.forward_yield_pct != null
+          ? `${row.forward_yield_pct.toFixed(2)}%`
+          : view === 'table'
+            ? '—'
+            : null,
+    },
+    {
       key: 'payouts',
       header: 'Payouts',
       shortHeader: 'Payouts',

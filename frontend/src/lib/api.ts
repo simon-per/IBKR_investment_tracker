@@ -376,6 +376,16 @@ export interface DividendSecurityRow {
   forecast_net_eur: number;
   trailing_yield_pct: number | null;
   /**
+   * The forward counterpart: this security's projection for the NEXT 12 MONTHS over its
+   * current market value. Weight these by market value and they average to
+   * `DividendForwardYield.pct` — which is what makes that headline auditable.
+   *
+   * Unwindowed, unlike `forecast_net_eur` above, so it does not change with the
+   * selected year even though which rows appear does. A row can therefore show a zero
+   * forecast beside a real yield when its next payment falls past the window.
+   */
+  forward_yield_pct: number | null;
+  /**
    * True when the position wasn't held for the whole trailing year, so the yield
    * divides a partial year's income by a full position value and reads low.
    * Deliberately not annualized — that would invent income.
@@ -455,6 +465,39 @@ export interface DividendUpcomingPayment {
   basis: 'net' | 'gross_estimate' | null;
 }
 
+/**
+ * What the portfolio as held today will pay over the next twelve months, as a rate.
+ *
+ * A sibling of {@link DividendGrowth} rather than part of it: growth comes from the
+ * unwindowed payment *history*, and a figure that moves with a market price is neither
+ * growth nor history.
+ *
+ * The whole object is absent — never zeroed — when no projection ran, nothing held is
+ * priced, or the priced holdings project nothing. `paying_holdings: 0` beside a null
+ * percentage would read as "nothing in this portfolio pays a dividend", and the worst
+ * case of that is when the one security that *does* pay is the unpriced one.
+ */
+export interface DividendForwardYield {
+  /** Projected net income over the next 365 days, priced holdings only. */
+  annual_eur: number;
+  /** annual_eur over the market value of those holdings. */
+  pct: number;
+  /**
+   * Same income over what they cost. Higher than `pct` on an appreciated book, and the
+   * gap between the two is exactly that appreciation — which holds only because both
+   * denominators cover the same securities.
+   */
+  on_cost_pct: number | null;
+  /** An accumulating ETF counts as priced and not as paying. That is the right answer. */
+  paying_holdings: number;
+  priced_holdings: number;
+  /** Held but unpriced, so excluded from both sides. Worth saying when non-zero. */
+  unpriced_holdings: number;
+  /** How much of `annual_eur` deducts no withholding, so the caveat can be quantified. */
+  gross_estimate_eur: number;
+  basis: 'net' | 'mixed' | 'gross_estimate';
+}
+
 export interface DividendBreakdownResponse {
   years: number[];
   year: number | null;              // null = all time
@@ -467,6 +510,8 @@ export interface DividendBreakdownResponse {
   base_currency: string;
   /** Optional so an older backend payload still parses. */
   growth?: DividendGrowth | null;
+  /** null = no projection, nothing priced, or nothing projecting. Never a zeroed object. */
+  forward_yield?: DividendForwardYield | null;
   upcoming?: DividendUpcomingPayment[];
 }
 

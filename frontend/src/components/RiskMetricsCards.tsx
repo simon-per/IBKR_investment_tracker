@@ -1,5 +1,7 @@
-import { Activity, Gauge, Layers, Scale, TrendingDown } from 'lucide-react'
+import { Activity, Coins, Gauge, PiggyBank, Scale, TrendingDown } from 'lucide-react'
 import { KpiCard, KpiCardSkeleton } from '@/components/ui/KpiCard'
+import { useFormatCurrency } from '@/lib/CurrencyContext'
+import type { DividendForwardYield } from '@/lib/api'
 
 /**
  * Beta needs a benchmark, and there are three separate reasons it can be
@@ -22,13 +24,23 @@ export interface RiskMetrics {
   maxDrawdownPct: number
   troughDate: string | null
   recoveredDate: string | null
-  effectiveHoldings: number | null
-  totalPositions: number
   beta: RiskBeta | null
 }
 
 interface RiskMetricsCardsProps {
   metrics: RiskMetrics | null
+  /**
+   * The two dividend cards, from `/api/dividends/breakdown`. Its own prop rather than a
+   * field on `RiskMetrics`, because everything in that object comes from the pure
+   * `portfolioKpis.ts` helpers — which add no request by design — and a query result
+   * living in the same type would read as licence for that module to fetch.
+   *
+   * `undefined` means not loaded, `null` means the backend had no rate to report.
+   * Those are different things and the footnote says which.
+   */
+  dividend?: DividendForwardYield | null
+  /** Its query failed. Absent data must be a stated failure, not a confident dash. */
+  dividendError?: boolean
   isLoading?: boolean
 }
 
@@ -48,11 +60,15 @@ function shortDate(iso: string): string {
   return `${Number(dayOfMonth)} ${monthName}`
 }
 
-export function RiskMetricsCards({ metrics, isLoading }: RiskMetricsCardsProps) {
+export function RiskMetricsCards({
+  metrics, dividend, dividendError, isLoading,
+}: RiskMetricsCardsProps) {
+  const formatCurrency = useFormatCurrency()
+
   if (isLoading) {
     return (
-      <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 lg:grid-cols-5">
-        <KpiCardSkeleton count={5} />
+      <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 lg:grid-cols-6">
+        <KpiCardSkeleton count={6} />
       </div>
     )
   }
@@ -62,13 +78,42 @@ export function RiskMetricsCards({ metrics, isLoading }: RiskMetricsCardsProps) 
   }
 
   const { beta } = metrics
+
+  // Three states, and the footnote is the only thing that tells them apart — the value
+  // is a dash in all three. `isLoading` deliberately does NOT include the dividend
+  // query: gating this row on it would hide four already-computed metrics behind the
+  // slowest of three requests, and a retrying dividend endpoint would keep the whole
+  // row a skeleton for seconds.
+  const dividendUnavailable = dividendError === true || dividend === undefined
+  const dividendSub = dividendUnavailable
+    ? "Couldn't load dividend data"
+    : dividend === null
+      ? 'No projected dividends'
+      : [
+          `${formatCurrency(dividend.annual_eur)}/yr`,
+          // 'part gross', not 'part est.' — everything here is an estimate, and the
+          // thing worth saying is that some of it deducts no withholding and so runs
+          // high against the net figure the label otherwise implies.
+          dividend.basis === 'net' ? 'projected' : 'projected, part gross',
+          `${dividend.paying_holdings} of ${dividend.priced_holdings} pay`,
+          ...(dividend.unpriced_holdings > 0
+            ? [`${dividend.unpriced_holdings} unpriced`]
+            : []),
+        ].join(' · ')
+
+  // Prose the footnote has no room for. It carries no figure that exists nowhere else,
+  // because a caveat reachable only by hovering does not exist on a touch device.
+  const dividendTitle =
+    'Projected over the next 12 months from each payer’s own cadence, against current ' +
+    'market value. Accumulating ETFs and non-payers correctly contribute nothing, and ' +
+    'unpriced holdings are excluded from both sides.'
   // The current fall is the one that describes now; the max describes the worst
   // the account has survived. Showing only the max reads as a live warning long
   // after the recovery.
   const inDrawdown = metrics.currentDrawdownPct < -0.05
 
   return (
-    <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 lg:grid-cols-5">
+    <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 lg:grid-cols-6">
       <KpiCard
         label="Volatility"
         icon={<Activity className="h-4 w-4 text-muted-foreground" />}
@@ -123,13 +168,34 @@ export function RiskMetricsCards({ metrics, isLoading }: RiskMetricsCardsProps) 
               }`}
       />
 
+      {/* The portfolio's dividend rate. This IS the market-value-weighted average of
+          the per-security yields — sum(Vi/V x Di/Vi) == sum(Di)/V — so nothing is
+          weighted on the client; the backend divides two figures it already holds.
+          The per-security column on the Dividends tab is the audit. */}
       <KpiCard
-        label="Effective Holdings"
-        icon={<Layers className="h-4 w-4 text-muted-foreground" />}
-        value={metrics.effectiveHoldings !== null ? metrics.effectiveHoldings.toFixed(1) : null}
-        sub={metrics.effectiveHoldings !== null
-          ? `of ${metrics.totalPositions} held, by weight`
-          : 'No priced positions'}
+        label="Dividend Yield"
+        icon={<Coins className="h-4 w-4 text-muted-foreground" />}
+        value={dividend != null ? `${dividend.pct.toFixed(2)}%` : null}
+        title={dividendTitle}
+        sub={dividendSub}
+      />
+
+      {/* Yield on cost, beside it rather than instead of it: the same income over what
+          the holdings cost, so the gap between the two cards is the book's own
+          appreciation. Both denominators cover the same securities, which is the only
+          reason that reading is valid. */}
+      <KpiCard
+        label="Yield on Cost"
+        icon={<PiggyBank className="h-4 w-4 text-muted-foreground" />}
+        value={dividend?.on_cost_pct != null ? `${dividend.on_cost_pct.toFixed(2)}%` : null}
+        title="The same projected income measured against what the holdings cost rather
+               than what they are worth. On an appreciated position the two diverge, and
+               the gap is the part a current-yield figure hides."
+        sub={dividendUnavailable
+          ? "Couldn't load dividend data"
+          : dividend?.on_cost_pct == null
+            ? 'No projected dividends'
+            : 'Same income over what it cost'}
       />
     </div>
   )

@@ -163,6 +163,23 @@ export function Dashboard() {
     staleTime: 30 * 60 * 1000,
   })
 
+  // The two dividend-yield cards. `/breakdown` reads only cached data — unlike
+  // `/summary` it never enqueues a sync, so it cannot reach Yahoo.
+  //
+  // Keyed on the CURRENT YEAR to match `DividendsTab`'s own default query exactly
+  // (`['dividends','breakdown', year]` with `year` initialised to the current one), so
+  // opening that tab costs no second request. Safe only because `forward_yield` and
+  // `growth` are unwindowed — the same numbers whichever year is asked for, which
+  // `test_api_smoke.py` pins from both ends.
+  const {
+    data: dividendBreakdown,
+    isError: dividendBreakdownError,
+  } = useQuery({
+    queryKey: ['dividends', 'breakdown', new Date().getFullYear()],
+    queryFn: () => api.getDividendBreakdown(new Date().getFullYear()),
+    staleTime: 30 * 60 * 1000,
+  })
+
   // Fetch scheduler status (poll every 60s)
   const { data: schedulerStatus } = useQuery({
     queryKey: ['scheduler', 'status'],
@@ -244,8 +261,10 @@ export function Dashboard() {
       ? xirr / Math.abs(maxDrawdown)
       : null
 
-    // 6. Top 5 Concentration
+    // 6. Top 5 Concentration, footnoted with the effective holdings it cannot express:
+    // a top-5 weight reads the same for five equal positions and one dominant one.
     const top5Weight = concentrationPct(positions, 5)
+    const { effectiveHoldings } = herfindahlConcentration(positions)
 
     return {
       xirr,
@@ -257,6 +276,7 @@ export function Dashboard() {
       totalPositions: positions.length,
       calmarRatio,
       top5Weight,
+      effectiveHoldings,
     }
   }, [valueOverTime, positions, annualizedReturn])
 
@@ -268,7 +288,6 @@ export function Dashboard() {
     }
 
     const drawdown = drawdownDetail(valueOverTime)
-    const { effectiveHoldings } = herfindahlConcentration(positions)
 
     // Beta uses the FIRST selected benchmark: it is the primary comparison and
     // the one the chart draws first. Nothing selected means no beta rather than
@@ -290,8 +309,6 @@ export function Dashboard() {
       maxDrawdownPct: drawdown.maxDrawdownPct,
       troughDate: drawdown.troughDate,
       recoveredDate: drawdown.recoveredDate,
-      effectiveHoldings,
-      totalPositions: positions.length,
       beta,
     }
   }, [valueOverTime, positions, benchmarkDatasets])
@@ -509,9 +526,14 @@ export function Dashboard() {
               isLoading={chartLoading || positionsLoading || xirrLoading}
             />
 
-            {/* Risk Metrics — the denominators the row above divides by */}
+            {/* Risk Metrics — the denominators the row above divides by, plus the two
+                dividend rates. `isLoading` deliberately excludes the dividend query:
+                gating this row on it would hide four already-computed metrics behind a
+                third request, and the two cards state their own absence instead. */}
             <RiskMetricsCards
               metrics={riskMetrics}
+              dividend={dividendBreakdown?.forward_yield}
+              dividendError={dividendBreakdownError}
               isLoading={chartLoading || positionsLoading}
             />
 

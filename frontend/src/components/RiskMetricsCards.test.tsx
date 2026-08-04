@@ -2,6 +2,7 @@
 import { describe, it, expect, afterEach } from 'vitest'
 import { render, screen, cleanup } from '@testing-library/react'
 import { RiskMetricsCards, type RiskMetrics } from './RiskMetricsCards'
+import type { DividendForwardYield } from '@/lib/api'
 
 /**
  * Every metric on this row can legitimately be unknown, and each has its own
@@ -19,23 +20,42 @@ const base: RiskMetrics = {
   maxDrawdownPct: -12.5,
   troughDate: '2026-04-07',
   recoveredDate: null,
-  effectiveHoldings: 12.3,
-  totalPositions: 36,
   beta: { beta: 1.08, correlation: 0.87, sampleDays: 64, minSampleDays: 20, benchmarkName: 'S&P 500' },
 }
 
-function renderWith(overrides: Partial<RiskMetrics> = {}) {
-  return render(<RiskMetricsCards metrics={{ ...base, ...overrides }} />)
+const dividend: DividendForwardYield = {
+  annual_eur: 92.83,
+  pct: 0.14,
+  on_cost_pct: 0.19,
+  paying_holdings: 19,
+  priced_holdings: 36,
+  unpriced_holdings: 0,
+  gross_estimate_eur: 0,
+  basis: 'net',
+}
+
+/**
+ * No `CurrencyProvider` here on purpose: the context's own default is EUR
+ * (`CurrencyContext.tsx`), so `useFormatCurrency` works unwrapped and no query fires.
+ * That means these assertions must not depend on the currency label — the account runs
+ * on CHF and the fixture would render `€`.
+ */
+function renderWith(
+  overrides: Partial<RiskMetrics> = {},
+  props: { dividend?: DividendForwardYield | null; dividendError?: boolean } = {},
+) {
+  return render(<RiskMetricsCards metrics={{ ...base, ...overrides }} {...props} />)
 }
 
 describe('RiskMetricsCards', () => {
   it('renders every metric when all of them are known', () => {
-    renderWith()
+    renderWith({}, { dividend })
     expect(screen.getByText('18.4%')).toBeTruthy()
     expect(screen.getByText('1.35')).toBeTruthy()
     expect(screen.getByText('1.08')).toBeTruthy()
     expect(screen.getByText('-3.21%')).toBeTruthy()
-    expect(screen.getByText('12.3')).toBeTruthy()
+    expect(screen.getByText('0.14%')).toBeTruthy()
+    expect(screen.getByText('0.19%')).toBeTruthy()
   })
 
   it('renders nothing at all rather than an empty shell with no metrics', () => {
@@ -93,13 +113,68 @@ describe('RiskMetricsCards', () => {
     expect(screen.getByText('Never below its opening value')).toBeTruthy()
   })
 
-  it('reports no effective count when nothing is priced', () => {
-    renderWith({ effectiveHoldings: null })
-    expect(screen.getByText('No priced positions')).toBeTruthy()
+  it('shows six loading placeholders, matching the grid it fills', () => {
+    const { container } = render(<RiskMetricsCards metrics={null} isLoading />)
+    expect(container.querySelectorAll('.animate-pulse')).toHaveLength(6)
+  })
+})
+
+/**
+ * The two dividend cards come from a query rather than from `portfolioKpis.ts`, so they
+ * have a loading and a failure state the other four do not. Everything here is about
+ * keeping those distinguishable — and about the row not becoming hostage to them.
+ */
+describe('the dividend rate cards', () => {
+  it('states the annual amount and the coverage beside the rate', () => {
+    renderWith({}, { dividend })
+    expect(screen.getByText(/19 of 36 pay/)).toBeTruthy()
+    expect(screen.getByText('Same income over what it cost')).toBeTruthy()
   })
 
-  it('shows five loading placeholders, matching the grid it fills', () => {
-    const { container } = render(<RiskMetricsCards metrics={null} isLoading />)
-    expect(container.querySelectorAll('.animate-pulse')).toHaveLength(5)
+  it('keeps rendering the other four metrics when the dividend query is still out', () => {
+    // The reason `isLoading` excludes the dividend query: volatility, Sortino, beta and
+    // drawdown are already computed, and hiding them behind a third request would make
+    // this row as slow as its slowest input.
+    renderWith({}, { dividend: undefined })
+    expect(screen.getByText('18.4%')).toBeTruthy()
+    expect(screen.getByText('1.08')).toBeTruthy()
+    expect(screen.getByText('-3.21%')).toBeTruthy()
+  })
+
+  it('states a failure rather than showing a bare dash', () => {
+    // Absent data must never read as a computed answer — the rule the rebalance panel
+    // shipped the bug for.
+    renderWith({}, { dividend: null, dividendError: true })
+    expect(screen.getAllByText("Couldn't load dividend data")).toHaveLength(2)
+  })
+
+  it('tells "nothing projects" apart from "we could not ask"', () => {
+    renderWith({}, { dividend: null })
+    expect(screen.getAllByText('No projected dividends')).toHaveLength(2)
+    expect(screen.queryByText("Couldn't load dividend data")).toBeNull()
+  })
+
+  it('never renders an absent rate as a zero', () => {
+    renderWith({}, { dividend: null })
+    expect(screen.queryByText('0.00%')).toBeNull()
+  })
+
+  it('marks a rate whose projection is partly a gross estimate', () => {
+    // 7% of this account's projection deducts no withholding, so a bare "projected"
+    // would claim a net figure it is not. In the footnote, not only in the tooltip:
+    // a caveat reachable by hovering does not exist on a phone.
+    renderWith({}, { dividend: { ...dividend, basis: 'mixed', gross_estimate_eur: 6.61 } })
+    expect(screen.getByText(/projected, part gross/)).toBeTruthy()
+  })
+
+  it('names unpriced holdings, which are excluded from both sides', () => {
+    renderWith({}, { dividend: { ...dividend, unpriced_holdings: 1 } })
+    expect(screen.getByText(/1 unpriced/)).toBeTruthy()
+  })
+
+  it('shows the rate but not a yield on cost when only the cost basis is missing', () => {
+    renderWith({}, { dividend: { ...dividend, on_cost_pct: null } })
+    expect(screen.getByText('0.14%')).toBeTruthy()
+    expect(screen.getByText('No projected dividends')).toBeTruthy()
   })
 })

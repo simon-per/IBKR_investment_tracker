@@ -12,6 +12,14 @@ interface PerformanceMetricsCardsProps {
     totalPositions: number
     calmarRatio: number | null
     top5Weight: number
+    /**
+     * Herfindahl effective holdings, footnoted on the Top 5 card rather than given a
+     * card of its own. A top-5 weight cannot tell five equal positions from one
+     * dominant one, which is why the figure exists; it does not need the space.
+     * `null` when nothing is priced — the top-5 percentage is a confident 0 in that
+     * case, so the footnote must not imply a count it does not have.
+     */
+    effectiveHoldings: number | null
   } | null
   isLoading?: boolean
 }
@@ -89,7 +97,9 @@ export function PerformanceMetricsCards({ metrics, isLoading }: PerformanceMetri
         tone={metrics.top5Weight > 70 ? 'negative'
           : metrics.top5Weight > 50 ? 'warning'
           : 'positive'}
-        sub="Concentration risk"
+        sub={metrics.effectiveHoldings !== null
+          ? `Concentration risk · ${metrics.effectiveHoldings.toFixed(1)} effective`
+          : 'Concentration risk'}
       />
     </div>
   )
