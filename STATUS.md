@@ -1,9 +1,9 @@
 # Working state
 
-**Last updated: 2026-08-04 (late) — market data reprices seven times a day and is LIVE and verified
-on production (every pass since the deploy: success, 40/40, no rate limit). The portfolio chart no
-longer reserves a fifth of its height for a negative band the data cannot reach. Five commits await
-deploy.**
+**Last updated: 2026-08-04 (late) — market data reprices seven times a day, LIVE and verified on
+production (every pass: success, 40/40, no rate limit). The portfolio chart no longer reserves a
+fifth of its height for a negative band the data cannot reach. And the app's own INFO logging was
+never reaching the container log at all, which is now fixed.**
 
 `CLAUDE.md` is the durable guide — architecture, invariants, and the rules that were each a bug
 first. **This file is the perishable half**: where the work actually stands, what is known-broken,
@@ -118,6 +118,30 @@ The floor is applied **after** rounding, not to the input, because rounding-outw
 what has to be overridden — clamping the input still floors back to the same multiple. A test
 reproduces the −20,000 with no floor passed, so the fix cannot end up measuring itself, and another
 asserts existing callers are byte-identical when the argument is omitted. Frontend 308 → 316.
+
+## Shipped 2026-08-04 (late) — three things found by looking at what a pass reports
+
+Deployed as `0117d76` (chart axis) plus follow-ups. All verified against production:
+`axis` 8/8, `a11y` 17/17, `sweep` 16/16, `mobile` 45/45; backend 684 → 689, frontend 316.
+
+- **`settings.log_level` configured nothing.** It was read in exactly one place —
+  `echo=settings.log_level == "DEBUG"` for SQLAlchemy — and no code ever called into the
+  logging module, so the root logger kept its default and Python's *last-resort* handler
+  emitted WARNING and above only. **Every `logger.info` in the app was discarded in
+  production**, confirmed by reading the container log: uvicorn's access lines and alembic
+  present, not one line from `app.*`. That is worse than a missing feature because the
+  docs assume otherwise — CLAUDE.md tells you to grep the container log for a request id,
+  and the scheduler's `removing retired job` / `kept, next run:` lines (the only direct
+  evidence that pruning and misfire recovery work) are INFO. Part of why a job store that
+  had never opened looked healthy for two days. Needs `force=True`: uvicorn installs
+  handlers before the app is imported, and `basicConfig` is a no-op when one exists.
+  Chatty providers (yfinance above all) are held at WARNING or the volume would triple.
+- **Docker had no log rotation**, which only became a problem once the above started
+  emitting. The default `json-file` driver is unbounded and this VPS's disk also holds the
+  database and its backups; now capped at 10 MB × 5.
+- **`prices_fetched` counted rows in the window, not rows written** — 234 reported for
+  ~80 real writes, via a second full-range SELECT per security whose result nobody could
+  act on. The docstring already promised writes.
 
 ## Known rough edges (accepted, not bugs)
 
@@ -598,6 +622,14 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
   where there were none). That run also exposed the public `POST /api/market-data/sync` carrying its
   own copy of the loop with no breaker — extracted to `MarketDataService.sync_securities`.
   Suites 664 → 684.
+- **2026-08-04 (late)** — clamped the portfolio chart's negative axis, which turned out to be
+  reserving a fifth of the plot for a band the data cannot reach (+1,122 minimum, axis floor
+  −20,000 on a phone): padding is a share of the whole range and `niceTicks` rounds the minimum
+  *out* to a step multiple. Then three things found by looking at what a pass actually reports —
+  `settings.log_level` configured nothing so every app INFO line was discarded in production,
+  Docker had no log rotation to absorb turning it on, and `prices_fetched` counted rows in the
+  window rather than rows written. Backend 684 → 689, frontend 308 → 316; `axis` 8/8, `a11y`
+  17/17, `sweep` 16/16, `mobile` 45/45 against production.
 - **2026-08-03** — made the UI mobile-friendly at 390x844. One `Column[]` per table now renders as a
   desktop table or a getquin-style card list (`ui/DataTable.tsx`), so the two cannot drift; the shell,
   nav, charts and KPI grids reflow; `e2e/mobile.mjs` measures it at 45/45. Found two bugs that were
@@ -616,12 +648,3 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
   49 sites reading the clock in local time and an unconvertible dividend persisted as EUR. Suites
   462 → 647 backend, 91 → 268 frontend; every `e2e` script green bar `ledger`. Durable rules promoted
   into CLAUDE.md, including *The dominant failure mode*.
-- **2026-07-31** — enterprise-readiness pass: shared TTM growth,
-  locale-independent chart dates, inception read from the data, keyboard/ARIA across the tab strip and
-  every collapsible and sortable header, four more explicit error states, optional write auth +
-  per-IP rate limit + request ids + `/health` build identity, the Activity ledger over the four
-  unread tables, a persistent scheduler job store, delta-chip and scroll-affordance consolidation,
-  real product chrome, a completed `/api/dividends/summary` contract, and a code-split bundle. Suites
-  357 → 462 backend, 45 → 91 frontend; verified against a prod snapshot and in a real browser, which
-  found three defects the green suite did not. **Deployed the same evening**: write auth on and
-  enforced, guarded auto-deploy installed, five scheduler jobs surviving the rebuild.

@@ -1,4 +1,5 @@
 import logging
+import sys
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +10,42 @@ from app.config import settings
 from app.database import init_db
 from app.observability import request_id_middleware, unhandled_exception_handler
 from app.rate_limit import rate_limit_middleware
+
+# Third-party loggers that are chatty at INFO and say nothing we act on. yfinance in
+# particular narrates every request, which would triple the volume of a market-data pass.
+_NOISY_AT_INFO = ("yfinance", "peewee", "urllib3", "httpx", "httpcore", "asyncio", "apscheduler")
+
+
+def _configure_logging() -> None:
+    """
+    Make `settings.log_level` mean something.
+
+    It was read in exactly one place — `echo=settings.log_level == "DEBUG"` for SQLAlchemy
+    — and nothing ever configured the logging module, so the root logger kept its default
+    and Python's last-resort handler emitted **WARNING and above only**. Every
+    `logger.info` in the app was silently discarded in production.
+
+    That is worse than a missing feature, because the docs assume otherwise: CLAUDE.md
+    tells you to grep the container log for a request id, and the scheduler's own
+    `removing retired job` / `kept, next run:` lines — the evidence that misfire recovery
+    and job pruning worked — are INFO. They could not be read, which is part of why a job
+    store that never opened looked healthy for two days.
+
+    Deliberately `force=True`: uvicorn installs its own handlers before the app is
+    imported, and without it basicConfig is a no-op whenever any handler already exists.
+    """
+    level = getattr(logging, str(settings.log_level).upper(), logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+        stream=sys.stdout,
+        force=True,
+    )
+    for name in _NOISY_AT_INFO:
+        logging.getLogger(name).setLevel(max(level, logging.WARNING))
+
+
+_configure_logging()
 
 logger = logging.getLogger(__name__)
 

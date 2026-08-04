@@ -28,6 +28,17 @@ services:
       # deployed sha; "unknown" locally, where there is nothing to identify.
       GIT_COMMIT: ${GIT_COMMIT:-unknown}
     restart: unless-stopped
+    # Bounded because the app's own INFO logging was switched on (2026-08-04) — until
+    # then `settings.log_level` configured nothing and only WARNING+ was ever emitted,
+    # so volume was negligible. Seven market-data passes a day over 40 securities is a
+    # few thousand lines, which is fine to keep and not fine to keep *forever*: the
+    # default json-file driver has no size limit at all, and this is a small VPS whose
+    # disk also holds the database and its backups.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     healthcheck:
       # Lets `docker compose ps` tell "running" from "actually serving": the container
       # is up while alembic is still migrating on start.
