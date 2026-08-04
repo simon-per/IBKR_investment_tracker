@@ -439,17 +439,28 @@ not say.
 
 ## Watch after the next deploy
 
-- **The one thing still unobserved: that a *missed* slot is actually recovered.** The store is now
-  genuinely persistent (confirmed 08-01: `scheduler_jobstore_persistent: true`, a real 24 KB
-  `scheduler-data/scheduler_jobs.db`, all five job ids in `apscheduler_jobs`, and zero fallback
-  warnings in the log). What that does **not** prove is misfire recovery end to end — the logs should
-  show `kept, next run:` rather than recomputing. That needs a deploy landing within
-  `MISFIRE_GRACE_SECONDS` of a Berlin slot; there are nine now, so this is much likelier to happen
-  by itself than it was with five.
+- **`kept, next run:` is finally readable, and it says `kept` for all nine jobs.** This entry asked
+  for exactly that line and it could not be checked before 2026-08-04 for a dull reason: it is
+  logged at INFO, and `settings.log_level` configured nothing, so it never reached the container log
+  at all. With logging fixed, the rebuild at 19:21 UTC shows every one of the nine jobs `kept` — not
+  `rescheduling` — which is `_add_or_keep` finding an identically-triggered job already in the
+  store. **That confirms the store genuinely persists across a container recreate**, which until now
+  rested on inspecting the sqlite file rather than on the code's own account of what it did.
 
-  Read a `false` on that health flag as: the store fell back to memory again, so a deploy overlapping
-  a slot still loses that sync. `/api/scheduler/status` cannot tell you — it lists every job
-  either way, which is how this went unnoticed for two days.
+  **Still unobserved: misfire recovery end to end.** `kept` proves the stored job and its run time
+  survived; it does not prove APScheduler *runs* one that was missed. That needs a deploy landing
+  within `MISFIRE_GRACE_SECONDS` of a Berlin slot, and none has — though with nine slots instead of
+  five it is now much likelier to happen by itself.
+
+  Read a `false` on `scheduler_jobstore_persistent` as: the store fell back to memory again, so a
+  deploy overlapping a slot still loses that sync. `/api/scheduler/status` cannot tell you — it
+  lists every job either way, which is how this went unnoticed for two days.
+
+- **Container log timestamps are UTC, the sync slots are Berlin.** `%(asctime)s` uses the
+  container's local time and `python:3.11-slim` sets no `TZ`, so a line reading `19:21` is `21:21`
+  Berlin. Same convention as every stored timestamp (see CLAUDE.md's naive-UTC paragraph), but it is
+  a two-hour trap when you are matching a log line against a slot — in the direction that makes an
+  on-time sync look early.
 
 ## The overnight batch — pushed and live
 

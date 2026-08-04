@@ -1573,6 +1573,8 @@ Tests: `tests/test_currency_fallback.py`.
 | "Which build is live?" | `curl /health` — it reports `version`, `commit`, `scheduler_enabled`, `write_auth_enabled` and `scheduler_jobstore_persistent`. Same line in the app footer |
 | A missed sync was **not** recovered after a restart | `curl /health` for `scheduler_jobstore_persistent`. `false` means the store fell back to memory, so misfire recovery is off — `/api/scheduler/status` still lists every job and cannot tell you this. Check the compose mount is the `scheduler-data` **directory** |
 | A 500 with no detail | By design. Grep the container log for its `request_id`, which is in the body and the `X-Request-ID` header |
+| The container log has no `app.*` lines | Fixed 2026-08-04. `settings.log_level` configured nothing, so Python's last-resort handler emitted WARNING+ only and every `logger.info` was discarded. If it recurs, check `_configure_logging()` still runs and still passes `force=True` — uvicorn installs handlers first, and `basicConfig` is a silent no-op when one exists |
+| A log timestamp disagrees with a Berlin slot by 2h | Expected: `%(asctime)s` is the container's local time and the image sets no `TZ`, so logs are UTC while the schedule is Europe/Berlin |
 | A missed sync ran late after a restart | Expected: the persistent job store honours a misfire for 30 min. Older than that is dropped, and the next slot recovers |
 | A drift row reads `—` instead of advice | No target (unmanaged — blank is not 0%), or the position has no cached price so it has no weight to compare. Both deliberate; see *Client-side analytics* |
 | Drift says "no target could be compared" | Nothing had both a target and a weight. **Not** an all-clear — that wording exists because "0 outside the band" was one |
