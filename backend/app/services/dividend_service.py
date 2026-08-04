@@ -54,6 +54,21 @@ def _summary_source(payments, ibkr_from) -> str:
     return "ibkr" if sources <= {"ibkr"} else "mixed"
 
 
+def _forward_basis(total: Decimal, gross_estimate: Decimal) -> str:
+    """
+    What the forward yield's numerator is net of: 'net', 'mixed' or 'gross_estimate'.
+
+    Three-way for the same reason as {@link _summary_source}: a projection sized from
+    dividends actually received is net of real withholding, while one sized from
+    yfinance's gross per-share deducts none and so runs high. A flat 'net' on a total
+    that is 7% gross claims a precision it does not have — and a yield is the figure
+    most likely to be compared against a broker's own, which quotes gross.
+    """
+    if gross_estimate <= 0:
+        return "net"
+    return "gross_estimate" if gross_estimate >= total else "mixed"
+
+
 class DividendService:
     """Service for fetching and computing dividend income."""
 
@@ -768,6 +783,12 @@ class DividendService:
         upcoming: List[Dict] = []
         annual_forecast: Dict[int, Decimal] = defaultdict(Decimal)
         next_12m = Decimal("0")
+        # The same 365-day total, split per security, for the forward yields. Kept
+        # beside the aggregate rather than derived from the per-security table
+        # afterwards, because a table row is limited to the SELECTED window while a
+        # yield must always describe the next twelve months — with ?year=2026 asked
+        # in August, `forecast_net` covers Aug-Dec and would read 5/12 of the truth.
+        next_12m_by_sec: Dict[int, Decimal] = defaultdict(Decimal)
         next_pay: Dict[int, date] = {}
         next_12m_end = as_of + timedelta(days=365)
 
@@ -806,6 +827,7 @@ class DividendService:
                     annual_forecast[fp.on_date.year] += amt
                     if fp.on_date <= next_12m_end:
                         next_12m += amt
+                        next_12m_by_sec[sid] += amt
                         upcoming.append({
                             "date": fp.on_date.isoformat(),
                             "security_id": sid,
@@ -991,6 +1013,13 @@ class DividendService:
             if first_open is None:
                 continue
             ttm_days_held[sid] = max(0, (as_of - max(first_open, ttm_start)).days)
+        # This call must stay the LAST database access in the method. It is allowed to
+        # fail into "yields omitted" only because nothing queries afterwards: a
+        # DBAPI-level error leaves the AsyncSession needing a rollback, so any later
+        # execute() would raise PendingRollbackError and turn a graceful degradation
+        # into a 500 on the whole endpoint. Hoisting it to build `growth` in one place
+        # is exactly that mistake — the forward yield below is assigned in afterwards
+        # for this reason, not for style.
         mv_by_sec: Dict[int, Decimal] = {}
         cost_by_sec: Dict[int, Decimal] = {}
         try:
@@ -999,6 +1028,81 @@ class DividendService:
                 cost_by_sec[pos["security_id"]] = Decimal(str(pos["cost_basis_eur"]))
         except Exception as e:
             logger.warning(f"Dividend breakdown: positions unavailable, yields omitted: {e}")
+
+        # ---- Forward yield ------------------------------------------------------
+        # What the portfolio as held today will pay over the next twelve months, over
+        # what it is worth and over what it cost. A sibling of `growth` rather than a
+        # member of it: `growth` is defined as derived from the unwindowed payment
+        # HISTORY, and a figure that moves with a market price is neither growth nor
+        # history. Keeping it out also means `DividendKpiCards`, which answers "is this
+        # growing", is not handed a valuation ratio.
+        #
+        # The market-value figure IS the market-value-weighted average of the
+        # per-security yields, by construction rather than by coincidence:
+        # sum(Vi/V * Di/Vi) == sum(Di)/V, with every non-payer entering at zero. So
+        # nothing is weighted by hand, and `forward_yield_pct` on each row below is the
+        # audit of this one. Note the table shows only securities with payments or an
+        # in-window projection, so averaging the VISIBLE rows alone gives a higher
+        # number — the coverage counts are what make that legible.
+        #
+        # An unpriced holding is excluded from BOTH sides. portfolio_service values a
+        # position with no cached price at 0.00, so leaving it in adds its projected
+        # income to the numerator and nothing to the denominator, reading the yield
+        # high — the SBI shape, and the same refusal rebalance.ts makes: no price means
+        # no weight, not a zero weight. Its cost basis IS known and is dropped anyway,
+        # because the gap between the two figures is only readable as appreciation
+        # while both describe the same set of securities.
+        forward_yield: Optional[Dict] = None
+        priced = {sid: mv for sid, mv in mv_by_sec.items() if mv > 0}
+        fwd_mv = sum(priced.values(), Decimal("0"))
+        fwd_income = sum(
+            (next_12m_by_sec.get(sid, Decimal("0")) for sid in priced), Decimal("0")
+        )
+        # A zero numerator yields nothing, not 0.00%. Three different states produce it
+        # — no projection was run, nothing held has a schedule, or the one security that
+        # does is unpriced and was excluded above — and a 0.00% would report all three
+        # as "this portfolio pays no dividends". The last is the dangerous one: it is the
+        # SBI shape again, where the *interesting* holding is the missing one. Refusing
+        # matches dividend_forecast.py's own rule, and "No projected dividends" on the
+        # card says more than a confident zero would.
+        if include_forecast and fwd_mv > 0 and fwd_income > 0:
+            fwd_cost = sum(
+                (cost_by_sec.get(sid, Decimal("0")) for sid in priced), Decimal("0")
+            )
+            # Part of the projection is sized from yfinance gross per-share, which
+            # deducts no withholding and so runs a little high. Reported as a share of
+            # the total rather than a bare flag, so the caveat can be quantified — and
+            # rendered in the footnote, not only in a tooltip: a caveat reachable only
+            # by hovering does not exist on a touch device.
+            # Off `basis_by_sec`, not off the table rows: a row only exists when the
+            # security projects INSIDE the selected window, so reading the basis from
+            # there would report a security's projection as `net` purely because its
+            # next payment falls outside the year being viewed.
+            gross_est = sum(
+                (
+                    next_12m_by_sec.get(sid, Decimal("0"))
+                    for sid in priced
+                    if basis_by_sec.get(sid) == "gross_estimate"
+                ),
+                Decimal("0"),
+            )
+            forward_yield = {
+                "annual_eur": round(float(fwd_income), 2),
+                "pct": round(float(fwd_income / fwd_mv * 100), 2),
+                "on_cost_pct": (
+                    round(float(fwd_income / fwd_cost * 100), 2) if fwd_cost > 0 else None
+                ),
+                # An accumulating ETF counts in `priced_holdings` and not in `paying`,
+                # which is the right answer for it — so a low yield reads as "most of
+                # this book does not distribute" rather than as missing data.
+                "paying_holdings": sum(
+                    1 for sid in priced if next_12m_by_sec.get(sid, Decimal("0")) > 0
+                ),
+                "priced_holdings": len(priced),
+                "unpriced_holdings": len(mv_by_sec) - len(priced),
+                "gross_estimate_eur": round(float(gross_est), 2),
+                "basis": _forward_basis(fwd_income, gross_est),
+            }
 
         if year is not None:
             months_axis = [f"{year:04d}-{m:02d}" for m in range(1, 13)]
@@ -1062,6 +1166,22 @@ class DividendService:
                     round(float(ttm / mv * 100), 2)
                     if mv and mv > 0 and ttm > 0 else None
                 ),
+                # The forward counterpart, and the audit of the portfolio-level figure:
+                # weight each of these by its share of market value and the result is
+                # `forward_yield.pct` exactly.
+                #
+                # Deliberately the security's NEXT-12-MONTH projection, not the
+                # window-limited `forecast_net_eur` beside it — asked in August with
+                # ?year=2026 that field covers Aug-Dec and the yield would read 5/12 of
+                # the truth. So this number does not change with the selected year even
+                # though which rows appear does, and a row can legitimately show a
+                # forecast of 0 next to a non-zero yield when its next payment falls
+                # past the window. Don't "fix" them into agreement.
+                "forward_yield_pct": (
+                    round(float(next_12m_by_sec.get(sid, Decimal("0")) / mv * 100), 2)
+                    if mv and mv > 0 and next_12m_by_sec.get(sid, Decimal("0")) > 0
+                    else None
+                ),
                 # True when the position wasn't held for the whole trailing year, so
                 # a partial year's income is being divided by a full position value
                 # and the yield reads low. Badged, not silently annualized: scaling
@@ -1111,5 +1231,6 @@ class DividendService:
             "ibkr_from": ibkr_from.isoformat() if ibkr_from else None,
             "base_currency": base_fx.base_currency,
             "growth": growth,
+            "forward_yield": forward_yield,
             "upcoming": upcoming,
         }

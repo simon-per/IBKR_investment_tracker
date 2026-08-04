@@ -294,7 +294,32 @@ def test_the_shapes_that_broke_production_serialize(client):
     )
     # Growth is unwindowed: the same numbers whichever year is selected, which is
     # the only reason a year-filtered response can show year-over-year at all.
-    assert client.get("/api/dividends/breakdown").json()["growth"] == growth
+    unwindowed = client.get("/api/dividends/breakdown").json()
+    assert unwindowed["growth"] == growth
+
+    # The forward yield is a SIBLING of growth, not a member — it moves with a market
+    # price, so it is neither growth nor history. Same year-invariance, for its own
+    # reason: a rate describing the next twelve months cannot depend on the window
+    # being viewed.
+    fy = bd["forward_yield"]
+    assert unwindowed["forward_yield"] == fy
+    if fy is not None:
+        # Absent as a whole object or complete — never a zeroed one. `paying_holdings: 0`
+        # beside a null percentage would read as "nothing here pays a dividend".
+        assert isinstance(fy["pct"], float)
+        assert fy["on_cost_pct"] is None or isinstance(fy["on_cost_pct"], float)
+        assert fy["paying_holdings"] <= fy["priced_holdings"]
+        assert fy["basis"] in ("net", "mixed", "gross_estimate")
+        assert 0 <= fy["gross_estimate_eur"] <= fy["annual_eur"]
+        # An appreciated book yields more on cost than on value, and the two must be
+        # computed over the same securities for that gap to mean appreciation at all.
+        if fy["on_cost_pct"] is not None:
+            assert fy["on_cost_pct"] > 0
+    # With no projection there is nothing to divide, and the object must be absent
+    # rather than a 0.00% that asserts this portfolio pays nothing.
+    assert client.get(
+        "/api/dividends/breakdown?forecast=false"
+    ).json()["forward_yield"] is None
 
     # The calendar is dated and ordered, and its rows name a real security.
     upcoming = bd["upcoming"]
@@ -321,6 +346,11 @@ def test_the_shapes_that_broke_production_serialize(client):
             row["trailing_yield_partial"], bool
         )
         assert "forecast_samples" in row and "forecast_cadence_days" in row
+        # The forward yield's per-security audit. Nullable by design — a row with no
+        # projection or no price has no rate, which is not a rate of zero.
+        assert row["forward_yield_pct"] is None or isinstance(
+            row["forward_yield_pct"], float
+        )
         if row["forecast_payouts"] > 0:
             assert row["forecast_samples"] and row["forecast_samples"] >= 2
 

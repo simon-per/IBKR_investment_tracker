@@ -332,6 +332,11 @@ class DividendSecurityRow(BaseModel):
     forecast_payouts: int
     forecast_net_eur: float
     trailing_yield_pct: Optional[float] = None  # TTM net / current market value
+    # The forward counterpart: the security's projection for the NEXT 12 MONTHS over
+    # its current market value. Weight these by market value and they average to
+    # `DividendForwardYield.pct`, which is what makes that headline auditable.
+    # Deliberately unwindowed, unlike `forecast_net_eur` above — see the service.
+    forward_yield_pct: Optional[float] = None
     # True when the position wasn't held for the whole trailing year, so the yield
     # above divides a partial year's income by a full position value and reads low.
     # Not annualized: scaling up would invent income the schedule may not support.
@@ -426,6 +431,45 @@ class DividendUpcomingPayment(BaseModel):
     basis: Optional[str] = None     # 'net' | 'gross_estimate'
 
 
+class DividendForwardYield(BaseModel):
+    """
+    What the portfolio as held today will pay over the next twelve months, as a rate.
+
+    A sibling of {@link DividendGrowth} rather than a member of it: growth is derived
+    from the unwindowed payment *history*, and a figure that moves with a market price
+    is neither growth nor history.
+
+    The whole object is absent — not zeroed — when no projection was run or nothing is
+    priced. That distinction cannot be carried by the fields: `paying_holdings: 0`
+    beside `pct: None` reads as "nothing in this portfolio pays a dividend" when the
+    truth is "there was nothing to divide by", and a count of 0 out of 0 holdings on an
+    account with 36 of them is the *most* misleading form of that.
+    """
+    # Projected net income over the next 365 days, base currency — restricted to
+    # priced holdings, so it is the exact numerator of both ratios below rather than
+    # `growth.next_12m_eur`, which counts unpriced ones too.
+    annual_eur: float
+    pct: float                              # annual_eur / market value of priced holdings
+    # Same income over what those holdings cost. Higher than `pct` on an appreciated
+    # book, and the gap between the two is exactly that appreciation — which only holds
+    # because both denominators cover the same set of securities.
+    on_cost_pct: Optional[float] = None
+    # Coverage. An accumulating ETF counts as priced and not as paying, which is the
+    # correct answer for it: it makes a low yield legible as "most of this book does
+    # not distribute" instead of looking like missing data.
+    paying_holdings: int
+    priced_holdings: int
+    # Held but carrying no usable market value. Excluded from both sides, because a
+    # position valued at 0.00 would add its projected income to the numerator and
+    # nothing to the denominator — the SBI shape, which reads the yield *high*.
+    unpriced_holdings: int
+    # How much of `annual_eur` is sized from yfinance gross per-share, which deducts no
+    # withholding. Quantified rather than flagged, so the caveat can be stated in a
+    # footnote instead of only asserted.
+    gross_estimate_eur: float
+    basis: str                              # 'net' | 'mixed' | 'gross_estimate'
+
+
 class DividendBreakdownResponse(BaseModel):
     years: List[int]
     year: Optional[int] = None      # None = all time
@@ -437,6 +481,8 @@ class DividendBreakdownResponse(BaseModel):
     ibkr_from: Optional[str] = None
     base_currency: str
     growth: Optional[DividendGrowth] = None
+    # None = no projection was run, or nothing held is priced. Never a zeroed object.
+    forward_yield: Optional[DividendForwardYield] = None
     upcoming: List[DividendUpcomingPayment] = []
 
 

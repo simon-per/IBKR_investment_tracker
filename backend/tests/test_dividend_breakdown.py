@@ -16,6 +16,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import Base
 import app.models  # noqa: F401
+from app.models.market_price import MarketPrice
 from app.models.security import Security
 from app.models.taxlot import TaxLot
 from app.repositories.dividend_repository import DividendRepository
@@ -60,6 +61,24 @@ def _lot(security_id, open_date, qty, close_date=None):
         cost_basis=Decimal(qty) * 10, cost_basis_eur=Decimal(qty) * 10,
         price_per_unit=Decimal("10"), currency="EUR",
         is_open=close_date is None, close_date=close_date,
+    )
+
+
+def _price(security_id, close):
+    """
+    A cached close, for the yield denominators.
+
+    Dated **today** rather than at this module's `AS_OF`, and that is not an oversight:
+    `get_positions_breakdown()` hardcodes `date.today()` (`portfolio_service.py`) and
+    ignores the `as_of` the dividend service is given, with only a 14-day lookback. A
+    price seeded at `AS_OF` is therefore invisible and every yield comes back `None` —
+    which no assertion explains, so it is worth saying once here. Nothing in this file
+    seeded a price before the forward yield existed, which is why the yields had never
+    actually been exercised.
+    """
+    return MarketPrice(
+        security_id=security_id, date=date.today(), close_price=Decimal(close),
+        currency="EUR", source="test",
     )
 
 
@@ -468,6 +487,280 @@ async def test_a_forecast_reports_how_thin_its_inference_is():
         assert row["forecast_payouts"] > 0, "it must actually be projecting"
         assert row["forecast_samples"] == 2
         assert 26 <= row["forecast_cadence_days"] <= 35   # read as monthly
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Forward yield — the portfolio's dividend rate, and its per-security audit.
+#
+# The headline is Σ(projected next 12M) / Σ(market value), which *is* the
+# market-value-weighted average of the per-security yields rather than merely
+# resembling one: Σ(Vi/V × Di/Vi) == Σ(Di)/V, every non-payer entering at zero. The
+# first test pins that equality from both ends, because it is the only thing making
+# the card auditable against the column beside it — and either denominator could be
+# "improved" later without anyone noticing the two had stopped agreeing.
+# ---------------------------------------------------------------------------
+
+QUARTERLY = (date(2025, 10, 15), date(2026, 1, 15), date(2026, 4, 15))
+
+
+async def _two_payers(session, price_a="20", price_b="10", per_payment_b="2.50"):
+    """
+    AAA and BBB, 10 shares each (so `cost_basis_eur` is 100 apiece), priced as asked.
+    `price_b=None` leaves BBB unpriced, which is the interesting case.
+    """
+    session.add(_lot(1, date(2025, 1, 2), "10"))
+    session.add(_lot(2, date(2025, 1, 2), "10"))
+    session.add(_price(1, price_a))
+    if price_b is not None:
+        session.add(_price(2, price_b))
+    await session.flush()
+    for d in QUARTERLY:
+        await _seed_payment(session, 1, d, "10.00", "ibkr")
+        await _seed_payment(session, 2, d, per_payment_b, "ibkr")
+    await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_the_portfolio_yield_is_the_market_value_weighted_average_of_its_holdings():
+    engine, session = await _make_session()
+    try:
+        await _two_payers(session)
+        out = await DividendService(session).get_dividend_breakdown(
+            year=2026, include_forecast=True, as_of=AS_OF,
+        )
+        fy = out["forward_yield"]
+        rows = {r["security_id"]: r for r in out["securities"]}
+
+        # Four quarterly payments land in the 365 days after AS_OF for each payer.
+        # AAA: 40 over a 200 market value = 20%. BBB: 10 over 100 = 10%.
+        assert rows[1]["forward_yield_pct"] == 20.00
+        assert rows[2]["forward_yield_pct"] == 10.00
+        assert fy["annual_eur"] == 50.00
+        assert fy["pct"] == 16.67                        # 50 / 300
+
+        # The identity, rebuilt from the rows the UI actually renders.
+        weights = {1: Decimal("200"), 2: Decimal("100")}
+        total = sum(weights.values())
+        rebuilt = sum(
+            weights[sid] / total * Decimal(str(rows[sid]["forward_yield_pct"]))
+            for sid in weights
+        )
+        assert round(float(rebuilt), 2) == fy["pct"]
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_yield_on_cost_shares_the_numerator_and_the_security_set():
+    """
+    The pair is only worth showing because the gap between the two is appreciation, so
+    `on_cost_pct / pct` must equal `market value / cost basis` exactly. Give either
+    denominator a different set of securities and that gap silently starts measuring
+    something else.
+    """
+    engine, session = await _make_session()
+    try:
+        await _two_payers(session)                       # cost 200, market 300
+        fy = (await DividendService(session).get_dividend_breakdown(
+            include_forecast=True, as_of=AS_OF,
+        ))["forward_yield"]
+        assert fy["on_cost_pct"] == 25.00                # 50 / 200
+        assert fy["on_cost_pct"] > fy["pct"]
+        # `rel`, not an exact equality: both sides are rounded to 2dp before we see
+        # them, so 25.00/16.67 is 1.4997 rather than 1.5. The invariant is about the
+        # ratio, not about the last decimal place of a percentage.
+        assert fy["on_cost_pct"] / fy["pct"] == pytest.approx(300 / 200, rel=1e-3)
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_unpriced_holding_is_excluded_from_both_sides_of_the_yield():
+    """
+    portfolio_service values a position with no cached price at 0.00, so leaving it in
+    adds its projected income to the numerator and nothing to the denominator — reading
+    the yield HIGH. That is the SBI shape. Its cost basis *is* known and is dropped
+    anyway, or the gap against yield-on-cost stops being appreciation.
+    """
+    engine, session = await _make_session()
+    try:
+        await _two_payers(session, price_b=None)
+        out = await DividendService(session).get_dividend_breakdown(
+            include_forecast=True, as_of=AS_OF,
+        )
+        fy = out["forward_yield"]
+        assert fy["pct"] == 20.00                        # 40 / 200, not 50 / 200
+        assert fy["annual_eur"] == 40.00
+        assert fy["on_cost_pct"] == 40.00                # 40 / 100, BBB's cost excluded
+        assert fy["unpriced_holdings"] == 1
+        assert fy["priced_holdings"] == 1
+        assert fy["paying_holdings"] == 1
+        rows = {r["security_id"]: r for r in out["securities"]}
+        assert rows[2]["forward_yield_pct"] is None       # absent, never 0.0
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_held_non_payer_counts_as_priced_but_never_as_paying():
+    """
+    The accumulating-ETF case. It drags the yield down, correctly, and must not be
+    mistaken for missing data — CLAUDE.md is explicit that their absence is right.
+    """
+    engine, session = await _make_session()
+    try:
+        session.add(_lot(1, date(2025, 1, 2), "10"))
+        session.add(_lot(2, date(2025, 1, 2), "10"))     # never pays anything
+        session.add(_price(1, "20"))
+        session.add(_price(2, "20"))
+        await session.flush()
+        for d in QUARTERLY:
+            await _seed_payment(session, 1, d, "10.00", "ibkr")
+        await session.commit()
+
+        fy = (await DividendService(session).get_dividend_breakdown(
+            include_forecast=True, as_of=AS_OF,
+        ))["forward_yield"]
+        assert fy["priced_holdings"] == 2
+        assert fy["paying_holdings"] == 1
+        assert fy["pct"] == 10.00                        # 40 / 400 — halved by the non-payer
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_no_projection_run_is_absent_rather_than_a_zero_yield():
+    """
+    With the forecast off there is nothing to divide, and 0.00% would assert "this
+    portfolio pays no dividends" when the truth is that nobody asked. The whole object
+    is None, because `paying_holdings: 0` beside `pct: None` is the same lie in
+    miniature — 0 of 0 holdings on an account that holds two payers.
+    """
+    engine, session = await _make_session()
+    try:
+        await _two_payers(session)
+        out = await DividendService(session).get_dividend_breakdown(
+            include_forecast=False, as_of=AS_OF,
+        )
+        assert out["forward_yield"] is None
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_nothing_priced_is_absent_rather_than_a_zero_yield():
+    """The local-dev shape — every position unpriced. Not a 0% portfolio."""
+    engine, session = await _make_session()
+    try:
+        session.add(_lot(1, date(2025, 1, 2), "10"))
+        await session.flush()
+        for d in QUARTERLY:
+            await _seed_payment(session, 1, d, "10.00", "ibkr")
+        await session.commit()
+
+        out = await DividendService(session).get_dividend_breakdown(
+            include_forecast=True, as_of=AS_OF,
+        )
+        assert out["forward_yield"] is None
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_priced_book_whose_only_payer_is_unpriced_reports_no_yield():
+    """
+    The nastiest of the zero cases, and the one that reached a green suite first: the
+    priced holdings genuinely project nothing *because the security that projects was
+    excluded for having no price*. Dividing gives a confident 0.00% whose real meaning
+    is "the interesting holding is missing" — the SBI shape, pointed the other way.
+    """
+    engine, session = await _make_session()
+    try:
+        session.add(_lot(1, date(2025, 1, 2), "10"))      # pays, but has no price
+        session.add(_lot(2, date(2025, 1, 2), "10"))      # priced, never pays
+        session.add(_price(2, "20"))
+        await session.flush()
+        for d in QUARTERLY:
+            await _seed_payment(session, 1, d, "10.00", "ibkr")
+        await session.commit()
+
+        out = await DividendService(session).get_dividend_breakdown(
+            include_forecast=True, as_of=AS_OF,
+        )
+        assert out["forward_yield"] is None              # not 0.00% over BBB alone
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_forward_yield_is_the_same_whichever_year_is_selected():
+    """
+    A yield describes the next twelve months, so it cannot depend on the window being
+    viewed. The per-security column is unwindowed for the same reason, even though
+    WHICH rows appear is not — so a row can show a zero forecast beside a real yield
+    when its next payment falls past the selected year. Don't reconcile those.
+    """
+    engine, session = await _make_session()
+    try:
+        await _two_payers(session)
+        svc = DividendService(session)
+        all_time = await svc.get_dividend_breakdown(include_forecast=True, as_of=AS_OF)
+        this_year = await svc.get_dividend_breakdown(
+            year=AS_OF.year, include_forecast=True, as_of=AS_OF,
+        )
+        last_year = await svc.get_dividend_breakdown(
+            year=AS_OF.year - 1, include_forecast=True, as_of=AS_OF,
+        )
+        assert all_time["forward_yield"] == this_year["forward_yield"]
+        assert all_time["forward_yield"] == last_year["forward_yield"]
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_forward_yield_declares_a_gross_estimate_contribution():
+    """
+    A projection sized from yfinance's gross per-share deducts no withholding, so a
+    total carrying any of it is not the net figure a bare label would claim — and a
+    yield is the figure most likely to be checked against a broker's own, which quotes
+    gross. Quantified rather than flagged, so the footnote can say how much.
+    """
+    engine, session = await _make_session()
+    try:
+        session.add(_lot(1, date(2025, 1, 2), "10"))       # received real dividends
+        session.add(_lot(2, date(2026, 4, 20), "100"))     # bought after its history
+        session.add(_price(1, "20"))
+        session.add(_price(2, "20"))
+        await session.flush()
+        for d in QUARTERLY:
+            await _seed_payment(session, 1, d, "10.00", "ibkr")
+        # Per-share history with nothing received: the only thing that can size BBB's
+        # projection is yfinance's gross per-share, which is what `gross_estimate` means.
+        for d in QUARTERLY:
+            await DividendRepository(session).upsert_payment({
+                "security_id": 2, "ex_date": d, "pay_date": d, "currency": "EUR",
+                "amount_per_share": Decimal("0.50"), "shares_held": Decimal("0"),
+                "gross_amount_eur": Decimal("0"), "withholding_tax_eur": Decimal("0"),
+                "net_amount_eur": Decimal("0"), "source": "yfinance_estimate",
+            })
+        await session.commit()
+
+        fy = (await DividendService(session).get_dividend_breakdown(
+            include_forecast=True, as_of=AS_OF,
+        ))["forward_yield"]
+        assert fy["basis"] == "mixed"
+        assert 0 < fy["gross_estimate_eur"] < fy["annual_eur"]
     finally:
         await session.close()
         await engine.dispose()
