@@ -2,7 +2,8 @@
 
 **Last updated: 2026-08-04 — market data now reprices seven times a day instead of three, and the
 freeze that made that unsafe is fixed: every European close in production was a 15:00 Berlin
-mid-session price. Committed, NOT pushed — the deploy is a human step (see *Needs a human*).**
+mid-session price, measured wrong by up to 2.11% on a live pass against a prod snapshot. Committed,
+NOT pushed — the deploy is a human step (see *Needs a human*).**
 
 `CLAUDE.md` is the durable guide — architecture, invariants, and the rules that were each a bug
 first. **This file is the perishable half**: where the work actually stands, what is known-broken,
@@ -123,23 +124,50 @@ recent weekday even when cached and the existing upsert restates it — no extra
 wider range on one already being made. CLAUDE.md has the durable rules (*Sync schedule*, and the new
 paragraph beside the holiday rule); what follows is only what it does not say.
 
-**What to check once it is deployed** — nothing here needs a browser:
+### Measured on real data, 2026-08-04 19:07-19:12 Berlin
+
+One full market-data pass, **user-authorised** under rule 1 (the only thing that makes a live Yahoo
+call permissible), run with the new code against a `.backup` snapshot of the production DB **from a
+local machine, not the VPS** — Yahoo's limit is IP-based, so this spent this machine's budget and
+could not have cost the server its evening slots. Snapshot deleted afterwards.
+
+Timing chosen to make the bug visible: 19:07 Berlin is 90 minutes after Xetra closed, so the stored
+row *had* to be wrong, and mid-US-session, so US names *had* to gain a price.
+
+**40/40 securities, `status: success`, no errors, no rate limit, ~40 requests over ~5 minutes
+(~8/min).** And the frozen prices were wrong by real amounts — each of these had been stored as its
+15:00 Berlin mid-session value and was restated to the settled close:
+
+| | was (15:00) | settled close | error |
+|---|---|---|---|
+| XAIX@IBIS2 | 201.25 | 205.50 | **+2.11%** |
+| ABEA@IBIS (Alphabet, Frankfurt) | 320.25 | 326.15 | **+1.84%** |
+| SMH@LSEETF | 106.14 | 107.82 | +1.58% |
+| XNAS@IBIS2 | 58.58 | 59.46 | +1.50% |
+| SXR8@IBIS2 (S&P 500) | 713.12 | 719.96 | +0.96% |
+| EMIM / IWDA @AEB | | | +0.84% / +0.74% |
+| AMZ@IBIS / ASML@AEB | | | +0.23% / +0.12% |
+
+So the European sleeve was understated by up to ~2% every day, and the daily chart kept it
+permanently. **22 US securities gained a price for today that they would not otherwise have had until
+22:00** — prod's 15:00 Berlin job runs at 13:00 UTC, before the 13:30 UTC US open, so no row existed
+at all. Three rows were correctly left alone: Korea and Taiwan close before 15:00 Berlin, so their
+stored values were already settled, and the refresh re-read them and got the same number — the "does
+not thrash an already-settled price" half working.
+
+One reporting wart noticed, pre-existing and not touched: the pass reported `prices_fetched: 234`,
+but that is `sync_security_prices` returning **rows in the window**, not rows written (~80). The field
+has always over-reported; it will simply look larger now that a pass always writes something.
+
+**Still to check once deployed:**
 
 1. `curl /health` → `scheduler_jobstore_persistent: true` still, and `/api/scheduler/status` lists
    **nine** jobs with `market_sync_1..6`. The retired `market_sync_eu_close` / `market_sync_us_close`
    must be **gone**: `_prune_unknown_jobs` evicts them, and simulating the exact prod store here
    confirmed it, but if both sets survived every market-data slot would run twice.
-2. After the first evening slot, that a European security's row for the day was **rewritten**:
-   `select date, created_at from market_prices` for an `AEB`/`IBIS2` security should show a
-   `created_at` at 16:00 or 18:00 UTC rather than 13:00 for today's date. That is the whole fix, and
-   it is the one thing no test can observe.
-3. `/api/scheduler/history` for `rate_limited` on any market-data run. None is expected — the budget
-   works out to ~280 requests/day at ≤48 in any hour against a documented ~500-2,000/hour — but this
-   is 2.8× the previous Yahoo traffic, so it is the number to watch for the first day.
-
-**Yahoo was deliberately not called from this session**, so the refresh is verified by its mechanism
-(the upsert restates, pinned in `tests/test_provisional_price_refresh.py`) rather than against a live
-response. Rule 1 gives no room for a convenience check.
+2. `/api/scheduler/history` for `rate_limited` on any market-data run. None expected — the local pass
+   above is the same shape as one server pass and came back clean — but this is 2.8× the previous
+   Yahoo traffic from the VPS's own IP, so it is the number to watch for the first day.
 
 Also landed, both found while sizing the traffic increase rather than sought:
 
@@ -484,7 +512,9 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
   at its 15:00 Berlin mid-session value**, and an earlier slot would have frozen an earlier price.
   `PROVISIONAL_PRICE_DAYS` re-fetches the trailing three days for free. Also: a Yahoo 429 now
   abandons the pass instead of asking 38 more times, and both `finish-deploy` twins had been guarding
-  the wrong sync hours for four days. Suites 664 → 682. Committed, not pushed.
+  the wrong sync hours for four days. Verified with one user-authorised Yahoo pass against a prod
+  snapshot: 40/40 securities, no rate limit, nine European rows restated (worst 2.11%) and 22 US
+  rows gained that would not have existed until 22:00. Suites 664 → 682. Committed, not pushed.
 - **2026-08-03** — made the UI mobile-friendly at 390x844. One `Column[]` per table now renders as a
   desktop table or a getquin-style card list (`ui/DataTable.tsx`), so the two cannot drift; the shell,
   nav, charts and KPI grids reflow; `e2e/mobile.mjs` measures it at 45/45. Found two bugs that were
