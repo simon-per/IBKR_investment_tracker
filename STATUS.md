@@ -1,9 +1,10 @@
 # Working state
 
-**Last updated: 2026-08-04 (late) — market data reprices seven times a day, live and verified; the
-chart's negative axis is clamped; the app's own INFO logging reaches the container log for the first
-time; the sixteen KPI cards are one component; and the deploy guard on the VPS now covers all nine
-slots. Nothing is outstanding on the deploy side.**
+**Last updated: 2026-08-04 (late) — the Performance tab now reports the portfolio's dividend rate
+(*Dividend Yield* and *Yield on Cost*, replacing *Effective Holdings*); market data reprices seven
+times a day, live and verified; the chart's negative axis is clamped; the app's own INFO logging
+reaches the container log for the first time; the sixteen KPI cards are one component; and the deploy
+guard on the VPS covers all nine slots.**
 
 `CLAUDE.md` is the durable guide — architecture, invariants, and the rules that were each a bug
 first. **This file is the perishable half**: where the work actually stands, what is known-broken,
@@ -170,6 +171,45 @@ class outside `ui/`, the `noRawTables` pattern from `tableFamily.test.tsx`. It u
 `import.meta.glob`, not `node:fs`: the frontend tsconfig is browser-targeted with no `@types/node`,
 so fs type-checks under vitest and then **fails `npm run build`**, breaking the deploy rather than
 the suite. Frontend 316 → 329.
+
+## Shipped 2026-08-04 (late) — the portfolio's dividend rate — NOT YET VERIFIED ON PROD
+
+Two cards on the Performance tab's risk row — *Dividend Yield* (projected next-12-month income over
+market value) and *Yield on Cost* (the same income over cost basis) — in place of *Effective
+Holdings*, which moved into the *Top 5 Weight* footnote so the metric survives without a card. The
+row went 5-up to 6-up, matching the grid the row above already uses. Per-security `Fwd yield` column
+on the Dividends tab is the audit of the headline. Backend 689 → 699, frontend 329 → 342.
+
+**The premise was that Yahoo already gives us per-security yields; it does not, and that is now
+written down in CLAUDE.md.** No dividend field exists anywhere in the backend, `fundamental_metrics`
+is on-demand only, and adding a Yahoo yield would have meant a migration plus a fundamentals pass
+before the cards showed anything — and a second annual-dividend-rate implementation beside the
+forecast. Everything needed was already in one service call.
+
+Three things a review caught that had already been written and were wrong:
+
+- **Hoisting the positions fetch to build `growth` in one place was a latent 500.** It is allowed to
+  degrade to "yields omitted" only because it is the *last* DB access in the method: a DBAPI error
+  leaves the session needing a rollback, so the `earliest_open` query after it would have raised
+  `PendingRollbackError` and taken the whole endpoint down. Reverted, with a comment saying why the
+  uglier ordering is the correct one.
+- **`0.00%` was reachable and was a lie.** The smoke fixture's only forecaster is its unpriced TSMC
+  row, so the priced holdings projected nothing and the yield came out a confident zero meaning "the
+  interesting holding is missing". The object is `None` whenever the numerator is zero.
+- **Gating the row's `isLoading` on the dividend query hid four already-computed metrics** behind a
+  third request. The cards carry their own three states instead.
+
+**What to check on prod after it deploys** (the arithmetic was verified against today's payload
+offline, so this is confirming the wire, not the maths):
+
+- `curl /api/dividends/breakdown | jq '.forward_yield'` — expect a rate of a couple of tenths of a
+  percent, `paying_holdings` around half of `priced_holdings`, `unpriced_holdings` **0**, and
+  `basis: "mixed"` (five securities project on gross per-share).
+- **Hand-divide it**: `annual_eur ÷ summary.total_market_value_eur × 100` must equal `pct`. The two
+  denominators were byte-identical today; if they ever drift, this card and the *Market Value* card
+  disagree in a way a user can see.
+- `cd e2e && node mobile.mjs` — the new footnote is the longest on the row and this is the only check
+  that can see horizontal overflow at 390px.
 
 ## Known rough edges (accepted, not bugs)
 
@@ -645,6 +685,13 @@ detail; this exists so the next session knows what just moved without reading it
 confirmed) and gets deleted once nothing in it is outstanding: these lines are permanent, so don't
 "tidy up" the overlap by deleting the wrong one.
 
+- **2026-08-04** — the Performance tab reports the portfolio's dividend rate. The premise that Yahoo
+  already supplies per-security yields was wrong (no dividend field exists in the backend at all), but
+  `growth.next_12m_eur` and the per-security market values were already in one service call, so the
+  whole feature was a division nothing performed. A weighted average of per-security yields *is*
+  Σincome/Σvalue, so nothing is weighted by hand. Three defects were caught in review after the code
+  was written: a hoisted DB call that would have turned "yields omitted" into a 500, a reachable
+  `0.00%` that meant "the only payer is unpriced", and a loading gate that hid four working metrics.
 - **2026-08-04** — market data reprices seven times a day instead of three (08/11/13/15/18/20/22
   Berlin). The cron edit was the small half: `get_missing_dates()` only ever returned dates with no
   row, so the first job of the day owned that date forever — **production held every European close
@@ -677,8 +724,3 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
   five jobs so `/api/scheduler/status` looked identical to success. Mount is now the parent
   directory, `/health` reports `scheduler_jobstore_persistent`, and the fix is deployed and
   confirmed on prod.
-- **2026-07-31 → 08-01 (overnight)** — autonomous loop, ~22 iterations: three frontend
-  features (risk row, target allocation & drift, currency exposure) and fourteen bugs, the largest being
-  49 sites reading the clock in local time and an unconvertible dividend persisted as EUR. Suites
-  462 → 647 backend, 91 → 268 frontend; every `e2e` script green bar `ledger`. Durable rules promoted
-  into CLAUDE.md, including *The dominant failure mode*.

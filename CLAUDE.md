@@ -729,6 +729,57 @@ payment, so a wide projection sliced to a window equals projecting that window d
 still stops at 31 December. Coupling the two tripled the all-time chart's forecast total (46 → 162)
 by pulling next year's payments into it.
 
+### The forward yield — the portfolio's dividend rate
+
+`forward_yield` on `/api/dividends/breakdown`, rendered as the *Dividend Yield* and *Yield on Cost*
+cards on the Performance tab (they replaced *Effective Holdings*, which moved into the *Top 5 Weight*
+footnote). Projected next-12-month income over market value, and the same income over cost basis.
+
+**It reuses `growth.next_12m_eur`'s projection rather than a Yahoo dividend field, and that is not a
+shortcut.** Nothing stores one: `dividendYield` / `dividendRate` / `payoutRatio` appear nowhere in the
+backend, and `fundamental_metrics` has no dividend column. Adding one would need a migration plus a
+fundamentals pass to populate — that table is written only on demand, so the cards would read blank
+until someone spent ~5 Yahoo requests per security — and it would put a *second* annual-dividend-rate
+implementation beside the forecast, which is this file's opening warning. `yfinance`'s
+`dividendYield` has also silently changed scale (fraction vs percent) between releases.
+
+**Weighting is arithmetic, not code.** A market-value-weighted average of per-security yields *is*
+Σ(income)/Σ(value) — `Σ (Vᵢ/V × Dᵢ/Vᵢ) == Σ Dᵢ / V`, every non-payer entering at zero. So the service
+divides two figures it already holds and nothing is weighted by hand. `forward_yield_pct` on each
+breakdown row is the audit of the headline; the *Fwd yield* column on the Dividends tab shows it.
+
+Four rules, each of which would be a wrong number the other way:
+
+- **An unpriced holding is excluded from both sides.** `portfolio_service` values a position with no
+  cached price at 0.00, so leaving it in adds its projected income to the numerator and nothing to the
+  denominator — reading the yield **high**. The SBI shape, and the same refusal `rebalance.ts` makes.
+  Its cost basis *is* known and is dropped anyway, because the gap between the two cards is only
+  readable as appreciation while both denominators cover the same securities. Counted as
+  `unpriced_holdings` and named on the card.
+- **A zero numerator yields nothing, not 0.00%.** The whole object is `None`. Three states produce a
+  zero — no projection was run, nothing held has a schedule, or the one security that does is unpriced
+  and was excluded — and a 0.00% reports all three as *this portfolio pays no dividends*. The last is
+  the dangerous one, and it is what a green suite served first: the smoke fixture's only forecaster is
+  its unpriced TSMC row.
+- **`paying_holdings: 0` is the same lie in miniature**, which is why absence is carried by the object
+  and not by its fields. A count of 0 of 0 holdings on an account with 36 is worse than no answer.
+- **It is a sibling of `growth`, not a member.** `growth` is defined as derived from the unwindowed
+  payment *history*; a figure that moves with a market price is neither growth nor history, and
+  `DividendKpiCards` — which answers *is this growing* — must not be handed a valuation ratio. Both are
+  year-invariant, and `test_api_smoke.py` pins both from either end.
+
+`basis` is the same three-way flag as elsewhere (`net` | `mixed` | `gross_estimate`) with
+`gross_estimate_eur` quantifying it, because a projection sized from yfinance gross per-share deducts
+no withholding — and a yield is the figure most likely to be checked against a broker's own, which
+quotes gross. The card shows it as *projected, part gross* in the **footnote**: a caveat reachable only
+by hovering does not exist on a touch device, which `DividendsTab` already learned once.
+
+Note the deliberate asymmetry on a row: `forward_yield_pct` always covers the next twelve months while
+`forecast_net_eur` beside it is bounded by the selected window, so a row can show **no forecast and a
+real yield** when its next payment falls past the year being viewed. Don't reconcile them — keying the
+yield to the window would make it read 5/12 of the truth when asked in August.
+Tests: the forward-yield block in `tests/test_dividend_breakdown.py`.
+
 ### Growth — MoM / YoY, and the five ways it lies
 
 `growth` and `upcoming` on `/api/dividends/breakdown`, rendered as the KPI strip, the per-year panel
@@ -1430,7 +1481,7 @@ raiser for that whole module, so an accidental network reach fails loudly; `/api
 is excluded because it lazy-fetches Yahoo on a cache miss, and POST routes are excluded because they
 start real syncs. **Add a case here when an endpoint's response shape changes.**
 
-Tests (684 backend + 308 frontend as of 2026-08-04, all offline — no IBKR, Yahoo or FX-provider
+Tests (699 backend + 342 frontend as of 2026-08-04, all offline — no IBKR, Yahoo or FX-provider
 calls). Take the number the suite actually prints as your baseline, not this line — it has been stale
 by 200+ on both halves before:
 ```bash
@@ -1565,6 +1616,10 @@ Tests: `tests/test_currency_fallback.py`.
 | Steuerwert reads `—` instead of a number | `holdings_snapshot_error`: the snapshot raised. Check the logs — this is deliberately *not* 0.00 |
 | A dividend forecast looks invented | Check `forecast_samples` on the breakdown row — n≤2 is a guess. Then `manage_mappings list` for `DIVIDENDS PREDATE MAPPING`, and purge with `purge_dividend_estimates` |
 | A trailing yield looks far too low | `trailing_yield_partial`: the position wasn't held a full year, so partial income is over a full position value. Not a bug, and deliberately not annualized |
+| Dividend Yield reads a fraction of a percent | Expected on this book: most of it is growth equity plus seven accumulating ETFs, which correctly contribute nothing. Read the *N of M pay* footnote before suspecting the figure |
+| Dividend Yield reads `—` / *No projected dividends* | Nothing projects among the **priced** holdings. Check the market-data sync's `warnings[]` for an unpriced payer — deliberately not 0.00%, which would claim the portfolio pays nothing |
+| Dividend Yield says *couldn't load* | The `/api/dividends/breakdown` query failed. The other four cards on that row still render, by design — it is not gated on this one |
+| Yield on Cost ≠ Dividend Yield × some factor you expect | The factor is exactly market value ÷ cost basis, nothing else: same numerator, same securities. If it isn't, one denominator has picked up a different holding set |
 | A position's value is far off IBKR's | Suspect the `ticker_mappings` row before the price feed: run `manage_mappings list` and look for a currency disagreement, then compare `market_prices.close_price` against IBKR's `market_price` in the *same* currency |
 | App total ≠ IBKR total | Compare against `gross_position_value`, **not** net liquidation (which adds cash); and intraday the app holds the last *close* while IBKR quotes live |
 | Site "down" in the browser | Often TIM home DNS, not the server — verify with `Test-NetConnection`, not `nslookup` |
