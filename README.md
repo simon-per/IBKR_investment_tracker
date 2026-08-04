@@ -253,7 +253,7 @@ cd backend && alembic upgrade head
 ## Project Structure
 
 ```
-IBKR Investment Tracker/
+ibkr-portfolio-tracker/
 ├── backend/
 │   ├── app/
 │   │   ├── models/          # SQLAlchemy models
