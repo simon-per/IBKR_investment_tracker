@@ -74,11 +74,20 @@ if ($ahead -eq 0) { Warn 'Nothing to push - skipping to the verification step.' 
 $berlin = Get-BerlinTime
 if ($null -eq $berlin) {
     Warn 'Could not resolve the Europe/Berlin timezone, so the sync-slot check was skipped.'
-    Warn 'Slots are 08:00/13:00/15:00/20:00/22:00 Europe/Berlin.'
+    Warn 'Slots are on the hour at 00/06/08/11/13/15/18/20/22 Berlin.'
     if (-not (Ask 'Continue anyway?')) { Die 'Stopped.' }
 } else {
     $nowMin = $berlin.Hour * 60 + $berlin.Minute
-    $near = @(480, 780, 900, 1200, 1320) | Where-Object { [Math]::Abs($nowMin - $_) -le 12 }
+    # Keep in step with the Bash twin and ops/auto-deploy.sh; all three are copies of
+    # ALL_SYNC_HOURS in backend/app/services/scheduler_service.py, and
+    # tests/test_deploy_guard_hours.py fails if any of them disagrees.
+    # 00:00  06:00  08:00  11:00  13:00  15:00  18:00  20:00  22:00
+    $near = @(0, 360, 480, 660, 780, 900, 1080, 1200, 1320) | Where-Object {
+        $d = [Math]::Abs($nowMin - $_)
+        # Wrap around midnight, so 23:55 is 5 minutes from the 00:00 slot, not 1435.
+        if ($d -gt 720) { $d = 1440 - $d }
+        $d -le 12
+    }
     if ($near) {
         $slot = '{0:00}:{1:00}' -f [int]($near[0] / 60), ($near[0] % 60)
         Warn ("It is {0} Berlin - within 12 minutes of the {1} sync slot." -f $berlin.ToString('HH:mm'), $slot)

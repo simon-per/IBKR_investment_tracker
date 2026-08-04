@@ -1,8 +1,8 @@
 # Working state
 
-**Last updated: 2026-08-03 — the UI is mobile-friendly and live: every table renders as a card list
-on a phone, the page no longer scrolls sideways on any tab, and `e2e/mobile.mjs` measures it (45/45
-against production). Nothing is outstanding on the deploy side.**
+**Last updated: 2026-08-04 — market data now reprices seven times a day instead of three, and the
+freeze that made that unsafe is fixed: every European close in production was a 15:00 Berlin
+mid-session price. Committed, NOT pushed — the deploy is a human step (see *Needs a human*).**
 
 `CLAUDE.md` is the durable guide — architecture, invariants, and the rules that were each a bug
 first. **This file is the perishable half**: where the work actually stands, what is known-broken,
@@ -74,7 +74,8 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
   `DIVIDENDS PREDATE MAPPING` flag (which would mean the rows came from an older ticker) rather than
   assuming either way.
 - **`market_prices` gaps heal only at 08:00.** The 7-day jobs restore current value after a split
-  purge; the full history comes back at the next 730-day `full_sync`.
+  purge; the full history comes back at the next 730-day `full_sync`. There are six 7-day jobs now,
+  so current value returns within ~2h rather than by the evening.
 
 ## Known rough edges (accepted, not bugs)
 
@@ -94,6 +95,70 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
   `yfinance_estimate` row is a gross guess with no withholding and reads *Dividend · est.*; the era
   splice that governs the Dividends tab does **not** apply here, because a ledger's job is to show
   what is on record rather than to pick a source per period.
+- **A price inside the session is an intraday value, not a close, and that is now normal.** Five of
+  the seven market-data slots run mid-session, so the newest row is provisional until the market
+  shuts; it is re-fetched at every slot for three days and settles on its own. Only a wrong value
+  **older** than three days is a bug.
+- **A benchmark's newest point can lag the portfolio's** if nobody opened the chart that day. The
+  scheduled warm-up deliberately skips the provisional refresh — eight warm tickers × seven slots
+  would multiply its burst for a value no one read — and the chart's own lazy fetch refreshes the
+  benchmark actually selected. Deliberate Yahoo-budget trade, not an oversight.
+
+## Shipped 2026-08-04 — committed, NOT pushed
+
+**Market data now reprices seven times a day (08/11/13/15/18/20/22 Berlin) instead of three, and the
+reason it took more than a cron edit is that adding slots alone would have made the numbers worse.**
+
+`get_missing_dates()` returned only dates with **no row at all**, so whichever job wrote a date first
+owned it forever. Read off `market_prices.created_at` on production, not inferred:
+
+- every European close was its **15:00 Berlin mid-session price** — Xetra and Euronext run to 17:30,
+  and the job named "after EU close" ran 2.5 hours before it;
+- Korea's alternated between mid-session and final depending on whether the 08:00 or the 15:00 job
+  happened to land the row first;
+- the 22:00 job wrote US closes within ~40s of the bell and nothing ever restated them.
+
+So an *earlier* slot would have frozen an *earlier* price. `PROVISIONAL_PRICE_DAYS` (3) re-fetches a
+recent weekday even when cached and the existing upsert restates it — no extra Yahoo requests, just a
+wider range on one already being made. CLAUDE.md has the durable rules (*Sync schedule*, and the new
+paragraph beside the holiday rule); what follows is only what it does not say.
+
+**What to check once it is deployed** — nothing here needs a browser:
+
+1. `curl /health` → `scheduler_jobstore_persistent: true` still, and `/api/scheduler/status` lists
+   **nine** jobs with `market_sync_1..6`. The retired `market_sync_eu_close` / `market_sync_us_close`
+   must be **gone**: `_prune_unknown_jobs` evicts them, and simulating the exact prod store here
+   confirmed it, but if both sets survived every market-data slot would run twice.
+2. After the first evening slot, that a European security's row for the day was **rewritten**:
+   `select date, created_at from market_prices` for an `AEB`/`IBIS2` security should show a
+   `created_at` at 16:00 or 18:00 UTC rather than 13:00 for today's date. That is the whole fix, and
+   it is the one thing no test can observe.
+3. `/api/scheduler/history` for `rate_limited` on any market-data run. None is expected — the budget
+   works out to ~280 requests/day at ≤48 in any hour against a documented ~500-2,000/hour — but this
+   is 2.8× the previous Yahoo traffic, so it is the number to watch for the first day.
+
+**Yahoo was deliberately not called from this session**, so the refresh is verified by its mechanism
+(the upsert restates, pinned in `tests/test_provisional_price_refresh.py`) rather than against a live
+response. Rule 1 gives no room for a convenience check.
+
+Also landed, both found while sizing the traffic increase rather than sought:
+
+- **A Yahoo 429 no longer keeps asking.** This repo's guide credited `market_data_service.py` with
+  "rate-limit detection that aborts the run"; it aborted only the ticker *variations* for the
+  security in hand, so the caller logged a failure and moved on to the next of 40. Harmless at three
+  passes a day, not at seven. `MarketDataService.rate_limited` latches and `sync_market_data` breaks
+  with a warning.
+- **Both `ops/finish-deploy.*` twins had the wrong slot hours for four days** — written with
+  13:00/20:00 on the very day those were retired for 00:00/06:00, so the interactive guard would
+  report "clear of every sync slot" at 05:58 Berlin. Only `auto-deploy.sh` was under test; all three
+  copies are now read by `tests/test_deploy_guard_hours.py` against `ALL_SYNC_HOURS`, and the
+  scheduler-side check no longer regexes literal `hour=` digits out of the source (which would have
+  silently ignored any slot registered from a loop or at a half-hour). The twins also gained the
+  midnight wraparound they needed from the moment 00:00 became a slot.
+- Stale hour lists corrected in `app/main.py`'s startup log (now built from the constant) and
+  `config.py`'s comment.
+
+Suites: backend **664 → 682**, all offline. Frontend untouched.
 
 ## Shipped 2026-07-31 — DEPLOYED and verified
 
@@ -256,10 +321,11 @@ not say.
   `scheduler-data/scheduler_jobs.db`, all five job ids in `apscheduler_jobs`, and zero fallback
   warnings in the log). What that does **not** prove is misfire recovery end to end — the logs should
   show `kept, next run:` rather than recomputing. That needs a deploy landing within
-  `MISFIRE_GRACE_SECONDS` of a Berlin slot (00/06/08/15/22:00); none ever has.
+  `MISFIRE_GRACE_SECONDS` of a Berlin slot; there are nine now, so this is much likelier to happen
+  by itself than it was with five.
 
   Read a `false` on that health flag as: the store fell back to memory again, so a deploy overlapping
-  a slot still loses that sync. `/api/scheduler/status` cannot tell you — it lists all five jobs
+  a slot still loses that sync. `/api/scheduler/status` cannot tell you — it lists every job
   either way, which is how this went unnoticed for two days.
 
 ## The overnight batch — pushed and live
@@ -342,7 +408,7 @@ Rough priority. The auto-deploy install moved to *Needs a human* — it is the l
 Each of these cost real time at least once.
 
 - **`SCHEDULER_ENABLED=false` in `backend/.env` for any local run.** Otherwise starting uvicorn arms
-  the five daily Europe/Berlin jobs against the live Flex token and Yahoo. Defaults to `True` so
+  the nine daily Europe/Berlin jobs against the live Flex token and Yahoo. Defaults to `True` so
   production is unaffected.
 - **Check which port Vite actually took.** If 5173 is occupied it moves to 5174 and says so once. A
   stray dev server on 5173 configured against production means you are reading prod data and issuing
@@ -353,10 +419,11 @@ Each of these cost real time at least once.
   is real account data; `*.db` is gitignored but it should not linger).
 - **The base currency is whatever the user last picked** (`/api/settings`, EUR/CHF/USD). Every money
   figure moves with it, so never compare a number across sessions without checking it.
-- **Don't push within ~10 minutes of a Berlin sync slot** (08/13/15/20/22:00). Auto-deploy rebuilds
-  in ~90 s, so an overlapping deploy used to lose that sync outright. The persistent job store now
-  recovers it on startup if the gap is under 30 minutes — but a slow `--no-cache` rebuild can exceed
-  that, so the habit still earns its keep.
+- **Don't push within ~10 minutes of a Berlin sync slot** — now nine of them, on the hour at
+  00/06/08/11/13/15/18/20/22. Auto-deploy rebuilds in ~90 s, so an overlapping deploy used to lose
+  that sync outright. The persistent job store recovers it if the gap is under 30 minutes, but a slow
+  `--no-cache` rebuild can exceed that. `ops/finish-deploy.*` checks this for you and is now correct
+  — both twins had been warning about the retired 13:00/20:00 and missing the live 00:00/06:00.
 - **`curl 127.0.0.1:<vite port>` fails while the browser works.** Vite binds `localhost`, which
   resolves to `::1` first on this machine, so the IPv4 literal gets connection-refused and looks like
   a dead dev server. Use `http://localhost:<port>`.
@@ -411,6 +478,13 @@ detail; this exists so the next session knows what just moved without reading it
 confirmed) and gets deleted once nothing in it is outstanding: these lines are permanent, so don't
 "tidy up" the overlap by deleting the wrong one.
 
+- **2026-08-04** — market data reprices seven times a day instead of three (08/11/13/15/18/20/22
+  Berlin). The cron edit was the small half: `get_missing_dates()` only ever returned dates with no
+  row, so the first job of the day owned that date forever — **production held every European close
+  at its 15:00 Berlin mid-session value**, and an earlier slot would have frozen an earlier price.
+  `PROVISIONAL_PRICE_DAYS` re-fetches the trailing three days for free. Also: a Yahoo 429 now
+  abandons the pass instead of asking 38 more times, and both `finish-deploy` twins had been guarding
+  the wrong sync hours for four days. Suites 664 → 682. Committed, not pushed.
 - **2026-08-03** — made the UI mobile-friendly at 390x844. One `Column[]` per table now renders as a
   desktop table or a getquin-style card list (`ui/DataTable.tsx`), so the two cannot drift; the shell,
   nav, charts and KPI grids reflow; `e2e/mobile.mjs` measures it at 45/45. Found two bugs that were
@@ -438,8 +512,3 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
   357 → 462 backend, 45 → 91 frontend; verified against a prod snapshot and in a real browser, which
   found three defects the green suite did not. **Deployed the same evening**: write auth on and
   enforced, guarded auto-deploy installed, five scheduler jobs surviving the rebuild.
-- **2026-07-30** — two batches: five audit fixes (Yahoo gating, `openDateTime` off ibflex, SELL beats
-  the cost-conserved heuristic, tax-report honesty, dividend card net), then the SBI dividend bug —
-  poisoned estimates purged on prod, mapping changes now retire the rows they produced, source-aware
-  dividend key, provenance detector, batched price/lot writes, forecast/yield qualifiers. Suite
-  313 → 357, deployed and verified. Lost the 08:00 full_sync to a deploy landing in the slot.

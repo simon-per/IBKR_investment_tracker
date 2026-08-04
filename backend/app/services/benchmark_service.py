@@ -10,6 +10,7 @@ from typing import List, Dict, Optional, Set, Tuple
 from datetime import date, timedelta
 from decimal import Decimal
 from sqlalchemy import select, and_, delete
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import yfinance as yf
@@ -62,7 +63,8 @@ def reset_upstream_throttle() -> None:
 
 
 def _missing_business_days(
-    start_date: date, end_date: date, cached: Set[date]
+    start_date: date, end_date: date, cached: Set[date],
+    refresh_provisional: bool = False,
 ) -> Set[date]:
     """
     Business days in [start, end] with no cached row, minus settled holidays.
@@ -75,6 +77,16 @@ def _missing_business_days(
 
     Shared by the price and FX paths so the two can't drift; same rule as
     MarketPriceRepository.get_missing_dates.
+
+    ``refresh_provisional`` additionally re-reports the trailing
+    PROVISIONAL_PRICE_DAYS even when cached, because a row written during a live
+    session holds a mid-session price rather than a close. **The price path opts
+    in and the FX path deliberately does not**: an ECB reference rate is published
+    once a day, so there is no intraday rate to converge on, and
+    `_batch_fetch_rates` dedups per row against what is already stored — it could
+    not rewrite the row even if asked. Opting FX in would spend a provider request
+    per chart load to change nothing, which is the exact waste this helper was
+    extracted to stop.
     """
     from app.repositories.market_price_repository import MarketPriceRepository
 
@@ -95,6 +107,11 @@ def _missing_business_days(
             d for d in missing
             if not (first_cached < d < last_cached and d < holiday_cutoff)
         }
+    if refresh_provisional:
+        provisional_from = date.today() - timedelta(
+            days=MarketPriceRepository.PROVISIONAL_PRICE_DAYS
+        )
+        missing |= {d for d in (expected & cached) if d >= provisional_from}
     return missing
 
 
@@ -117,9 +134,34 @@ class BenchmarkService:
     # ── Price fetching / caching ───────────────────────────────────────
 
     async def _ensure_prices_available(
-        self, ticker: str, start_date: date, end_date: date, currency: str = "USD"
+        self, ticker: str, start_date: date, end_date: date, currency: str = "USD",
+        refresh_provisional: bool = True,
     ) -> int:
-        """Lazy-sync: fetch missing benchmark prices from Yahoo Finance."""
+        """
+        Lazy-sync: fetch missing benchmark prices from Yahoo Finance.
+
+        ``refresh_provisional`` re-fetches the trailing days whose cached row may hold a
+        mid-session value — see MarketPriceRepository.PROVISIONAL_PRICE_DAYS. **On by
+        default for the read path and off for the scheduled warm-up**, and the asymmetry
+        is a Yahoo-budget decision rather than a correctness one:
+
+        - A read fetches the *one* benchmark being viewed, behind a 300s per-ticker
+          throttle. That is where the staleness is visible: the chart draws the
+          benchmark against the portfolio, so if the portfolio settles to real closes
+          while the benchmark keeps whatever it was first fetched at today, the *gap*
+          between the two lines drifts over the day — the one number the panel exists
+          to show.
+        - `sync_benchmark_prices` loops **every** warm benchmark (all eight, on this
+          account) with only a 1-2s gap. Refreshing there would turn today's
+          once-a-day 8-request burst into one per market-data slot, seven times a day,
+          against a documented burst tolerance of ~10-20. It buys nothing a reader
+          sees, so it stays off and the scheduled pass costs exactly what it does now.
+
+        The residual is deliberate and small: a day nobody opened the chart on can keep
+        a mid-session benchmark close once it ages out of the window. That is the
+        pre-existing behaviour, it never affects a series being looked at, and the fix
+        would be a Yahoo bill paid on every slot for a value no one read.
+        """
         # Check what we already have (include buffer zone to avoid duplicate inserts)
         buffer_start = start_date - timedelta(days=10)
         result = await self.db.execute(
@@ -134,7 +176,10 @@ class BenchmarkService:
         )
         existing_dates = {row[0] for row in result.all()}
 
-        missing = _missing_business_days(start_date, end_date, existing_dates)
+        missing = _missing_business_days(
+            start_date, end_date, existing_dates,
+            refresh_provisional=refresh_provisional,
+        )
         if not missing:
             return 0
 
@@ -182,25 +227,40 @@ class BenchmarkService:
                 logger.warning(f"No data returned from Yahoo for {ticker}")
                 return 0
 
-            new_count = 0
+            rows = []
             for idx, row in hist.iterrows():
                 price_date = idx.date()
-                if price_date in existing_dates:
+                # Unchanged for a date never seen before — including the few days of
+                # fetch buffer that fall outside [start, end]. `missing` additionally
+                # carries the trailing provisional days, which already have a row and
+                # so would otherwise be skipped here for the whole day.
+                if price_date in existing_dates and price_date not in missing:
                     continue
+                rows.append({
+                    "ticker": ticker,
+                    "date": price_date,
+                    "close_price": Decimal(str(round(row["Close"], 6))),
+                    "currency": currency,
+                    "source": "yahoo_finance",
+                })
 
-                self.db.add(BenchmarkPrice(
-                    ticker=ticker,
-                    date=price_date,
-                    close_price=Decimal(str(round(row["Close"], 6))),
-                    currency=currency,
-                    source="yahoo_finance",
+            if rows:
+                # Upsert, not insert-if-absent: a provisional date by definition
+                # already has a row, and `session.add` on the unique (ticker, date)
+                # would raise instead of restating it.
+                stmt = sqlite_insert(BenchmarkPrice).values(rows)
+                await self.db.execute(stmt.on_conflict_do_update(
+                    index_elements=["ticker", "date"],
+                    set_={
+                        "close_price": stmt.excluded.close_price,
+                        "currency": stmt.excluded.currency,
+                        "source": stmt.excluded.source,
+                    },
                 ))
-                existing_dates.add(price_date)
-                new_count += 1
 
             await self.db.flush()
-            logger.info(f"Cached {new_count} new {ticker} prices")
-            return new_count
+            logger.info(f"Cached {len(rows)} {ticker} prices")
+            return len(rows)
 
         except Exception as e:
             logger.error(f"Failed to persist benchmark {ticker} prices: {e}")

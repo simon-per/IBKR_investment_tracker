@@ -32,6 +32,10 @@ from apscheduler.triggers.cron import CronTrigger
 
 from app.config import settings
 from app.services.scheduler_service import (
+    ALL_SYNC_HOURS,
+    FULL_SYNC_HOUR,
+    IBKR_ONLY_HOURS,
+    MARKET_DATA_HOURS,
     MISFIRE_GRACE_SECONDS,
     STALE_PRICE_DAYS,
     SchedulerService,
@@ -40,6 +44,10 @@ from app.services.scheduler_service import (
     ibkr_only_sync_job_entry,
     market_data_only_sync_job_entry,
 )
+
+# One job per declared hour — pinned by test_scheduler_registers_every_declared_job,
+# which asserts no two of the three groups share one.
+EXPECTED_JOB_COUNT = len(ALL_SYNC_HOURS)
 
 
 class _Spy:
@@ -139,6 +147,71 @@ def test_collect_warnings_merges_steps_and_stays_absent_when_there_are_none():
     quiet = {}
     _collect_warnings(quiet, {"status": "success"}, None)
     assert "warnings" not in quiet   # a clean run must not grow an empty list
+
+
+# --- the Yahoo rate-limit circuit breaker -------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_yahoo_rate_limit_abandons_the_rest_of_the_pass(monkeypatch):
+    """
+    CLAUDE.md's recovery for a Yahoo rate limit is "stop immediately, wait 30-60 min",
+    and until now the run did the opposite: `fetch_prices_from_yahoo` aborted only the
+    *ticker variations* for the security in hand, so the caller logged a failure and
+    moved straight on to the next of ~40, asking the same IP again seconds later for
+    several more minutes.
+
+    Cheap to ignore at three market-data passes a day. Not at seven, which is why this
+    lands with the intraday slots rather than separately.
+    """
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:", poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr("app.services.scheduler_service.AsyncSessionLocal", maker)
+
+    try:
+        async with maker() as seed:
+            for i in range(1, 5):
+                seed.add(Security(
+                    id=i, isin=f"US000000000{i}", symbol=f"S{i}", description=f"S{i}",
+                    currency="USD", conid=1000 + i, asset_category="STK",
+                    exchange="NASDAQ",
+                ))
+            await seed.commit()
+
+        attempted = []
+
+        async def _fetch(self, security, days_back=730):
+            attempted.append(security.symbol)
+            if len(attempted) == 2:
+                self.rate_limited = True     # Yahoo said 429 on the second security
+                return 0
+            return 5
+
+        monkeypatch.setattr(
+            "app.services.market_data_service.MarketDataService.sync_security_prices",
+            _fetch,
+        )
+
+        result = await SchedulerService().sync_market_data(days_back=7)
+
+        assert len(attempted) == 2, f"kept asking after a rate limit: {attempted}"
+        assert result["securities_processed"] == 2
+        assert result["prices_fetched"] == 5, "the first security's prices were kept"
+        assert result["status"] == "partial_success"
+        assert result["rate_limited"] is True
+        # The warning has to survive the diagnostics block below it, which used to
+        # assign `warnings` outright and would have dropped the one line explaining
+        # why two thirds of the portfolio has no fresh price.
+        assert any("rate-limited" in w for w in result["warnings"])
+    finally:
+        await engine.dispose()
 
 
 # --- stale / missing prices ---------------------------------------------------------
@@ -262,8 +335,12 @@ def jobstore_url(tmp_path, monkeypatch):
     return url
 
 
+def _trigger_hour(job) -> int:
+    return int(str(job.trigger).split("hour='")[1].split("'")[0])
+
+
 @pytest.mark.asyncio
-async def test_scheduler_registers_five_jobs_with_expected_hours(jobstore_url):
+async def test_scheduler_registers_every_declared_job(jobstore_url):
     # async so AsyncIOScheduler has a running loop to attach to (it only reports
     # itself as running inside one, and shutdown() raises otherwise).
     svc = SchedulerService()
@@ -273,14 +350,76 @@ async def test_scheduler_registers_five_jobs_with_expected_hours(jobstore_url):
 
         assert set(jobs) == {
             'full_sync_job', 'ibkr_retry_1', 'ibkr_retry_2',
-            'market_sync_eu_close', 'market_sync_us_close',
+            *(f'market_sync_{i}' for i in range(1, len(MARKET_DATA_HOURS) + 1)),
         }
-        # The two IBKR retries must not collide with the market-data jobs, so that a
-        # Yahoo sync and an IBKR sync never run concurrently against the same DB.
-        hours = {jid: str(job.trigger) for jid, job in jobs.items()}
-        assert "hour='0'" in hours['ibkr_retry_1']
-        assert "hour='6'" in hours['ibkr_retry_2']
-        assert "hour='8'" in hours['full_sync_job']
+        # The IBKR jobs must not collide with a market-data job, or a Yahoo sync and
+        # an IBKR sync run concurrently against the same DB.
+        assert _trigger_hour(jobs['ibkr_retry_1']) == IBKR_ONLY_HOURS[0]
+        assert _trigger_hour(jobs['ibkr_retry_2']) == IBKR_ONLY_HOURS[1]
+        assert _trigger_hour(jobs['full_sync_job']) == FULL_SYNC_HOUR
+        assert not set(IBKR_ONLY_HOURS) & set(MARKET_DATA_HOURS)
+        assert FULL_SYNC_HOUR not in MARKET_DATA_HOURS
+    finally:
+        svc.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_the_registered_slots_are_exactly_the_declared_ones(jobstore_url):
+    """
+    ALL_SYNC_HOURS is what `ops/auto-deploy.sh` is checked against, so it has to be
+    what actually runs rather than a comment that agrees with the code today.
+
+    This is the half `test_deploy_guard_hours.py` cannot see: that file compares the
+    shell script to the constant, and this one compares the constant to the triggers
+    APScheduler ends up holding. Together they mean a new slot cannot be added
+    without the deploy guard learning about it — the previous arrangement regexed
+    literal `hour=` digits out of the source, which a slot registered from a loop or
+    at a half-hour would have slipped straight past.
+    """
+    svc = SchedulerService()
+    try:
+        svc.start()
+        registered = {_trigger_hour(job) for job in svc.scheduler.get_jobs()}
+        assert registered == set(ALL_SYNC_HOURS)
+
+        for job in svc.scheduler.get_jobs():
+            assert "minute='0'" in str(job.trigger), (
+                f"{job.id} does not run on the hour. The deploy guard reasons in whole "
+                f"hours, so it could not defer a deploy away from this slot."
+            )
+    finally:
+        svc.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_market_data_repriced_at_least_every_three_hours_intraday(jobstore_url):
+    """
+    The point of the 2026-08-04 change: the portfolio was repriced at 08:00, 15:00 and
+    22:00 Berlin only, so a value read mid-morning could be seven hours stale, and
+    Xetra's *close* was never captured at all — the 15:00 job ran 2.5 hours before it.
+
+    Asserted as a coverage property rather than as a list of hours, so re-timing a slot
+    stays free while quietly dropping back to two-a-day does not. 09:00-22:00 Berlin
+    spans the European session and the US session end to end.
+    """
+    svc = SchedulerService()
+    try:
+        svc.start()
+        market_hours = sorted(
+            _trigger_hour(job) for job in svc.scheduler.get_jobs()
+            if job.id.startswith('market_sync_') or job.id == 'full_sync_job'
+        )
+        covering = [h for h in market_hours if 8 <= h <= 22]
+        gaps = [b - a for a, b in zip(covering, covering[1:])]
+        assert gaps and max(gaps) <= 3, (
+            f"market data reprices at {covering}:00 Berlin, leaving a {max(gaps)}h gap "
+            f"inside market hours"
+        )
+        # Europe closes at 17:30 and the US at 22:00; each needs a slot after it, or
+        # the day's real close is never fetched and the last provisional one sticks
+        # once it ages past PROVISIONAL_PRICE_DAYS.
+        assert any(18 <= h <= 21 for h in market_hours), "no slot after the European close"
+        assert any(h >= 22 for h in market_hours), "no slot at or after the US close"
     finally:
         svc.shutdown()
 
@@ -398,7 +537,7 @@ async def test_a_job_this_build_no_longer_registers_is_removed_from_the_store(jo
     assert 'ibkr_sync_midday' not in ids, "a retired job kept firing from the store"
     assert ids == {
         'full_sync_job', 'ibkr_retry_1', 'ibkr_retry_2',
-        'market_sync_eu_close', 'market_sync_us_close',
+        *(f'market_sync_{i}' for i in range(1, len(MARKET_DATA_HOURS) + 1)),
     }
 
 
@@ -450,7 +589,7 @@ async def test_jobs_are_serializable_into_the_persistent_store(jobstore_url):
         funcs = {job.id: job.func for job in second.scheduler.get_jobs()}
         assert funcs['full_sync_job'] is full_sync_job_entry
         assert funcs['ibkr_retry_1'] is ibkr_only_sync_job_entry
-        assert funcs['market_sync_us_close'] is market_data_only_sync_job_entry
+        assert funcs['market_sync_1'] is market_data_only_sync_job_entry
     finally:
         second.shutdown()
 
@@ -462,7 +601,7 @@ async def test_an_empty_jobstore_url_keeps_the_scheduler_in_memory(monkeypatch):
     svc = SchedulerService()
     try:
         svc.start()
-        assert len(svc.scheduler.get_jobs()) == 5
+        assert len(svc.scheduler.get_jobs()) == EXPECTED_JOB_COUNT
     finally:
         svc.shutdown()
 
@@ -512,7 +651,7 @@ async def test_an_unusable_job_store_degrades_instead_of_killing_the_container(
 
         # Came up anyway, with the full schedule.
         assert svc.scheduler is not None
-        assert len(svc.scheduler.get_jobs()) == 5
+        assert len(svc.scheduler.get_jobs()) == EXPECTED_JOB_COUNT
         # And said so, rather than degrading silently.
         assert any("running in memory" in r.getMessage() for r in caplog.records)
     finally:

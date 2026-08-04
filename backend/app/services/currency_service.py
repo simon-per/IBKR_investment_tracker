@@ -457,7 +457,7 @@ class CurrencyService:
 
         # The fallback is latest-only, so re-fetching a currency already cached for this
         # date would return the same number. Skipping those makes the warm-up a no-op
-        # after the day's first run instead of one request on each of the five jobs.
+        # after the day's first run instead of one request on each of the day's jobs.
         outstanding = []
         for currency in secondary:
             if await self._get_cached_rate(currency, target_date, to_currency) is None:

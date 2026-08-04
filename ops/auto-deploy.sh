@@ -33,7 +33,12 @@ KEEP_BACKUPS=10
 # protected: two slots guarded that no longer run, and the two overnight IBKR slots
 # guarded by nothing. `tests/test_deploy_guard_hours.py` now reads this file and fails
 # the suite if the two ever disagree again.
-SYNC_HOURS="0 6 8 15 22"
+#
+# 0/6/8 are the IBKR slots; the rest are MARKET_DATA_HOURS, widened on 2026-08-04 from
+# 15/22 so the portfolio reprices through both sessions instead of only after each
+# close. Nine guarded slots defer at most ~3h of the day in 21-minute bands, and
+# auto-deploy ticks every 10 minutes, so a push still lands promptly.
+SYNC_HOURS="0 6 8 11 13 15 18 20 22"
 # Minutes either side of a slot to stay clear of. A rebuild takes ~2-5 minutes and
 # APScheduler is in-process, so a deploy overlapping a slot loses that run. The
 # persistent job store (2026-08-01) recovers a misfire up to 30 minutes late, so this

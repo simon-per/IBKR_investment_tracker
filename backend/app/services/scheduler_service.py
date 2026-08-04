@@ -73,9 +73,9 @@ def ensure_jobstore_parent(url: str) -> None:
         logger.exception("Could not create the scheduler job store directory %s", path.parent)
 
 # How old the newest cached price for a held security may be before we say so.
-# Generous enough to absorb a weekend plus a public holiday, and the 13:00 job running
-# before the US open, so a warning means something is actually wrong rather than "the
-# market was shut". Five days is roughly one trading week of silence.
+# Generous enough to absorb a weekend plus a public holiday, and a slot that runs
+# before a market opens, so a warning means something is actually wrong rather than
+# "the market was shut". Five days is roughly one trading week of silence.
 STALE_PRICE_DAYS = 5
 
 # How long IBKR may go without a *successful* sync before we say so.
@@ -111,6 +111,27 @@ IBKR_SYNC_TYPES = ('ibkr', 'ibkr_sync', 'full_sync', 'ibkr_manual_xml')
 # collapses repeats of the same job into one.
 MISFIRE_GRACE_SECONDS = 30 * 60
 
+# ── The schedule, in Europe/Berlin hours ──────────────────────────────────────
+#
+# These four constants are the single source of truth for when anything runs. They
+# exist as constants rather than as literals inside the `CronTrigger` calls because
+# `ops/auto-deploy.sh` carries its own copy of the same hours — it defers a deploy
+# that would land in a slot — and that copy has already drifted once, in the worst
+# possible direction (it guarded two retired slots and left the live ones bare).
+# `tests/test_deploy_guard_hours.py` now compares the shell script against
+# ALL_SYNC_HOURS, and `test_the_registered_slots_are_exactly_the_declared_ones`
+# checks the triggers really come from here, so the chain is closed end to end.
+#
+# Whole hours only, and that is a constraint rather than a preference: the guard
+# reasons in hours, so a half-hour slot could not be expressed on its side and
+# would run unprotected.
+IBKR_ONLY_HOURS = (0, 6)
+FULL_SYNC_HOUR = 8
+# 08:00 is absent here because the full sync already reprices then; these are the
+# additional market-data touches. Why six and not two: see `start()`.
+MARKET_DATA_HOURS = (11, 13, 15, 18, 20, 22)
+ALL_SYNC_HOURS = tuple(sorted({FULL_SYNC_HOUR, *IBKR_ONLY_HOURS, *MARKET_DATA_HOURS}))
+
 
 def _collect_warnings(job_result: dict, *step_results) -> None:
     """
@@ -133,15 +154,16 @@ class SchedulerService:
     """
     Service for scheduling automated data synchronization tasks.
 
-    Runs 5 times daily (Europe/Berlin):
+    Runs 9 times daily (Europe/Berlin):
     - 00:00: IBKR + FX only — no Yahoo
     - 06:00: IBKR + FX only — no Yahoo
     - 08:00: Full sync (IBKR + 730 days market data) — fills historical gaps gradually
-    - 15:00: Market data only (7 days) — picks up EU closing prices
-    - 22:00: Market data only (7 days) — picks up US closing prices
+    - 11:00, 13:00, 15:00, 18:00, 20:00, 22:00: Market data only (7 days)
 
     The two IBKR-only slots sit overnight on purpose; see `_ibkr_only_sync_locked`
-    and `test_every_ibkr_job_avoids_us_market_hours`.
+    and `test_every_ibkr_job_avoids_us_market_hours`. The market-data slots are
+    deliberately spread *through* both sessions rather than sitting after each
+    close — see MARKET_DATA_HOURS and `start()`.
     """
 
     def __init__(self):
@@ -240,6 +262,8 @@ class SchedulerService:
 
                 total_prices = 0
                 errors = []
+                processed = 0
+                rate_limited_after = None
 
                 logger.info(f"Syncing market data for {len(securities)} securities...")
 
@@ -247,14 +271,16 @@ class SchedulerService:
                     try:
                         logger.info(f"Fetching prices for {security.symbol} ({security.exchange})...")
 
-                        # Fetch historical data
-                        # The service will only fetch missing dates
+                        # Fetch historical data. The service fetches the dates we are
+                        # missing plus the trailing few whose cached close may still be
+                        # a mid-session price.
                         prices_count = await market_data_service.sync_security_prices(
                             security,
                             days_back=days_back
                         )
 
                         total_prices += prices_count
+                        processed += 1
                         logger.info(f"Fetched {prices_count} price points for {security.symbol}")
 
                     except Exception as e:
@@ -262,13 +288,26 @@ class SchedulerService:
                         logger.error(error_msg)
                         errors.append(error_msg)
 
+                    # Yahoo said back off. CLAUDE.md's recovery for a rate limit is
+                    # "stop immediately, wait 30-60 min", and the remaining securities
+                    # in this pass are the same IP asking again seconds later. What is
+                    # already written stays written, and the next slot resumes — the
+                    # dates it did not reach are simply still missing.
+                    if market_data_service.rate_limited:
+                        rate_limited_after = security.symbol
+                        logger.error(
+                            f"Yahoo rate-limited at {security.symbol}; abandoning the "
+                            f"remaining {len(securities) - processed} securities this run"
+                        )
+                        break
+
                 # Commit all price data
                 await db.commit()
 
                 result = {
-                    "status": "success" if not errors else "partial_success",
-                    "message": f"Synced market data for {len(securities)} securities",
-                    "securities_processed": len(securities),
+                    "status": "success" if not (errors or rate_limited_after) else "partial_success",
+                    "message": f"Synced market data for {processed} of {len(securities)} securities",
+                    "securities_processed": processed,
                     "prices_fetched": total_prices,
                     "timestamp": utc_iso(utcnow())
                 }
@@ -276,6 +315,15 @@ class SchedulerService:
                 if errors:
                     result["errors"] = errors
                     result["errors_count"] = len(errors)
+
+                if rate_limited_after:
+                    result["rate_limited"] = True
+                    result["warnings"] = [
+                        f"Yahoo rate-limited this run at {rate_limited_after}; "
+                        f"{len(securities) - processed} securities were skipped and "
+                        f"keep their previous prices. Do not trigger a manual sync — "
+                        f"the next scheduled slot resumes"
+                    ]
 
                 # A fetch that returned nothing is not an error anywhere: the position
                 # simply gets no price, and _calculate_daily_value / the positions
@@ -306,7 +354,10 @@ class SchedulerService:
                 except Exception as e:
                     logger.warning(f"Could not check IBKR sync freshness: {e}")
                 if diagnostics:
-                    result["warnings"] = diagnostics
+                    # Append: the rate-limit abort above may already have put a
+                    # warning here, and a plain assignment would drop the one
+                    # warning that explains why the rest of the run is missing.
+                    result["warnings"] = (result.get("warnings") or []) + diagnostics
 
                 logger.info(f"Market data sync completed: {total_prices} prices fetched")
                 return result
@@ -627,8 +678,14 @@ class SchedulerService:
                     bench_info = ticker_to_benchmark.get(ticker)
                     currency = bench_info["currency"] if bench_info else "USD"
                     try:
+                        # No provisional refresh here: this loops every warm benchmark
+                        # back to back with a 1-2s gap, and doing it at all seven
+                        # market-data slots would multiply that burst by seven for a
+                        # value nobody is reading. The chart's own lazy fetch refreshes
+                        # the benchmark being viewed. See _ensure_prices_available.
                         count = await bench_service._ensure_prices_available(
-                            ticker, start, today, currency=currency
+                            ticker, start, today, currency=currency,
+                            refresh_provisional=False,
                         )
                         if count > 0:
                             logger.info(f"Synced {count} benchmark prices for {ticker}")
@@ -767,9 +824,12 @@ class SchedulerService:
 
     async def market_data_only_sync_job(self) -> Optional[dict]:
         """
-        Market-data-only sync job that runs at 15:00 and 22:00 Europe/Berlin.
-        Only checks last 7 days — very lightweight, just picks up recent closing prices.
-        Also syncs exchange rates to keep FX data current.
+        Market-data-only sync job, at each of MARKET_DATA_HOURS (Europe/Berlin).
+
+        Only checks the last 7 days — lightweight, one Yahoo request per security. Most
+        of those slots land *inside* a session, so the trailing rows it writes are
+        mid-session prices that a later slot restates; that is by design and rests on
+        MarketPriceRepository.PROVISIONAL_PRICE_DAYS. Also syncs exchange rates.
         """
         return await self._gated_job("market_data_only", self._market_data_only_locked)
 
@@ -981,12 +1041,10 @@ class SchedulerService:
 
     def start(self):
         """
-        Start the scheduler with 5 daily syncs (Europe/Berlin):
+        Start the scheduler with 9 daily syncs (Europe/Berlin):
+        - 00:00, 06:00: IBKR only — second chances if the 08:00 statement isn't ready
         - 08:00: Full sync (IBKR + 730 days market data) — fills historical gaps
-        - 13:00: IBKR only — second chance if the morning statement wasn't ready
-        - 15:00: Market data only (7 days) — after European market close
-        - 20:00: IBKR only — last chance to land the day's trades
-        - 22:00: Market data only (7 days) — after US market close
+        - MARKET_DATA_HOURS: market data only (7 days), through both sessions
 
         Jobs are persisted to `settings.scheduler_jobstore_url` so a restart that
         overlaps a slot recovers it instead of losing it — see MISFIRE_GRACE_SECONDS.
@@ -1035,8 +1093,8 @@ class SchedulerService:
 
         self._add_or_keep(
             'full_sync_job', full_sync_job_entry,
-            CronTrigger(hour=8, minute=0, timezone='Europe/Berlin'),
-            'Full IBKR + Market Data Sync (08:00 Europe/Berlin)',
+            CronTrigger(hour=FULL_SYNC_HOUR, minute=0, timezone='Europe/Berlin'),
+            f'Full IBKR + Market Data Sync ({FULL_SYNC_HOUR:02d}:00 Europe/Berlin)',
         )
         # Two IBKR-only second chances, so a transient Code=1001 at 08:00 does not cost a
         # full day of freshness.
@@ -1068,26 +1126,56 @@ class SchedulerService:
         # rename (see `_prune_unknown_jobs`). Encoding the schedule in the identity
         # guarantees exactly this problem on the next change; the human-readable hour
         # lives in `name`, which is free to change.
-        self._add_or_keep(
-            'ibkr_retry_1', ibkr_only_sync_job_entry,
-            CronTrigger(hour=0, minute=0, timezone='Europe/Berlin'),
-            'IBKR-only Sync (00:00 Europe/Berlin)',
-        )
-        self._add_or_keep(
-            'ibkr_retry_2', ibkr_only_sync_job_entry,
-            CronTrigger(hour=6, minute=0, timezone='Europe/Berlin'),
-            'IBKR-only Sync (06:00 Europe/Berlin)',
-        )
-        self._add_or_keep(
-            'market_sync_eu_close', market_data_only_sync_job_entry,
-            CronTrigger(hour=15, minute=0, timezone='Europe/Berlin'),
-            'Market Data Sync after EU Close (15:00 Europe/Berlin)',
-        )
-        self._add_or_keep(
-            'market_sync_us_close', market_data_only_sync_job_entry,
-            CronTrigger(hour=22, minute=0, timezone='Europe/Berlin'),
-            'Market Data Sync after US Close (22:00 Europe/Berlin)',
-        )
+        for index, hour in enumerate(IBKR_ONLY_HOURS, start=1):
+            self._add_or_keep(
+                f'ibkr_retry_{index}', ibkr_only_sync_job_entry,
+                CronTrigger(hour=hour, minute=0, timezone='Europe/Berlin'),
+                f'IBKR-only Sync ({hour:02d}:00 Europe/Berlin)',
+            )
+        # Market data runs seven times a day, and five of those are *inside* a
+        # session on purpose — the portfolio was only ever repriced at 08:00, 15:00
+        # and 22:00, so a figure looked at mid-morning was up to seven hours old.
+        #
+        # **Intraday slots are only correct because a recent close is now
+        # re-fetched** (MarketPriceRepository.PROVISIONAL_PRICE_DAYS). Yahoo answers
+        # a daily request with a bar for the live session, and until 2026-08-04 the
+        # first row of the day was kept forever: production held every European
+        # close at its 15:00 Berlin mid-session value. Adding an earlier slot on top
+        # of that would have frozen an *earlier* price, making the number worse
+        # rather than fresher. If that refresh is ever removed, these slots have to
+        # go with it.
+        #
+        # Berlin hours against the sessions they serve (both EU and US shift with
+        # DST together, so the coverage holds year-round):
+        #
+        #     08:00  full sync; settles yesterday's US close and Asia's
+        #     11:00  Xetra/Euronext/LSE ~2h in — also settles Tokyo and Korea,
+        #            whose closes the 08:00 run catches mid-session
+        #     13:00  Europe ~4h in
+        #     15:00  Europe ~6h in, US pre-open
+        #     18:00  Europe settled (closes 17:30), US ~2.5h in
+        #     20:00  US ~4.5h in
+        #     22:00  US close
+        #
+        # Worst gap inside either session is ~2.5h, down from ~7h.
+        #
+        # 13:00 and 20:00 were IBKR slots until 2026-07-31 and were retired for
+        # failing mid-session. **These are not those slots coming back** — market
+        # data touches only Yahoo, and Yahoo has no statement to generate and no
+        # `Code=1025` budget to spend. The prohibition is specific to Flex; see
+        # `_ibkr_only_sync_locked` and `test_every_ibkr_job_avoids_us_market_hours`.
+        #
+        # The ids are numbered rather than named for their hour, for the reason the
+        # IBKR pair above is: an id is the one thing a persistent job store cannot
+        # cheaply rename, so encoding a schedule in it guarantees a lie on the next
+        # change. `market_sync_eu_close` / `market_sync_us_close` were exactly that
+        # — the first named itself after a close it ran 2.5 hours before.
+        for index, hour in enumerate(MARKET_DATA_HOURS, start=1):
+            self._add_or_keep(
+                f'market_sync_{index}', market_data_only_sync_job_entry,
+                CronTrigger(hour=hour, minute=0, timezone='Europe/Berlin'),
+                f'Market Data Sync ({hour:02d}:00 Europe/Berlin)',
+            )
 
         self._prune_unknown_jobs()
         self.scheduler.resume()

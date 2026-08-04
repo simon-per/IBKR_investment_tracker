@@ -27,10 +27,11 @@ class Settings(BaseSettings):
 
     # Whether to arm the APScheduler jobs on startup. Defaults to True so
     # production is unaffected; set SCHEDULER_ENABLED=false for local runs.
-    # Without it, merely starting uvicorn on a dev machine arms the 08:00/13:00/
-    # 15:00/20:00/22:00 Europe/Berlin jobs against the real IBKR token in .env
-    # and against Yahoo — the two things this project must never do casually
-    # (see the two rules at the top of CLAUDE.md).
+    # Without it, merely starting uvicorn on a dev machine arms every job in
+    # ALL_SYNC_HOURS (scheduler_service) against the real IBKR token in .env and
+    # against Yahoo — the two things this project must never do casually (see the
+    # two rules at the top of CLAUDE.md). Deliberately not listing the hours here:
+    # the copy that used to sit in this comment went stale the day they changed.
     scheduler_enabled: bool = True
 
     # Shared secret required on POST/PUT/PATCH/DELETE under /api/ (see app/auth.py).

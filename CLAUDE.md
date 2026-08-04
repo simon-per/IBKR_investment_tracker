@@ -461,7 +461,7 @@ request per security, since fetching is range-based.
 
 **Holidays are not "missing" forever.** `get_missing_dates()` skipped weekends but not market holidays,
 so a date the exchange never traded (4 July, Good Friday) stayed missing permanently — and one such date
-makes `fetch_and_cache_prices` re-request that security's **entire range** on every one of the five
+makes `fetch_and_cache_prices` re-request that security's **entire range** on every one of the
 daily jobs, indefinitely, against an IP-based rate limit. An **interior** weekday hole (cached data on
 both sides) older than `HOLIDAY_GRACE_DAYS` (30) now counts as a holiday: every sync since has already
 failed to fill it. Younger holes stay missing so late data can arrive, and **leading/trailing gaps stay
@@ -469,6 +469,30 @@ missing at any age** — which is exactly what a purge-and-refill repair looks l
 and the split invalidation above still heal normally. `BenchmarkService` applies the same rule via its
 own `_missing_business_days()`, shared by its price *and* FX paths. Tests:
 `tests/test_missing_dates_holidays.py`, `tests/test_benchmark_fx_window.py`.
+
+**A recent close is provisional, so it is re-fetched even when cached.** Yahoo answers a daily-interval
+request with a bar for the session *in progress*, whose `Close` is merely the last trade so far — and
+because `get_missing_dates()` returned only dates with **no row at all**, whichever job wrote a date
+first owned it permanently. Read off `market_prices.created_at` on 2026-08-04: every European close in
+production was its **15:00 Berlin mid-session price** (Xetra and Euronext run to 17:30), and Korea's
+alternated between mid-session and final depending on whether the 08:00 or the 15:00 job happened to
+land the row first. So a weekday within `PROVISIONAL_PRICE_DAYS` (3) of today is reported missing even
+when cached, and `bulk_create`'s `ON CONFLICT DO UPDATE` lets the settled close overwrite it.
+
+Three is what covers the two cases "today" does not: the 22:00 slot writes a US close within seconds
+of the bell and only the next morning settles it, and **Friday's close must still be refreshable on
+Monday**. It cannot collide with the holiday rule above — that needs a date older than 30 days and this
+one needs it newer than 3 — and it cannot re-request forever, because a date Yahoo has no bar for ages
+out of the window and falls back under the holiday rule. It costs **no extra requests**, only a wider
+range on one already being made.
+
+This is the **precondition for the intraday market-data slots**, not a separate cleanup: adding an
+earlier slot on top of the freeze pins an *earlier* price. If the refresh is ever removed the slots
+have to go with it. `BenchmarkService` opts in per caller — the read path yes, the scheduled warm-up no
+— for the Yahoo-budget reason given in *Sync schedule*, and the **FX path deliberately never** does: an
+ECB reference rate is published once a day, so there is no intraday rate to converge on, and
+`_batch_fetch_rates` dedups per row and could not rewrite it anyway. Tests:
+`tests/test_provisional_price_refresh.py`.
 
 The fetch is also **span-narrowed**: the Yahoo request starts a few days before `min(missing)`
 (`PRICE_FETCH_BUFFER_DAYS`), not at the window start — the 08:00 730-day job used to re-download two
@@ -480,10 +504,11 @@ Two details carry the weight. `PRICE_RESTATING_ACTIONS` is a deliberate **subset
 `SPLIT_LIKE_ACTIONS`: we fetch with `auto_adjust=False` and Yahoo rebases raw `Close` for splits only,
 so `SPINOFF`/`STOCKDIV`/`ISSUECHANGE` are excluded as pure churn. And it fires **only for actions
 newly inserted on this sync** (`CorporateActionRepository.existing_ib_keys()`) — the statement
-resends every action inside its period every time, so without that check all five daily jobs would wipe and refetch the
+resends every action inside its period every time, so without that check every daily job would wipe and refetch the
 same history forever. Reported in `warnings[]` and as `prices_invalidated`.
 Limitation: the 7-day jobs restore the current value, but the full history only comes back at the next
-**08:00** 730-day `full_sync`. Tests: `tests/test_split_price_invalidation.py`.
+**08:00** 730-day `full_sync`. (There are six 7-day jobs now, not two, so the current value returns
+within a couple of hours rather than by the evening.) Tests: `tests/test_split_price_invalidation.py`.
 
 ---
 
@@ -874,12 +899,46 @@ read a small non-zero gap in the base currency as FX, not as a dropped lot. Test
 | 00:00 | `ibkr_only_sync_job` — IBKR + FX | no |
 | 06:00 | `ibkr_only_sync_job` — IBKR + FX | no |
 | 08:00 | `full_sync_job` — IBKR + FX + 730d market data + dividends | **yes** |
-| 15:00 | `market_data_only_sync_job` (7d) | yes |
-| 22:00 | `market_data_only_sync_job` (7d) | yes |
+| 11:00, 13:00, 15:00, 18:00, 20:00, 22:00 | `market_data_only_sync_job` (7d) | yes |
+
+**The hours live in one place** — `IBKR_ONLY_HOURS` / `FULL_SYNC_HOUR` / `MARKET_DATA_HOURS`, and
+`ALL_SYNC_HOURS` over them — because three other files carry a copy: `ops/auto-deploy.sh` defers a
+deploy that would land in a slot, and both `ops/finish-deploy.*` twins warn a human before pushing.
+All three had drifted by 2026-08-04, the finish-deploy pair for four days, in the direction that
+*permits* a collision: they warned about the retired 13:00/20:00 and never mentioned the live
+00:00/06:00. `tests/test_deploy_guard_hours.py` reads all three against `ALL_SYNC_HOURS` and
+`test_the_registered_slots_are_exactly_the_declared_ones` checks the triggers come from it, so the
+chain is closed end to end. Whole hours only — the guards reason in hours, so a half-hour slot
+could not be expressed on their side and would run unprotected.
 
 The two IBKR-only jobs exist because a transient `Code=1001` at 08:00 used to cost a full day of
 freshness. They deliberately **skip** market data and yfinance dividends — see rule 1. Pinned by
 `tests/test_scheduler_jobs.py`. Status: `GET /api/scheduler/status`.
+
+**Market data was repriced three times a day until 2026-08-04 and now runs seven times, five of
+them mid-session.** Before, a value read mid-morning could be seven hours old, and Xetra's *close*
+was never captured at all: the job named "after EU close" ran at 15:00, 2.5 hours before the 17:30
+close. The worst gap inside either session is now ~2.5h. **This is only correct because a recent
+close is re-fetched** (`PROVISIONAL_PRICE_DAYS`, below) — without it an earlier slot freezes an
+*earlier* price and makes the number worse rather than fresher, so the two changes cannot be
+separated. Coverage is pinned as a property (`≤3h between slots, plus one after each close`) rather
+than as a list of hours, so re-timing a slot stays free while dropping back to two a day does not.
+
+Cost, since rule 1 makes this the question: **one Yahoo request per security per pass either way** —
+the refresh only widens a range on a request already being made. 40 securities × 7 passes ≈ 280
+requests/day at ≤48 in any hour, against a documented ~500–2,000/hour, and the ~7.5s per-security
+pacing keeps a pass at ~8 requests/minute, under the ~10–20 burst tolerance. Slots are ≥2h apart, so
+two passes never share an hour. The scheduled *benchmark* warm-up deliberately does **not** refresh —
+it loops all eight warm benchmarks 1-2s apart, so doing it seven times a day would multiply that
+burst for a value nobody read; the chart's own lazy fetch refreshes the one being viewed.
+
+**A rate limit now abandons the rest of the pass.** This file already credited
+`market_data_service.py` with "rate-limit detection that aborts the run" and it only ever aborted the
+ticker *variations* for the security in hand — the caller logged a failure and moved on to the next of
+40, asking the same IP again seconds later. `MarketDataService.rate_limited` latches on the first 429
+and `sync_market_data` breaks, reporting `rate_limited: true` plus a `warnings[]` line. What was
+already written stays written and the next slot resumes, since the dates it never reached are simply
+still missing. That mattered little at three passes a day.
 
 **Every IBKR attempt must sit outside US market hours, and this is measured rather than assumed.**
 IBKR builds a Year-to-Date statement from *finalised* daily data, so `SendRequest` succeeds overnight
@@ -902,6 +961,11 @@ lockout budget twice a day to recover nothing. They moved to 00:00 and 06:00 on 
 
 Keep any future IBKR slot inside roughly **22:00–09:00 Berlin**; a midday one looks helpful and is
 not. `test_every_ibkr_job_avoids_us_market_hours` fails the suite if one drifts back.
+
+**Market data reprices at 13:00 and 20:00 and that is not those slots coming back.** The prohibition
+is specific to Flex: Yahoo has no statement to generate and no `Code=1025` budget to spend, so a
+mid-session market-data request is ordinary while a mid-session *IBKR* request is self-harm. The test
+above keys on `IBKR_JOB_IDS`, not on the hour, for exactly this reason.
 
 **Read "we suddenly get constant 1001s" as *we added slots that never worked*, not as a regression.**
 The 13:00/20:00 jobs were introduced in `67e6a59` on **2026-07-25** — the same day `sync_runs`
@@ -1063,7 +1127,7 @@ that a real outage doesn't dump four stale slots onto a cold container.
 **The failure mode to fear here is that the fallback looks exactly like success.** When the store
 won't open, `start()` degrades to an in-memory scheduler — deliberately, because an exception out of
 the lifespan handler costs the whole site while losing misfire recovery costs one late sync. But the
-fallback **re-registers all five jobs**, so `/api/scheduler/status` reports a fully-armed scheduler
+fallback **re-registers every job**, so `/api/scheduler/status` reports a fully-armed scheduler
 either way, and the sole symptom is one `logger.error` nobody had reason to read. It was inert for
 two days behind exactly that appearance, while STATUS.md recorded it as verified working. `/health`
 therefore reports **`scheduler_jobstore_persistent`**: if it is `false`, a deploy overlapping a
@@ -1324,7 +1388,7 @@ cd frontend && npm run dev          # http://localhost:5173
 ```
 
 **Set `SCHEDULER_ENABLED=false` in `backend/.env` for any local run.** Starting the backend is not a
-neutral act: the lifespan handler arms the 00:00/06:00/08:00/15:00/22:00 Europe/Berlin jobs, which call
+neutral act: the lifespan handler arms every `ALL_SYNC_HOURS` Europe/Berlin job, which call
 the live Flex API with the real token from `.env` and hit Yahoo — both rules at the top of this file,
 from a dev machine. `settings.scheduler_enabled` defaults to **True** so production is unaffected, and
 a disabled scheduler logs a warning because otherwise it looks exactly like a healthy site whose data
@@ -1471,6 +1535,9 @@ Tests: `tests/test_currency_fallback.py`.
 | Yahoo 404/429 | **Stop.** Wait 30-60 min. Check `yfinance >= 1.1.0` |
 | A position is missing from the portfolio | Check `taxlots_skipped` + `warnings[]` on the sync run — usually a currency neither FX provider covers |
 | A position shows 0.00 / `market_price: null` | No cached price. The market-data sync's `warnings[]` now names it. Fix the `ticker_mappings` row, or fill it with `app/cli/import_prices.py` from IBKR bars |
+| A price looks like an intraday value, not a close | Expected inside the session, and it self-corrects: a weekday within `PROVISIONAL_PRICE_DAYS` (3) is re-fetched at every slot, so the settled close lands after the market shuts. If it is still wrong **after** 3 days, that is a real freeze — check `market_prices.created_at` against the exchange's close time |
+| A market-data run reports `rate_limited: true` | Yahoo returned 429 and the pass stopped deliberately, leaving the later securities on their previous prices. **Do not trigger a manual sync** — wait; the next slot resumes and re-fetches only what is missing |
+| A benchmark's last point looks stale while the portfolio moves | The scheduled warm-up does not refresh provisional benchmark rows (Yahoo budget — eight tickers, seven slots). Opening the chart refreshes the one selected |
 | The chart steps at a split date | Cached pre-split closes. A *new* split purges them automatically; for an older one delete that security's `market_prices` and let 08:00 refill |
 | A new currency appears | Nothing to do if it's in `WARM_CURRENCIES` or the ECB set. Otherwise add it there — one edit, no extra request |
 | "Money added" spikes in one month | A transfer booked as a deposit. `manage_cash_flows list`, then `reclassify <ib_key> --as TRANSFER_IN`. **Never** trust an Added figure without eyeballing that list first |
@@ -1486,7 +1553,7 @@ Tests: `tests/test_currency_fallback.py`.
 | A write returns 401 | `API_ADMIN_TOKEN` is set and the browser has no key. Lock button in the header; the same value goes in `backend/.env` |
 | A request returns 429 with `Retry-After` | Either the sync cooldown (`single_flight`) or the per-IP limit (`RATE_LIMIT_PER_MINUTE`). The response body says which |
 | "Which build is live?" | `curl /health` — it reports `version`, `commit`, `scheduler_enabled`, `write_auth_enabled` and `scheduler_jobstore_persistent`. Same line in the app footer |
-| A missed sync was **not** recovered after a restart | `curl /health` for `scheduler_jobstore_persistent`. `false` means the store fell back to memory, so misfire recovery is off — `/api/scheduler/status` still lists all five jobs and cannot tell you this. Check the compose mount is the `scheduler-data` **directory** |
+| A missed sync was **not** recovered after a restart | `curl /health` for `scheduler_jobstore_persistent`. `false` means the store fell back to memory, so misfire recovery is off — `/api/scheduler/status` still lists every job and cannot tell you this. Check the compose mount is the `scheduler-data` **directory** |
 | A 500 with no detail | By design. Grep the container log for its `request_id`, which is in the body and the `X-Request-ID` header |
 | A missed sync ran late after a restart | Expected: the persistent job store honours a misfire for 30 min. Older than that is dropped, and the next slot recovers |
 | A drift row reads `—` instead of advice | No target (unmanaged — blank is not 0%), or the position has no cached price so it has no weight to compare. Both deliberate; see *Client-side analytics* |

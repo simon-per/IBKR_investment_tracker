@@ -63,11 +63,15 @@ async def lifespan(app: FastAPI):
     # IBKR Flex token and Yahoo, so a developer running uvicorn locally would
     # arm real syncs against a rate-limited, lockout-prone API. Defaults to on,
     # so production keeps its schedule; local .env sets SCHEDULER_ENABLED=false.
-    from app.services.scheduler_service import get_scheduler
+    from app.services.scheduler_service import ALL_SYNC_HOURS, get_scheduler
     scheduler = get_scheduler()
     if settings.scheduler_enabled:
         scheduler.start()
-        logger.info("Scheduler started - Syncs at 08:00, 13:00, 15:00, 20:00, 22:00 Europe/Berlin")
+        # Built from the constant, not spelled out: this line still read
+        # "08:00, 13:00, 15:00, 20:00, 22:00" for four days after those hours moved,
+        # which is a log that actively misleads whoever is diagnosing a missed sync.
+        slots = ", ".join(f"{h:02d}:00" for h in ALL_SYNC_HOURS)
+        logger.info(f"Scheduler started - syncs at {slots} Europe/Berlin")
     else:
         # Logged loudly: a silently disabled scheduler looks exactly like a
         # healthy site whose data has quietly stopped moving.

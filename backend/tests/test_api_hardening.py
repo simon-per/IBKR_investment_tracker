@@ -53,7 +53,7 @@ def test_health_reports_whether_the_job_store_is_persistent(client):
     """
     The only externally visible difference between a working job store and the
     in-memory fallback. `/api/scheduler/status` cannot tell them apart, because the
-    fallback re-registers all five jobs — which is how a store that had never once
+    fallback re-registers every job — which is how a store that had never once
     opened looked healthy from 2026-07-30 to 08-01.
 
     False here in tests: `conftest.py` blanks the job store URL for the whole suite,

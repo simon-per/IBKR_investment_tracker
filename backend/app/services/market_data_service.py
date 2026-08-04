@@ -39,6 +39,13 @@ class MarketDataService:
     - etc.
     """
 
+    # Latched the first time Yahoo answers with a rate limit; see __init__ for why it
+    # exists. Declared on the class as well as assigned per instance because the tests
+    # build a service through `__new__` to skip the DB, and a read of a
+    # never-initialised attribute would fail there rather than in production — a shape
+    # that turns a safety net into a crash in the one place it is exercised.
+    rate_limited = False
+
     # Mapping of IBKR exchange codes to Yahoo Finance suffixes
     EXCHANGE_SUFFIXES = {
         # US Exchanges
@@ -96,6 +103,19 @@ class MarketDataService:
         self.market_price_repo = MarketPriceRepository(db)
         from app.repositories.ticker_mapping_repository import TickerMappingRepository
         self.ticker_mapping_repo = TickerMappingRepository(db)
+
+        # Latched by `fetch_prices_from_yahoo` the first time Yahoo answers with a
+        # rate limit, and read by `fetch_and_cache_prices` to refuse every later
+        # security in the same pass.
+        #
+        # CLAUDE.md already credited this service with "rate-limit detection that
+        # aborts the run" and it only ever aborted the *ticker variations* for the
+        # one security: the caller logged a failure and moved straight on to the
+        # next of ~40, so a run that had already been told to back off kept asking
+        # for several more minutes. Cheap to ignore at three market-data passes a
+        # day; not at seven. The flag lives on the instance, and a pass builds its
+        # own, so it is per-run state and never leaks into a later job.
+        self.rate_limited = False
 
         # yfinance 1.1.0+ handles sessions and User-Agent headers internally
         # No need to create a custom session
@@ -193,6 +213,7 @@ class MarketDataService:
         # If we hit rate limit, stop immediately - don't try variations
         if rate_limited:
             logger.warning(f"Rate limit hit on {ticker}, stopping variations to avoid further blocking")
+            self.rate_limited = True
             return []
 
         # If primary fails (but not rate limited), try variations
@@ -210,6 +231,7 @@ class MarketDataService:
                 # If we hit rate limit during variations, stop immediately
                 if rate_limited:
                     logger.warning(f"Rate limit hit on variation {alt_ticker}, stopping")
+                    self.rate_limited = True
                     return []
 
                 if prices:
@@ -491,15 +513,27 @@ class MarketDataService:
             end_date: End date (defaults to today)
 
         Returns:
-            Number of new prices cached
+            Number of prices written — new rows plus provisional ones re-stated. It
+            has counted rows *submitted* rather than rows newly inserted since
+            bulk_create, so a run over a warm cache no longer reports 0.
         """
+        # Yahoo has already told us to back off, so asking again for a different
+        # security is the same IP making the same mistake. Ahead of the sleep as
+        # well as the request: once a pass is abandoned there is nothing to pace.
+        if self.rate_limited:
+            logger.warning(
+                f"Skipping {security.symbol}: Yahoo rate-limited this run"
+            )
+            return 0
+
         if not end_date:
             end_date = date.today()
 
         if not start_date:
             start_date = end_date - timedelta(days=365)
 
-        # Check what dates we already have
+        # What we are missing outright, plus the trailing days whose cached row may
+        # still be a mid-session price rather than a close (PROVISIONAL_PRICE_DAYS).
         missing_dates = await self.market_price_repo.get_missing_dates(
             security.id, start_date, end_date
         )
@@ -518,8 +552,8 @@ class MarketDataService:
         # whole span, because that is where min(missing) then sits.
         fetch_start = max(start_date, min(missing_dates) - timedelta(days=PRICE_FETCH_BUFFER_DAYS))
         logger.info(
-            f"Fetching {len(missing_dates)} missing prices for {security.symbol} "
-            f"on {security.exchange} ({fetch_start}..{end_date})"
+            f"Fetching {len(missing_dates)} missing/provisional prices for "
+            f"{security.symbol} on {security.exchange} ({fetch_start}..{end_date})"
         )
 
         # Try Yahoo Finance first (primary source)

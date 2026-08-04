@@ -74,14 +74,24 @@ slot_guard() {
   local now_min berlin
   if ! berlin="$(berlin_hhmm)"; then
     warn "Could not determine Berlin time (no usable python), so the sync-slot check"
-    warn "was skipped. Slots are 08:00/13:00/15:00/20:00/22:00 Europe/Berlin."
+    warn "was skipped. Slots are on the hour at 00/06/08/11/13/15/18/20/22 Berlin."
     ask "Continue anyway?" || die "Stopped."
     return
   fi
   now_min=$(( 10#${berlin%:*} * 60 + 10#${berlin#*:} ))
-  for slot in 480 780 900 1200 1320; do   # 08:00 13:00 15:00 20:00 22:00
+  # Minutes past midnight for each slot. A THIRD copy of the scheduler's hours, after
+  # ops/auto-deploy.sh and this file's PowerShell twin — and the two here were stale
+  # for four days: written with 13:00/20:00 on the day those were retired for
+  # 00:00/06:00, so the guard both waved pushes through the two live overnight slots
+  # and blocked them at two that no longer ran. Only auto-deploy.sh was under test.
+  # tests/test_deploy_guard_hours.py now reads all three against ALL_SYNC_HOURS.
+  # 00:00  06:00  08:00  11:00  13:00  15:00  18:00  20:00  22:00
+  for slot in 0 360 480 660 780 900 1080 1200 1320; do
     local delta=$(( now_min - slot ))
     [ "$delta" -lt 0 ] && delta=$(( -delta ))
+    # Wrap around midnight, or 23:55 is measured as 1435 minutes from the 00:00 slot
+    # instead of 5 — which is the whole reason 00:00 needed adding here.
+    [ "$delta" -gt 720 ] && delta=$(( 1440 - delta ))
     if [ "$delta" -le 12 ]; then
       warn "It is $berlin Berlin — within 12 minutes of a sync slot."
       warn "Auto-deploy rebuilds in ~90s and would land on top of it."

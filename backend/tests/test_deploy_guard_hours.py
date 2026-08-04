@@ -16,7 +16,16 @@ Nothing could have caught that at runtime: a shell script on the VPS is invisibl
 the application. So this test reads the file, the same way
 `test_scheduler_jobstore_path.py` reads docker-compose.yml for the same reason.
 
-Offline: filesystem only, no scheduler started, no network.
+The scheduler side used to be read by regex too — `CronTrigger\\(hour=(\\d+)` over the
+source — and that had a silent hole in the shape this whole file is about. It saw only
+*literal* hours, so registering slots from a constant or a loop, or at a half-hour,
+would have contributed nothing to the comparison and every new slot would have looked
+correctly guarded while being invisible to the guard. It now reads `ALL_SYNC_HOURS`,
+which the scheduler builds its triggers from, and
+`test_the_registered_slots_are_exactly_the_declared_ones` checks the triggers really
+come from that constant. Importing it starts nothing.
+
+Offline: filesystem plus one import, no scheduler started, no network.
 """
 
 import re
@@ -24,9 +33,12 @@ from pathlib import Path
 
 import pytest
 
+from app.services.scheduler_service import ALL_SYNC_HOURS
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 AUTO_DEPLOY = REPO_ROOT / "ops" / "auto-deploy.sh"
-SCHEDULER_SERVICE = REPO_ROOT / "backend" / "app" / "services" / "scheduler_service.py"
+FINISH_SH = REPO_ROOT / "ops" / "finish-deploy.sh"
+FINISH_PS1 = REPO_ROOT / "ops" / "finish-deploy.ps1"
 
 
 def _guard_hours() -> set[int]:
@@ -36,21 +48,31 @@ def _guard_hours() -> set[int]:
     return {int(h) for h in match.group(1).split()}
 
 
-def _scheduled_hours() -> set[int]:
+def _finish_deploy_hours(path: Path, pattern: str) -> set[int]:
     """
-    The hours the scheduler actually registers.
+    The hours a finish-deploy script warns about, from its minutes-past-midnight list.
 
-    Read from the source rather than by starting a scheduler: `SchedulerService.start()`
-    arms five jobs against the live Flex token and Yahoo, which is the one thing the
-    tests must never risk, and the guard is a claim about the *source* anyway.
+    These two carry the same hours a third and fourth time, and both were stale for
+    four days — written with 13:00/20:00 on the very day those were retired in favour
+    of 00:00/06:00. Nothing read them, so the interactive guard a human runs before
+    pushing was waving them straight into the two live overnight slots.
     """
-    source = SCHEDULER_SERVICE.read_text(encoding="utf-8")
-    hours = {
-        int(h)
-        for h in re.findall(r"CronTrigger\(hour=(\d+),\s*minute=0", source)
-    }
-    assert hours, "no CronTrigger hours found in scheduler_service.py"
-    return hours
+    match = re.search(pattern, path.read_text(encoding="utf-8"))
+    assert match, f"slot minute list not found in {path.name}"
+    minutes = [int(m) for m in re.findall(r"\d+", match.group(1))]
+    assert minutes, f"empty slot list in {path.name}"
+    for minute in minutes:
+        assert minute % 60 == 0, (
+            f"{path.name} guards {minute} minutes past midnight, which is not on the "
+            f"hour — the scheduler only registers whole hours, so this is drift."
+        )
+    return {m // 60 for m in minutes}
+
+
+def _scheduled_hours() -> set[int]:
+    """The hours the scheduler declares it runs at."""
+    assert ALL_SYNC_HOURS, "ALL_SYNC_HOURS is empty"
+    return set(ALL_SYNC_HOURS)
 
 
 @pytest.mark.skipif(not AUTO_DEPLOY.exists(), reason="ops/auto-deploy.sh not present")
@@ -70,6 +92,33 @@ def test_deploy_guard_covers_exactly_the_scheduled_slots():
         f"ops/auto-deploy.sh guards {sorted(stale)}:00 Europe/Berlin, but no sync runs "
         f"then. Harmless, but it defers deploys for nothing and hides real drift. "
         f"Update SYNC_HOURS."
+    )
+
+
+@pytest.mark.parametrize("path,pattern", [
+    (FINISH_SH, r"for slot in ([\d ]+); do"),
+    (FINISH_PS1, r"\$near = @\(([\d, ]+)\) \| Where-Object"),
+])
+def test_both_finish_deploy_twins_warn_about_exactly_the_scheduled_slots(path, pattern):
+    """
+    The interactive guard a human runs before pushing, in its two equivalent forms.
+
+    CLAUDE.md already says to keep the twins in step with each other; what it could not
+    say is that they must also stay in step with the *scheduler*, since nothing checked
+    it. Both drifted the same day `ops/auto-deploy.sh` did and stayed wrong for four
+    days, warning about 13:00 and 20:00 while the live 00:00 and 06:00 slots were
+    unmentioned — so the script would cheerfully report "clear of every sync slot" at
+    05:58 Berlin.
+    """
+    if not path.exists():
+        pytest.skip(f"{path.name} not present")
+    warned = _finish_deploy_hours(path, pattern)
+    scheduled = _scheduled_hours()
+
+    assert warned == scheduled, (
+        f"{path.name} warns about {sorted(warned)}:00 Europe/Berlin but the scheduler "
+        f"runs at {sorted(scheduled)}:00. Missing slots let a push land on a sync; "
+        f"extra ones train the operator to click through the warning."
     )
 
 
