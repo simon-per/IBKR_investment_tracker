@@ -982,7 +982,15 @@ class DividendService:
                 "pct": self._pct(ttm_total, prev_ttm_total),
             },
             "next_12m_eur": round(float(next_12m), 2),
-            "next_12m_vs_ttm_pct": self._pct(next_12m, ttm_total),
+            # None when no projection was run, rather than the -100.0 that a zero
+            # numerator over a real TTM base produces. `_pct` is right to guard only a
+            # zero *base* — a quarterly payer has empty months constantly — but a zero
+            # numerator here means "nobody asked for a forecast", and rendering that as
+            # "dividends will fall 100%" is a figure manufactured by a flag. Production
+            # really did serve it on ?forecast=false.
+            "next_12m_vs_ttm_pct": (
+                self._pct(next_12m, ttm_total) if include_forecast else None
+            ),
             "annual": annual_rows,
             "latest_month": latest_month,
         }
