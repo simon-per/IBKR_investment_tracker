@@ -63,7 +63,13 @@ Prereqs: Docker + Docker Compose plugin, git, and **DNS A record**
 ```bash
 # Install Docker if missing:  curl -fsSL https://get.docker.com | sh
 cd /root
-git clone git@github.com:simon-per/IBKR_investment_tracker.git
+# The repo was renamed to ibkr-portfolio-tracker, but the DIRECTORY must stay
+# IBKR_investment_tracker: deploy.sh, ops/auto-deploy.sh (REPO_DIR), the compose
+# file's relative mounts and /root/ibkr-backups all hardcode that path. So pass the
+# target explicitly — a bare clone would create ibkr-portfolio-tracker/ and every
+# one of those would silently miss.
+# HTTPS, not SSH: a fresh VPS has no GitHub key, and adding one is the slower path.
+git clone https://github.com/simon-per/ibkr-portfolio-tracker.git IBKR_investment_tracker
 cd IBKR_investment_tracker
 
 # Secrets: restore the backup, or create from template
