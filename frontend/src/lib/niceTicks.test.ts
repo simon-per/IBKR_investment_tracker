@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { niceTicks } from './niceTicks'
+import { axisFloor, niceTicks } from './niceTicks'
 
 describe('niceTicks', () => {
   it('produces round steps and brackets the data', () => {
@@ -59,5 +59,82 @@ describe('niceTicks', () => {
     expect(niceTicks(NaN, 10, 5).ticks.length).toBeGreaterThan(0)
     expect(niceTicks(0, Infinity, 5).ticks.length).toBeGreaterThan(0)
     expect(niceTicks(0, 10, 0).ticks.length).toBeGreaterThan(0)
+  })
+})
+
+// The production numbers these were written against, read off
+// /api/portfolio/value-over-time on 2026-08-04: the three default series spanned
+// +1,122 .. +65,025, so the padded minimum was -5,268 and nothing was negative at all.
+const REAL_PADDED_MIN = -5_268
+const REAL_PADDED_MAX = 71_517
+const REAL_TRUE_MIN = 1_122
+
+describe('niceTicks floor', () => {
+  it('reproduces the bug when no floor is given, so the fix is not measuring itself', () => {
+    // 4 ticks is the phone axis. Rounding -5,268 out to the 20k step gives -20,000:
+    // a fifth of the chart reserved for values that do not exist in the data.
+    const { domain } = niceTicks(REAL_PADDED_MIN, REAL_PADDED_MAX, 4)
+    expect(domain[0]).toBe(-20_000)
+  })
+
+  it('puts the floor at zero when nothing in the data is negative', () => {
+    const floor = axisFloor(REAL_TRUE_MIN, REAL_PADDED_MIN, -5_000)
+    expect(floor).toBe(0)
+
+    const { domain, ticks } = niceTicks(REAL_PADDED_MIN, REAL_PADDED_MAX, 4, floor)
+    expect(domain[0]).toBe(0)
+    expect(ticks.every(t => t >= 0)).toBe(true)
+    // and the top is untouched, so the data still fits
+    expect(domain[1]).toBeGreaterThanOrEqual(65_025)
+  })
+
+  it('never clips a real loss, even one deeper than the cap', () => {
+    // The cap is soft on purpose: empty space is a cosmetic problem, a loss falling off
+    // the bottom of the chart is a wrong number.
+    const deep = -8_000
+    const floor = axisFloor(deep, deep - 6_000, -5_000)
+    expect(floor).toBeLessThanOrEqual(deep)
+
+    const { domain } = niceTicks(deep - 6_000, 70_000, 4, floor)
+    expect(domain[0]).toBeLessThanOrEqual(deep)
+  })
+
+  it('caps a shallow loss at the floor rather than a whole negative step', () => {
+    const floor = axisFloor(-800, -7_200, -5_000)
+    expect(floor).toBe(-5_000)
+
+    const { domain, ticks } = niceTicks(-7_200, 71_517, 4, floor)
+    expect(domain[0]).toBe(-5_000)
+    expect(ticks).toContain(0)
+    expect(ticks.every(t => t >= -5_000)).toBe(true)
+  })
+
+  it('ignores a floor that would leave nothing to draw', () => {
+    // An inverted or empty domain renders as a blank chart in recharts, which reads as
+    // an outage rather than a bad axis.
+    const { domain, ticks } = niceTicks(0, 1_000, 5, 5_000)
+    expect(domain[0]).toBeLessThan(domain[1])
+    expect(ticks.length).toBeGreaterThan(0)
+  })
+
+  it('leaves every existing caller untouched when no floor is passed', () => {
+    const without = niceTicks(-4_200, 11_800, 6)
+    const explicitUndefined = niceTicks(-4_200, 11_800, 6, undefined)
+    expect(explicitUndefined).toEqual(without)
+    expect(without.ticks[0]).toBe(without.domain[0])
+  })
+})
+
+describe('axisFloor', () => {
+  it('is never above the data minimum, whatever the cap', () => {
+    for (const min of [-50_000, -8_000, -5_000, -4_999, -1, 0, 1_122, 65_025]) {
+      const floor = axisFloor(min, min - 6_000, -5_000)
+      if (min < 0) expect(floor, `min ${min}`).toBeLessThanOrEqual(min)
+      else expect(floor, `min ${min}`).toBe(0)
+    }
+  })
+
+  it('treats a non-finite minimum as zero rather than propagating NaN into the domain', () => {
+    expect(axisFloor(NaN, -1_000, -5_000)).toBe(0)
   })
 })

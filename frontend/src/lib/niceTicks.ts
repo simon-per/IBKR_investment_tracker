@@ -37,7 +37,25 @@ function niceStep(raw: number): number {
   return step * magnitude
 }
 
-export function niceTicks(min: number, max: number, targetCount: number): Axis {
+/**
+ * @param floor Optional hard lower bound for the axis.
+ *
+ * Exists because rounding the minimum *out* to a step multiple is unbounded downwards,
+ * and on a money axis that shows up as a large empty band under zero. Measured on the
+ * real portfolio: the three visible series had a true minimum of +1,122 — nothing
+ * negative anywhere — yet the caller's proportional padding (10% of a 63.9k range)
+ * pushed the requested minimum to -5,268, which floored to **-20,000** against the
+ * 20k step a 4-tick phone axis picks. A fifth of the plot was reserved for values that
+ * did not exist and could not occur.
+ *
+ * The floor is applied after rounding rather than to `min`, because flooring is exactly
+ * what has to be overridden: clamping the input still rounds back down to the same
+ * multiple. Ticks below the floor are dropped; `domain[0]` becomes the floor itself, so
+ * the lowest tick need not sit on the axis edge.
+ */
+export function niceTicks(
+  min: number, max: number, targetCount: number, floor?: number
+): Axis {
   if (!isFinite(min) || !isFinite(max) || targetCount < 1) {
     return { domain: [0, 1], ticks: [0, 1] }
   }
@@ -45,7 +63,9 @@ export function niceTicks(min: number, max: number, targetCount: number): Axis {
   // A flat series still needs an axis with height, or every tick lands on one line.
   if (max === min) {
     const step = niceStep(Math.abs(max) / targetCount || 1)
-    return { domain: [min - step, max + step], ticks: [min - step, min, max + step] }
+    return applyFloor(
+      { domain: [min - step, max + step], ticks: [min - step, min, max + step] }, floor
+    )
   }
 
   const step = niceStep((max - min) / targetCount)
@@ -58,5 +78,35 @@ export function niceTicks(min: number, max: number, targetCount: number): Axis {
   const count = Math.round((hi - lo) / step)
   for (let i = 0; i <= count; i++) ticks.push(lo + i * step)
 
-  return { domain: [lo, hi], ticks }
+  return applyFloor({ domain: [lo, hi], ticks }, floor)
+}
+
+/**
+ * How far below zero a money axis should be allowed to go.
+ *
+ * `paddedMin` is the caller's padded minimum, which on a multi-series money chart is a
+ * share of the *whole* range — so the smallest series gets padded by a fraction of the
+ * largest one. Two rules, in order:
+ *
+ *   1. Nothing negative in the data -> **zero**. No amount of padding earns a negative
+ *      axis on a portfolio that has never been underwater. This is the case that was
+ *      actually wrong in production: a true minimum of +1,122 reserved 20k below zero.
+ *   2. Something is negative -> allow it, but stop at `cap` **unless a real value sits
+ *      lower**, in which case the value wins. Clipping an actual loss off the bottom of
+ *      the chart is a worse failure than a little empty space, so `cap` is deliberately
+ *      soft and this function can never return a value above `minValue`.
+ */
+export function axisFloor(minValue: number, paddedMin: number, cap: number): number {
+  if (!isFinite(minValue)) return 0
+  if (minValue >= 0) return 0
+  return Math.min(minValue, Math.max(paddedMin, cap))
+}
+
+function applyFloor(axis: Axis, floor?: number): Axis {
+  if (floor == null || !isFinite(floor) || axis.domain[0] >= floor) return axis
+  // A floor at or above the top would leave nothing to draw, so ignore it rather than
+  // emit an inverted domain — recharts renders that as a blank chart.
+  if (floor >= axis.domain[1]) return axis
+  const ticks = axis.ticks.filter(t => t >= floor)
+  return { domain: [floor, axis.domain[1]], ticks: ticks.length ? ticks : [floor, axis.domain[1]] }
 }

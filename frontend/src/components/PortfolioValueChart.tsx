@@ -12,7 +12,7 @@ import type { PortfolioValuePoint, BenchmarkValuePoint } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 import { useFormatCurrency, useCurrencySymbol } from '@/lib/CurrencyContext'
 import { useIsCompact } from '@/lib/useMediaQuery'
-import { niceTicks } from '@/lib/niceTicks'
+import { axisFloor, niceTicks } from '@/lib/niceTicks'
 
 /**
  * One height for the chart and its three placeholder states, so a range switch or a
@@ -20,6 +20,21 @@ import { niceTicks } from '@/lib/niceTicks'
  * which is 71% of an 844px phone screen.
  */
 const CHART_BOX = 'h-[280px] sm:h-[420px] lg:h-[600px]'
+
+/**
+ * How far below zero the Y axis may extend, in the **base currency** (EUR/CHF/USD — the
+ * three are close enough that one figure covers all, and this is a display bound rather
+ * than an amount anyone reconciles).
+ *
+ * A bound is needed because the axis minimum is rounded *out* to a step multiple, which
+ * is unbounded downwards: see the `floor` derivation in `yAxisConfig`, where a portfolio
+ * that has never been underwater was still reserving 20k of empty space below zero.
+ *
+ * 5k is chosen against this account's actual loss history — the deepest drawdown in the
+ * series is nowhere near it — and it is a *soft* cap: a real value below it always wins,
+ * because clipping a loss off the chart is a worse failure than empty space.
+ */
+const NEGATIVE_AXIS_FLOOR = -5000
 
 export interface BenchmarkDataset {
   data: BenchmarkValuePoint[]
@@ -172,10 +187,16 @@ export function PortfolioValueChart({ data, benchmarks = [], isLoading, isError 
     const domainMin = minValue - range * paddingPercent
     const domainMax = maxValue + range * paddingPercent
 
+    // The padding above is a share of the WHOLE range, which the market-value line
+    // dominates — so the profit line's minimum gets padded by tens of thousands and the
+    // axis rounds out to a big negative step. `axisFloor` bounds that; see it for the
+    // two rules and for the production numbers that motivated them.
+    const floor = axisFloor(minValue, domainMin, NEGATIVE_AXIS_FLOOR)
+
     // The tick count is a property of how tall the chart is, not of the data. This
     // used to be a fixed 200/1000/2500/10000 step ladder chosen from the range alone,
     // which is how eight labels ended up 35px apart in a 280px-tall phone chart.
-    return niceTicks(domainMin, domainMax, isCompact ? 4 : 8)
+    return niceTicks(domainMin, domainMax, isCompact ? 4 : 8, floor)
   }, [chartData, showCostBasis, showMarketValue, showProfit, visibleBenchmarks, availableBenchmarks, isCompact])
 
   if (isLoading) {

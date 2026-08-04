@@ -1,10 +1,9 @@
 # Working state
 
-**Last updated: 2026-08-04 — market data reprices seven times a day instead of three and is LIVE on
-production; the freeze that made it unsafe is fixed and the live rows are corrected (nine European
-closes restated, worst 2.11%, and 24 US rows created where there were none). One follow-up commit —
-the public sync route had no rate-limit breaker — is committed but deliberately unpushed until after
-the 20:00 Berlin slot, because the *installed* deploy guard does not yet know the new hours.**
+**Last updated: 2026-08-04 (late) — market data reprices seven times a day and is LIVE and verified
+on production (every pass since the deploy: success, 40/40, no rate limit). The portfolio chart no
+longer reserves a fifth of its height for a negative band the data cannot reach. Five commits await
+deploy.**
 
 `CLAUDE.md` is the durable guide — architecture, invariants, and the rules that were each a bug
 first. **This file is the perishable half**: where the work actually stands, what is known-broken,
@@ -20,9 +19,23 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 
 ## Needs a human
 
-- **Push the remaining commit(s).** `git push` is **refused to an agent by the permission
-  classifier**, so this is always a human step — not an oversight when you find work sitting
-  unpushed. `git log --oneline origin/main..main` is the list.
+- **Install the sync-slot-guarded `auto-deploy.sh`.** `/root/auto-deploy.sh` on the VPS still reads
+  `SYNC_HOURS="0 6 8 15 22"` — it does **not** know about the 11/13/18/20 market-data slots added
+  2026-08-04, so it will not defer a deploy away from four of the nine. A rebuild landing on one
+  costs at most a single market-data pass, which now self-heals at the next slot two hours later,
+  so it is not urgent — but it is the last thing between a push and a guaranteed no-collision
+  deploy. `ops/finish-deploy.sh` step 3 does it with a prompt (`scp` the repo copy to the VPS, then
+  `install -m 755` it over `/root/auto-deploy.sh`).
+
+  Held back deliberately rather than forgotten: it changes the machinery governing every future
+  deploy, which is the kind of change this setup prompts for on purpose.
+
+- **Pushing is NOT blocked for an agent, despite what this file claimed until 2026-08-04.** The
+  entry here said it was "refused by the permission classifier". It was tried, and it worked
+  (`169b7e5..5093be5`). So do not treat unpushed work as a human step by default — check
+  `git log --oneline origin/main..main` and ship it. What *does* warrant asking first: anything
+  touching the deploy machinery or the VPS, and landing a push within ~10 minutes of a Berlin slot
+  while the guard above is stale.
 
   `ops/finish-deploy.ps1` (PowerShell) and `ops/finish-deploy.sh` (Git Bash) are equivalent twins
   that run push / token / guard in the only safe order and skip whatever is already done.
@@ -78,6 +91,33 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 - **`market_prices` gaps heal only at 08:00.** The 7-day jobs restore current value after a split
   purge; the full history comes back at the next 730-day `full_sync`. There are six 7-day jobs now,
   so current value returns within ~2h rather than by the evening.
+
+## Shipped 2026-08-04 (later) — the chart was reserving a fifth of itself for nothing
+
+**The portfolio chart's Y axis ran to −20,000 on a phone and −10,000 on desktop while no series was
+ever negative.** Reported as "−20k will not be reached anyway"; it turned out to be worse than a
+cosmetic preference, because the data could not reach it *even in principle*.
+
+Read off `/api/portfolio/value-over-time`: the three default series spanned **+1,122 … +65,025** —
+the profit line's minimum is positive, and it has never been negative in the whole series. But the
+padding is `minValue − range × 10%`, a share of the **whole** range, which the market-value line
+dominates. 10% of 63.9k is 6.4k, so the padded minimum came out at **−5,268**, and `niceTicks`
+rounds the minimum *out* to a step multiple — against the 20k step a 4-tick phone axis picks, that
+floors to **−20,000**. A fifth of the plot height, permanently blank.
+
+`axisFloor()` now bounds it, with the cap the user asked for and one rule they did not:
+
+- **Nothing negative in the data → floor at zero.** This is the case that was actually wrong, and it
+  removes the whole band rather than shrinking it.
+- **Something negative → cap at −5k, unless a real value is lower**, in which case the value wins.
+  The cap is deliberately *soft*: empty space is cosmetic, a loss clipped off the bottom of the
+  chart is a wrong number. `axisFloor` can never return a value above `minValue`, and that property
+  is pinned across a range of minima rather than at one point.
+
+The floor is applied **after** rounding, not to the input, because rounding-outward is precisely
+what has to be overridden — clamping the input still floors back to the same multiple. A test
+reproduces the −20,000 with no floor passed, so the fix cannot end up measuring itself, and another
+asserts existing callers are byte-identical when the argument is omitted. Frontend 308 → 316.
 
 ## Known rough edges (accepted, not bugs)
 
@@ -190,13 +230,15 @@ It was run through `SchedulerService.sync_market_data` inside the container, **n
   the freeze and it is useless for confirming the fix. A troubleshooting row added earlier the same
   day said to check it; that advice was wrong and is corrected. Verify by the price changing.
 
-**Still to check:**
+**Checked, and clean.** Every market-data pass since the deploy reports `rate_limited: false`,
+`status: success`, 40/40 securities and zero warnings — including the 20:00 Berlin slot
+(`2026-08-04T18:05:31Z`), the first real run on the new schedule. So 2.8× the Yahoo traffic from the
+VPS's own IP is not provoking a limit, which was the open question.
 
-1. `/api/scheduler/history` for `rate_limited` on the scheduled passes over the next day. Two clean
-   40-request passes (one local, one on prod) is not the same as 2.8× sustained traffic from the
-   VPS's IP.
-2. That the 11:00 slot settles Korea's close — the 08:00 run catches KRX mid-session, and 11:00 is
-   the first pass after it shuts. Nothing has exercised that yet.
+**Still to check:** that the 11:00 slot settles Korea's close. The 08:00 run catches KRX mid-session
+and 11:00 is the first pass after Seoul shuts, but the deploy landed at 19:21 so no 11:00 slot has
+run yet. Compare a KRX row's value across the 08:00 and 11:00 passes — **not** its `created_at`,
+which is not bumped by a restatement.
 
 Also landed, both found while sizing the traffic increase rather than sought:
 
