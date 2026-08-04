@@ -1,9 +1,9 @@
 # Working state
 
-**Last updated: 2026-08-04 (late) — market data reprices seven times a day, LIVE and verified on
-production (every pass: success, 40/40, no rate limit). The portfolio chart no longer reserves a
-fifth of its height for a negative band the data cannot reach. And the app's own INFO logging was
-never reaching the container log at all, which is now fixed.**
+**Last updated: 2026-08-04 (late) — market data reprices seven times a day, live and verified; the
+chart's negative axis is clamped; the app's own INFO logging reaches the container log for the first
+time; the sixteen KPI cards are one component; and the deploy guard on the VPS now covers all nine
+slots. Nothing is outstanding on the deploy side.**
 
 `CLAUDE.md` is the durable guide — architecture, invariants, and the rules that were each a bug
 first. **This file is the perishable half**: where the work actually stands, what is known-broken,
@@ -19,23 +19,12 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 
 ## Needs a human
 
-- **Install the sync-slot-guarded `auto-deploy.sh`.** `/root/auto-deploy.sh` on the VPS still reads
-  `SYNC_HOURS="0 6 8 15 22"` — it does **not** know about the 11/13/18/20 market-data slots added
-  2026-08-04, so it will not defer a deploy away from four of the nine. A rebuild landing on one
-  costs at most a single market-data pass, which now self-heals at the next slot two hours later,
-  so it is not urgent — but it is the last thing between a push and a guaranteed no-collision
-  deploy. `ops/finish-deploy.sh` step 3 does it with a prompt (`scp` the repo copy to the VPS, then
-  `install -m 755` it over `/root/auto-deploy.sh`).
-
-  Held back deliberately rather than forgotten: it changes the machinery governing every future
-  deploy, which is the kind of change this setup prompts for on purpose.
-
 - **Pushing is NOT blocked for an agent, despite what this file claimed until 2026-08-04.** The
   entry here said it was "refused by the permission classifier". It was tried, and it worked
   (`169b7e5..5093be5`). So do not treat unpushed work as a human step by default — check
   `git log --oneline origin/main..main` and ship it. What *does* warrant asking first: anything
   touching the deploy machinery or the VPS, and landing a push within ~10 minutes of a Berlin slot
-  while the guard above is stale.
+  (which `ops/finish-deploy.sh` and, since 2026-08-04, the installed guard both check for you).
 
   `ops/finish-deploy.ps1` (PowerShell) and `ops/finish-deploy.sh` (Git Bash) are equivalent twins
   that run push / token / guard in the only safe order and skip whatever is already done.
@@ -59,6 +48,17 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
   on its own once ingested.
 
 ## Watching
+
+- **The deploy guard now covers all nine slots, installed 2026-08-04.** `/root/auto-deploy.sh` is
+  byte-identical to `ops/auto-deploy.sh` (verified by sha256), so the copy `test_deploy_guard_hours.py`
+  checks is the copy cron executes. Installed by **atomic rename** rather than `install -m 755`,
+  which matters: `install` truncates the destination in place, and replacing a *running* bash script
+  makes the live shell read garbage from its current byte offset. Rename leaves an in-flight run on
+  the old inode. Previous copy kept as `/root/auto-deploy.sh.bak-<date>`.
+
+  What to expect the first time it fires: a `SKIP: within 10min of the HH:00 Europe/Berlin sync slot`
+  line in `/root/auto-deploy.log`, and a push that lands ~10 minutes later than usual. That is the
+  guard working, not a stuck deploy.
 
 - **The `1001` problem is fixed — the Flex Query period is now `Last 30 Calendar Days`.** Confirmed
   by as clean an A/B as production allows: **20:00 error, 21:08 success, same token, same hour band,
