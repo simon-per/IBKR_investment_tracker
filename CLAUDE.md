@@ -150,10 +150,18 @@ recomputes by hand is the one that is wrong. The known instances:
 | PEG fallbacks | the watchlist tried forward-EPS growth before the 5-year CAGR; **fundamentals had no forward-EPS tier at all** |
 | `_safe_float` | the watchlist rounded to 4dp, fundamentals did not — the same P/E read differently on two screens |
 | `sync_stale_*` | fundamentals unioned "missing" with "stale"; **analyst ratings took only "stale"**, so a new security could never be rated |
+| the market-data securities loop | the scheduled job gained a Yahoo rate-limit breaker on 2026-08-04; **`POST /api/market-data/sync` kept its own copy without one**, so the *public* path went on asking after a 429. Extracted to `MarketDataService.sync_securities` |
 
 **The lens that finds them**, and which found the last four: walk the AST for function names defined in
 more than one module, ignore trivial bodies, and read each cluster. Router-to-service pairs and
 per-entity repository CRUD are noise; a *service* helper appearing twice is not.
+
+**That lens missed the market-data loop, and the reason generalises.** The two copies shared no
+function *name* — `sync_market_data` on the scheduler, `_sync_market_data_locked` in the router — so a
+name-keyed AST walk cannot see them, and "router-to-service pairs are noise" actively argues for
+skipping it. What gave it away was behavioural: a route and a job that both loop every security and
+both call Yahoo must agree about *when to stop*. So also ask which paths reach the same **upstream**,
+not only which share a name.
 
 **When you find one, extract rather than sync the copies** — that is what `ttm_growth.py`,
 `peg_ratio.py` and `safe_numbers.py` are — and write the test against the **family** ("every service
@@ -485,6 +493,14 @@ Monday**. It cannot collide with the holiday rule above — that needs a date ol
 one needs it newer than 3 — and it cannot re-request forever, because a date Yahoo has no bar for ages
 out of the window and falls back under the holiday rule. It costs **no extra requests**, only a wider
 range on one already being made.
+
+**`market_prices.created_at` records the first insert and is NOT bumped by a restatement**, because
+`bulk_create` only updates the columns the caller supplies and the price dicts carry no `created_at`.
+That is right for a column with that name, and it is a trap worth knowing twice over: it is the column
+that *proved* the freeze (a row dated today, written at 13:00 UTC while Xetra had 2.5 hours to run),
+and it is useless for confirming the fix — a restated row still reads 13:00. Verify a restatement by
+the **price** changing, not by the timestamp. Nothing records when a price was last rewritten; an
+`updated_at` column would, and would need a migration.
 
 This is the **precondition for the intraday market-data slots**, not a separate cleanup: adding an
 earlier slot on top of the freeze pins an *earlier* price. If the refresh is ever removed the slots
@@ -1535,7 +1551,7 @@ Tests: `tests/test_currency_fallback.py`.
 | Yahoo 404/429 | **Stop.** Wait 30-60 min. Check `yfinance >= 1.1.0` |
 | A position is missing from the portfolio | Check `taxlots_skipped` + `warnings[]` on the sync run — usually a currency neither FX provider covers |
 | A position shows 0.00 / `market_price: null` | No cached price. The market-data sync's `warnings[]` now names it. Fix the `ticker_mappings` row, or fill it with `app/cli/import_prices.py` from IBKR bars |
-| A price looks like an intraday value, not a close | Expected inside the session, and it self-corrects: a weekday within `PROVISIONAL_PRICE_DAYS` (3) is re-fetched at every slot, so the settled close lands after the market shuts. If it is still wrong **after** 3 days, that is a real freeze — check `market_prices.created_at` against the exchange's close time |
+| A price looks like an intraday value, not a close | Expected inside the session, and it self-corrects: a weekday within `PROVISIONAL_PRICE_DAYS` (3) is re-fetched at every slot, so the settled close lands after the market shuts. Still wrong **after** 3 days is a real freeze. **Don't diagnose it from `created_at`** — see below |
 | A market-data run reports `rate_limited: true` | Yahoo returned 429 and the pass stopped deliberately, leaving the later securities on their previous prices. **Do not trigger a manual sync** — wait; the next slot resumes and re-fetches only what is missing |
 | A benchmark's last point looks stale while the portfolio moves | The scheduled warm-up does not refresh provisional benchmark rows (Yahoo budget — eight tickers, seven slots). Opening the chart refreshes the one selected |
 | The chart steps at a split date | Cached pre-split closes. A *new* split purges them automatically; for an older one delete that security's `market_prices` and let 08:00 refill |

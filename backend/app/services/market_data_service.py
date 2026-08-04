@@ -607,6 +607,65 @@ class MarketDataService:
 
         return 0
 
+    async def sync_securities(
+        self,
+        securities: List[Security],
+        days_back: int = 730,
+    ) -> Dict:
+        """
+        Fetch each security's missing and provisional prices, stopping on a rate limit.
+
+        **Shared by `SchedulerService.sync_market_data` and
+        `POST /api/market-data/sync` so the two cannot drift.** They were separate
+        copies of this loop, and the drift was immediate and one-sided: the
+        rate-limit circuit breaker was added to the scheduler's copy on 2026-08-04
+        and the public route kept asking Yahoo for the remaining ~38 securities
+        after being told to back off — the exact "two implementations of one job"
+        failure CLAUDE.md opens with, in the half a stranger can reach.
+
+        Returns counts plus `rate_limited_after` (the symbol we stopped on, or None).
+        The caller owns the commit, the response shape and any diagnostics.
+        """
+        total_prices = 0
+        processed = 0
+        errors: List[str] = []
+        rate_limited_after: Optional[str] = None
+
+        logger.info(f"Syncing market data for {len(securities)} securities...")
+
+        for security in securities:
+            try:
+                logger.info(
+                    f"Fetching prices for {security.symbol} ({security.exchange})..."
+                )
+                count = await self.sync_security_prices(security, days_back=days_back)
+                total_prices += count
+                processed += 1
+                logger.info(f"Fetched {count} price points for {security.symbol}")
+            except Exception as e:
+                error_msg = f"Failed to fetch prices for {security.symbol}: {str(e)}"
+                logger.error(error_msg)
+                errors.append(error_msg)
+
+            # Yahoo said back off. CLAUDE.md's recovery is "stop immediately, wait
+            # 30-60 min", and every remaining security is the same IP asking again
+            # seconds later. What is already written stays written; the dates we
+            # never reached are simply still missing, so the next pass resumes.
+            if self.rate_limited:
+                rate_limited_after = security.symbol
+                logger.error(
+                    f"Yahoo rate-limited at {security.symbol}; abandoning the "
+                    f"remaining {len(securities) - processed} securities this run"
+                )
+                break
+
+        return {
+            "total_prices": total_prices,
+            "processed": processed,
+            "errors": errors,
+            "rate_limited_after": rate_limited_after,
+        }
+
     async def get_price_for_date(
         self,
         security: Security,

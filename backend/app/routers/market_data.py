@@ -2,9 +2,7 @@
 Market Data Router
 API endpoints for syncing and managing market price data.
 """
-import asyncio
 import logging
-import random
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -75,49 +73,40 @@ async def _sync_market_data_locked(days_back: int, db: AsyncSession):
             "prices_fetched": 0
         }
 
-    total_prices = 0
-    errors = []
-
-    logger.info(f"Syncing market data for {len(securities)} securities")
-
-    for idx, security in enumerate(securities):
-        try:
-            logger.info(f"Fetching prices for {security.symbol} ({security.exchange})...")
-
-            # Fetch historical data
-            prices_count = await market_data_service.sync_security_prices(
-                security,
-                days_back=days_back
-            )
-
-            total_prices += prices_count
-            logger.info(f"  Fetched {prices_count} price points for {security.symbol}")
-
-            # Add delay between securities to avoid overwhelming Yahoo Finance
-            # Skip delay after the last security
-            if idx < len(securities) - 1:
-                delay = random.uniform(2.0, 4.0)
-                logger.debug(f"  Waiting {delay:.1f}s before next security...")
-                await asyncio.sleep(delay)
-
-        except Exception as e:
-            error_msg = f"Failed to fetch prices for {security.symbol}: {str(e)}"
-            logger.error(f"  {error_msg}")
-            errors.append(error_msg)
+    # Shared with SchedulerService.sync_market_data rather than reimplemented here.
+    # This route used to carry its own copy of the loop, which is how it ended up
+    # without the Yahoo rate-limit breaker the scheduled job gained — a public,
+    # reachable path that kept asking after being told to back off. The extra
+    # inter-security sleep this copy had is dropped with it: `fetch_and_cache_prices`
+    # already paces 3-6s per security, so it was double-pacing the one path nobody
+    # was measuring.
+    swept = await market_data_service.sync_securities(securities, days_back=days_back)
+    errors = swept["errors"]
+    rate_limited_after = swept["rate_limited_after"]
 
     # Commit all price data
     await db.commit()
 
     result = {
-        "status": "success" if not errors else "partial_success",
-        "message": f"Synced market data for {len(securities)} securities",
-        "securities_processed": len(securities),
-        "prices_fetched": total_prices,
+        "status": "success" if not (errors or rate_limited_after) else "partial_success",
+        "message": (
+            f"Synced market data for {swept['processed']} of {len(securities)} securities"
+        ),
+        "securities_processed": swept["processed"],
+        "prices_fetched": swept["total_prices"],
     }
 
     if errors:
         result["errors"] = errors
         result["errors_count"] = len(errors)
+
+    if rate_limited_after:
+        result["rate_limited"] = True
+        result["warnings"] = [
+            f"Yahoo rate-limited this run at {rate_limited_after}; "
+            f"{len(securities) - swept['processed']} securities were skipped and keep "
+            f"their previous prices. Do not retry — wait for the next scheduled slot"
+        ]
 
     return result
 

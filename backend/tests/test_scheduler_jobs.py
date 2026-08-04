@@ -17,6 +17,7 @@ with nothing reporting it (SBI@TSE, -446.93 CHF, 2026-07-27).
 """
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -212,6 +213,71 @@ async def test_a_yahoo_rate_limit_abandons_the_rest_of_the_pass(monkeypatch):
         assert any("rate-limited" in w for w in result["warnings"])
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_every_market_data_sweep_stops_on_a_rate_limit():
+    """
+    The family check, not the instance.
+
+    `SchedulerService.sync_market_data` and `POST /api/market-data/sync` were two copies
+    of one loop, and the breaker went into the scheduler's copy first — leaving the
+    *public* route asking Yahoo for another ~38 securities after being told to back off.
+    Exactly CLAUDE.md's dominant failure mode, in the half a stranger can reach.
+
+    Both now delegate to `MarketDataService.sync_securities`, so this asserts the shared
+    sweep stops, and `test_both_sync_paths_share_one_sweep` below asserts neither caller
+    has grown its own loop again.
+    """
+    from app.services.market_data_service import MarketDataService
+
+    svc = MarketDataService.__new__(MarketDataService)
+    svc.rate_limited = False
+    attempted = []
+
+    async def _fetch(security, days_back=730):
+        attempted.append(security.symbol)
+        if len(attempted) == 2:
+            svc.rate_limited = True
+        return 3
+
+    svc.sync_security_prices = _fetch
+    securities = [SimpleNamespace(symbol=f"S{i}", exchange="NASDAQ") for i in range(1, 6)]
+
+    swept = await svc.sync_securities(securities, days_back=7)
+
+    assert attempted == ["S1", "S2"], f"kept asking after a rate limit: {attempted}"
+    assert swept["processed"] == 2
+    assert swept["total_prices"] == 6, "prices already fetched must be kept"
+    assert swept["rate_limited_after"] == "S2"
+    assert swept["errors"] == []
+
+
+def test_both_sync_paths_share_one_sweep():
+    """
+    Neither caller may re-grow the per-security loop.
+
+    A source check because that is the only thing that can see it: both copies worked
+    perfectly well while disagreeing about whether to stop on a 429, and a behavioural
+    test of one says nothing about the other. Keyed on `sync_securities` appearing in
+    both and `sync_security_prices` in neither — the latter is the inner call a
+    hand-rolled loop would have to make.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    for rel in ("app/services/scheduler_service.py", "app/routers/market_data.py"):
+        source = (root / rel).read_text(encoding="utf-8")
+        assert "sync_securities(" in source, (
+            f"{rel} no longer delegates to MarketDataService.sync_securities — if it "
+            f"has its own securities loop again, the rate-limit breaker is optional "
+            f"in exactly one of the two paths."
+        )
+        assert "sync_security_prices(" not in source, (
+            f"{rel} calls sync_security_prices directly, i.e. it is iterating "
+            f"securities itself. Use sync_securities so the breaker and the pacing "
+            f"cannot drift between the scheduled job and the public route."
+        )
 
 
 # --- stale / missing prices ---------------------------------------------------------

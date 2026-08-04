@@ -260,46 +260,17 @@ class SchedulerService:
                         "timestamp": utc_iso(utcnow())
                     }
 
-                total_prices = 0
-                errors = []
-                processed = 0
-                rate_limited_after = None
-
-                logger.info(f"Syncing market data for {len(securities)} securities...")
-
-                for security in securities:
-                    try:
-                        logger.info(f"Fetching prices for {security.symbol} ({security.exchange})...")
-
-                        # Fetch historical data. The service fetches the dates we are
-                        # missing plus the trailing few whose cached close may still be
-                        # a mid-session price.
-                        prices_count = await market_data_service.sync_security_prices(
-                            security,
-                            days_back=days_back
-                        )
-
-                        total_prices += prices_count
-                        processed += 1
-                        logger.info(f"Fetched {prices_count} price points for {security.symbol}")
-
-                    except Exception as e:
-                        error_msg = f"Failed to fetch prices for {security.symbol}: {str(e)}"
-                        logger.error(error_msg)
-                        errors.append(error_msg)
-
-                    # Yahoo said back off. CLAUDE.md's recovery for a rate limit is
-                    # "stop immediately, wait 30-60 min", and the remaining securities
-                    # in this pass are the same IP asking again seconds later. What is
-                    # already written stays written, and the next slot resumes — the
-                    # dates it did not reach are simply still missing.
-                    if market_data_service.rate_limited:
-                        rate_limited_after = security.symbol
-                        logger.error(
-                            f"Yahoo rate-limited at {security.symbol}; abandoning the "
-                            f"remaining {len(securities) - processed} securities this run"
-                        )
-                        break
+                # The loop itself lives on the service, shared with
+                # POST /api/market-data/sync — it fetches the dates we are missing plus
+                # the trailing few whose cached close may still be a mid-session price,
+                # and stops early if Yahoo rate-limits.
+                swept = await market_data_service.sync_securities(
+                    securities, days_back=days_back
+                )
+                total_prices = swept["total_prices"]
+                processed = swept["processed"]
+                errors = swept["errors"]
+                rate_limited_after = swept["rate_limited_after"]
 
                 # Commit all price data
                 await db.commit()

@@ -1,9 +1,10 @@
 # Working state
 
-**Last updated: 2026-08-04 — market data now reprices seven times a day instead of three, and the
-freeze that made that unsafe is fixed: every European close in production was a 15:00 Berlin
-mid-session price, measured wrong by up to 2.11% on a live pass against a prod snapshot. Committed,
-NOT pushed — the deploy is a human step (see *Needs a human*).**
+**Last updated: 2026-08-04 — market data reprices seven times a day instead of three and is LIVE on
+production; the freeze that made it unsafe is fixed and the live rows are corrected (nine European
+closes restated, worst 2.11%, and 24 US rows created where there were none). One follow-up commit —
+the public sync route had no rate-limit breaker — is committed but deliberately unpushed until after
+the 20:00 Berlin slot, because the *installed* deploy guard does not yet know the new hours.**
 
 `CLAUDE.md` is the durable guide — architecture, invariants, and the rules that were each a bug
 first. **This file is the perishable half**: where the work actually stands, what is known-broken,
@@ -105,7 +106,7 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
   would multiply its burst for a value no one read — and the chart's own lazy fetch refreshes the
   benchmark actually selected. Deliberate Yahoo-budget trade, not an oversight.
 
-## Shipped 2026-08-04 — committed, NOT pushed
+## Shipped 2026-08-04 — DEPLOYED; a follow-up fix is committed but unpushed
 
 **Market data now reprices seven times a day (08/11/13/15/18/20/22 Berlin) instead of three, and the
 reason it took more than a cron edit is that adding slots alone would have made the numbers worse.**
@@ -159,15 +160,43 @@ One reporting wart noticed, pre-existing and not touched: the pass reported `pri
 but that is `sync_security_prices` returning **rows in the window**, not rows written (~80). The field
 has always over-reported; it will simply look larger now that a pass always writes something.
 
-**Still to check once deployed:**
+### Deployed and confirmed on production, 19:21 UTC
 
-1. `curl /health` → `scheduler_jobstore_persistent: true` still, and `/api/scheduler/status` lists
-   **nine** jobs with `market_sync_1..6`. The retired `market_sync_eu_close` / `market_sync_us_close`
-   must be **gone**: `_prune_unknown_jobs` evicts them, and simulating the exact prod store here
-   confirmed it, but if both sets survived every market-data slot would run twice.
-2. `/api/scheduler/history` for `rate_limited` on any market-data run. None expected — the local pass
-   above is the same shape as one server pass and came back clean — but this is 2.8× the previous
-   Yahoo traffic from the VPS's own IP, so it is the number to watch for the first day.
+`5093be5` live. Nine jobs registered with the declared hours; the retired
+`market_sync_eu_close` / `market_sync_us_close` were **pruned** from the persistent store, so nothing
+runs twice. `scheduler_jobstore_persistent` and `write_auth_enabled` both still true.
+
+**A pass was then run on production by hand at the user's request** (19:35 Berlin) and corrected the
+live rows exactly as the snapshot predicted: nine European closes restated (XAIX +2.11%, ABEA +1.84%,
+SMH +1.58%, XNAS +1.50%, SXR8 +0.96%) and **24 US rows created where there had been none** — half the
+book by cost basis had no price for the day, because the old 15:00 Berlin slot fires at 13:00 UTC and
+the US opens at 13:30. `status: success`, no rate limit, no errors.
+
+It was run through `SchedulerService.sync_market_data` inside the container, **not** through
+`POST /api/market-data/sync`, and that distinction turned out to matter — see below.
+
+**Two things the live run exposed, both fixed the same evening (unpushed):**
+
+- **`POST /api/market-data/sync` had its own copy of the securities loop and therefore no rate-limit
+  breaker.** The breaker went into the scheduler's copy only, leaving the *public* route asking Yahoo
+  for another ~38 securities after a 429. Now both delegate to
+  `MarketDataService.sync_securities`. Two tests: the sweep stops, and a source check that neither
+  caller has re-grown its own loop. **The AST lens in CLAUDE.md could not have found this** — the two
+  copies shared no function name, and "router-to-service pairs are noise" argues for skipping it;
+  what identified it was asking which paths reach the same *upstream*. That reasoning is now in
+  CLAUDE.md beside the lens.
+- **`created_at` is not bumped by a restatement.** `bulk_create` updates only the columns supplied,
+  and the price dicts carry no `created_at` — right for the name, but it is the column that *proved*
+  the freeze and it is useless for confirming the fix. A troubleshooting row added earlier the same
+  day said to check it; that advice was wrong and is corrected. Verify by the price changing.
+
+**Still to check:**
+
+1. `/api/scheduler/history` for `rate_limited` on the scheduled passes over the next day. Two clean
+   40-request passes (one local, one on prod) is not the same as 2.8× sustained traffic from the
+   VPS's IP.
+2. That the 11:00 slot settles Korea's close — the 08:00 run catches KRX mid-session, and 11:00 is
+   the first pass after it shuts. Nothing has exercised that yet.
 
 Also landed, both found while sizing the traffic increase rather than sought:
 
@@ -512,9 +541,11 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
   at its 15:00 Berlin mid-session value**, and an earlier slot would have frozen an earlier price.
   `PROVISIONAL_PRICE_DAYS` re-fetches the trailing three days for free. Also: a Yahoo 429 now
   abandons the pass instead of asking 38 more times, and both `finish-deploy` twins had been guarding
-  the wrong sync hours for four days. Verified with one user-authorised Yahoo pass against a prod
-  snapshot: 40/40 securities, no rate limit, nine European rows restated (worst 2.11%) and 22 US
-  rows gained that would not have existed until 22:00. Suites 664 → 682. Committed, not pushed.
+  the wrong sync hours for four days. Deployed and confirmed the same evening, then a pass run on
+  production corrected the live rows (nine European closes restated, worst 2.11%; 24 US rows created
+  where there were none). That run also exposed the public `POST /api/market-data/sync` carrying its
+  own copy of the loop with no breaker — extracted to `MarketDataService.sync_securities`.
+  Suites 664 → 684.
 - **2026-08-03** — made the UI mobile-friendly at 390x844. One `Column[]` per table now renders as a
   desktop table or a getquin-style card list (`ui/DataTable.tsx`), so the two cannot drift; the shell,
   nav, charts and KPI grids reflow; `e2e/mobile.mjs` measures it at 45/45. Found two bugs that were
