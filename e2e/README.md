@@ -37,6 +37,7 @@ daily jobs against the live Flex token and Yahoo.
 | `npm run ledger` | dev server + backend on a **production snapshot** |
 | `npm run errors` | dev server, backend **deliberately stopped** |
 | `npm run mobile` | dev server **+ backend with data**, at 390x844 |
+| `npm run axis` | backend with **real** data (see below); runs at both viewports |
 | `npm run chunks` | `npm run build && npx vite preview --port 4173` in `frontend/`; no backend |
 
 `BASE` and `PREVIEW` override the URLs.
@@ -66,6 +67,20 @@ scroll" and fails "strip stays pinned". Do not satisfy one without reading the o
 **It passes vacuously with no data**, exactly like `a11y` does: every panel is then an empty state,
 and an empty state cannot overflow. Point `DATABASE_URL` at a populated copy first. `SCREENSHOT=1`
 writes `mobile-<tab>.png` beside the script.
+
+`axis.mjs` checks that the portfolio chart's Y axis does not reserve space below zero that the data
+cannot reach. It ran to −20,000 on a phone while the three default series spanned +1,122 … +65,025 —
+padding taken as a share of the whole range, rounded out to a full negative step, leaving a fifth of
+the plot permanently blank. `niceTicks.test.ts` pins the arithmetic; this pins the render at a real
+viewport, which is the part that was wrong on screen.
+
+It compares the axis against the **live data** rather than a fixed number, so it stays correct if the
+portfolio does go negative: a real value below the −5k floor must still be shown, because that floor
+is soft by design. Consequently it needs *real* data, not merely populated data — a fixture whose
+minimum happens to be negative exercises the other branch. Two selectors are used for the tick
+labels because this recharts version renders them in a sibling group rather than under
+`.recharts-yAxis`; the obvious selector returns zero nodes, which reads exactly like a chart that
+never rendered.
 
 `ledger.mjs` asserts against real account shapes — transfers badged *not money in*, fractional
 quantities, a deposit row. The local `backend/portfolio.db` predates trades, cash flows and the IBKR

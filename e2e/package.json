@@ -8,6 +8,7 @@
     "sweep": "node sweep.mjs",
     "errors": "node errors.mjs",
     "mobile": "node mobile.mjs",
+    "axis": "node axis.mjs",
     "csp": "node csp.mjs",
     "chunks": "node lazychunks.mjs",
     "ledger": "node ledger.mjs"
