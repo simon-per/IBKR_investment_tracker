@@ -1,11 +1,13 @@
 # Working state
 
-**Last updated: 2026-08-04 (latest) — Beta finally has a value (it was refused by an FX artefact, not
-by a thin window, and had never rendered on production); the Performance tab now reports the portfolio's dividend rate
-(*Dividend Yield* and *Yield on Cost*, replacing *Effective Holdings*); market data reprices seven
-times a day, live and verified; the chart's negative axis is clamped; the app's own INFO logging
-reaches the container log for the first time; the sixteen KPI cards are one component; and the deploy
-guard on the VPS covers all nine slots.**
+**Last updated: 2026-08-05 — everything below is deployed and verified in the browser on production.
+Beta shows a value for the first time (β 1.03 / r 0.74 vs S&P 500; it was refused by an FX artefact,
+never by a thin window); the Performance tab reports the portfolio's dividend rate (*Dividend Yield*
+and *Yield on Cost*, replacing *Effective Holdings*, which moved into the *Top 5 Weight* footnote);
+the breakdown endpoint has the contract test its eight nested models never had; market data reprices
+seven times a day; the chart's negative axis is clamped; the app's own INFO logging reaches the
+container log; the sixteen KPI cards are one component; and the deploy guard covers all nine slots.
+Working tree clean, nothing unpushed.**
 
 `CLAUDE.md` is the durable guide — architecture, invariants, and the rules that were each a bug
 first. **This file is the perishable half**: where the work actually stands, what is known-broken,
@@ -173,7 +175,7 @@ class outside `ui/`, the `noRawTables` pattern from `tableFamily.test.tsx`. It u
 so fs type-checks under vitest and then **fails `npm run build`**, breaking the deploy rather than
 the suite. Frontend 316 → 329.
 
-## Shipped 2026-08-04 (late) — the portfolio's dividend rate — NOT YET VERIFIED ON PROD
+## Shipped 2026-08-04 (late) — the portfolio's dividend rate — DEPLOYED and verified
 
 Two cards on the Performance tab's risk row — *Dividend Yield* (projected next-12-month income over
 market value) and *Yield on Cost* (the same income over cost basis) — in place of *Effective
@@ -200,17 +202,18 @@ Three things a review caught that had already been written and were wrong:
 - **Gating the row's `isLoading` on the dividend query hid four already-computed metrics** behind a
   third request. The cards carry their own three states instead.
 
-**What to check on prod after it deploys** (the arithmetic was verified against today's payload
-offline, so this is confirming the wire, not the maths):
+**Verified on production**, in the browser as well as on the wire: both cards render, `pct` and
+`on_cost_pct` each reproduce exactly when hand-divided against `/api/portfolio/summary`,
+`unpriced_holdings` is 0, `basis` is `mixed`, and `mobile.mjs` passes 45/45 at 390px with the row's
+longest footnote.
 
-- `curl /api/dividends/breakdown | jq '.forward_yield'` — expect a rate of a couple of tenths of a
-  percent, `paying_holdings` around half of `priced_holdings`, `unpriced_holdings` **0**, and
-  `basis: "mixed"` (five securities project on gross per-share).
-- **Hand-divide it**: `annual_eur ÷ summary.total_market_value_eur × 100` must equal `pct`. The two
-  denominators were byte-identical today; if they ever drift, this card and the *Market Value* card
-  disagree in a way a user can see.
-- `cd e2e && node mobile.mjs` — the new footnote is the longest on the row and this is the only check
-  that can see horizontal overflow at 390px.
+**The check worth repeating** if either card ever looks wrong:
+`annual_eur ÷ summary.total_market_value_eur × 100` must equal `pct`, and `on_cost_pct ÷ pct` must
+equal market value ÷ cost basis. The denominators come from a different code path than the *Market
+Value* card's; they were byte-identical when this shipped, and if they drift the two disagree in a
+way a user can see. Beware comparing a `pct` to an `annual_eur` fetched minutes apart — the window
+rolls with `as_of`, so the total moves by a cent or two across a date boundary. That is the rolling
+figure working, not a rounding bug.
 
 ## Known rough edges (accepted, not bugs)
 
@@ -265,14 +268,20 @@ line carries no information the portfolio's does not, and consulting it only re-
 rate. The fix is one line — test the portfolio's `external_flow_eur`, plus its own cost-basis step for
 the one flow that field cannot see (a disposal whose proceeds netted to zero). Sample days go 9 → 147.
 
-Resulting figures, computed from the cached timelines rather than guessed: **β ≈ 1.04 / r ≈ 0.73 vs
-S&P 500**, **β ≈ 0.82 / r ≈ 0.83 vs NASDAQ**, **β ≈ 0.54 / r ≈ 0.37 vs FTSE 100** — the ordering a
-growth-heavy global book should produce.
+Predicted from the cached timelines before shipping: **β ≈ 1.04 / r ≈ 0.73 vs S&P 500**,
+**β ≈ 0.82 / r ≈ 0.83 vs NASDAQ**, **β ≈ 0.54 / r ≈ 0.37 vs FTSE 100** — the ordering a growth-heavy
+global book should produce. **Measured in the browser on production after deploy: β 1.03, r 0.74 vs
+S&P 500**, which is the prediction landing within a hundredth and the strongest evidence the rule now
+measures flow rather than the exchange rate.
 
 `frontend/src/lib/portfolioKpis.ts` + its test. The old test *drops a day the benchmark saw a flow on*
 encoded the removed rule and is replaced by both halves of the new one. Frontend suite 343 green.
 
-**Left in the working tree, not committed** — another session was working the same branch.
+**Committed and deployed 2026-08-05** after a full-diff review that re-derived the claim from the two
+backend projection sites (`benchmark_service.py` converts a running total at each point's date;
+`portfolio_service.py` converts each lot at its own `open_date`). Authored in a parallel session — the
+review happened because a working tree carrying an unrecognised change is reviewed before it ships,
+not because anything looked wrong with it.
 
 - **The backend inconsistency behind it is NOT fixed**, deliberately (out of the requested scope). It
   is also visible on the chart: under a non-EUR base the benchmark's cost-basis line drifts from the
@@ -739,6 +748,12 @@ detail; this exists so the next session knows what just moved without reading it
 confirmed) and gets deleted once nothing in it is outstanding: these lines are permanent, so don't
 "tidy up" the overlap by deleting the wrong one.
 
+- **2026-08-05** — shipped and verified the dividend-rate cards and the beta fix on production
+  (β 1.03 / r 0.74, its first value ever, landing within a hundredth of what the fix predicted). Also
+  killed a `next_12m_vs_ttm_pct: -100.0` the public API served whenever `?forecast=false`: a zero
+  numerator over a real base, i.e. "dividends will fall 100%" manufactured by a flag rather than
+  measured. And gave `/api/dividends/breakdown` the contract test its eight nested models never had —
+  proven by mutation, after it caught its own fixture passing vacuously.
 - **2026-08-04** — Beta was backfilled, and the "thin window" it reported was never the reason. The
   card's own count was the clue: 9 flow-free days out of a year, against 147 days the portfolio
   genuinely sat still. The benchmark's flow was inferred from its cost-basis line, which the backend
@@ -772,9 +787,3 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
   Docker had no log rotation to absorb turning it on, and `prices_fetched` counted rows in the
   window rather than rows written. Backend 684 → 689, frontend 308 → 316; `axis` 8/8, `a11y`
   17/17, `sweep` 16/16, `mobile` 45/45 against production.
-- **2026-08-03** — made the UI mobile-friendly at 390x844. One `Column[]` per table now renders as a
-  desktop table or a getquin-style card list (`ui/DataTable.tsx`), so the two cannot drift; the shell,
-  nav, charts and KPI grids reflow; `e2e/mobile.mjs` measures it at 45/45. Found two bugs that were
-  not about width — the Performance tab was untappable on a phone (`justify-center` in a flex
-  scroller hides its leading items) and a Forecast projections table nobody had noticed. Suites
-  268 → 308; every e2e script green bar `ledger`. Not deployed.
