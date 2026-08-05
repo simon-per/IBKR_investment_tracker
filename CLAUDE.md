@@ -1481,10 +1481,27 @@ Four rules, each a wrong number the other way:
   *removes* the target; `0` means "hold none of this", and those are different instructions.
 - **Targets are never renormalised to 100%.** The shortfall is reported instead. Scaling invents a
   target nobody chose, and the invented one moves whenever an *unrelated* target is edited.
-- **An unpriced position has no weight rather than a zero weight.** The portfolio values a holding
-  with no cached price at 0.00, so naive drift advises buying its entire target when the position may
-  be the largest one held — the SBI shape. A *priced* holding genuinely worth zero is a real 0% and
-  stays advisable.
+- **An unpriced position has no weight rather than a zero weight** — and "unpriced" means **either** of
+  the two ways the backend fails to value one. It values a holding with no cached price at 0.00, so naive
+  drift advises buying its entire target when the position may be the largest one held: the SBI shape.
+
+  **`market_price === null` alone does not catch it, which was a live gap until 2026-08-05.** When the
+  price resolves but its **FX rate** does not, `get_positions_breakdown` sets `market_value_eur = 0.0`
+  and leaves `market_price` populated — so the holding read as *priced*, took a 0% weight, and drift
+  advised buying the whole target. Same bug, second route. A missing FX rate is not hypothetical:
+  Frankfurter cannot serve TWD at all, which is the entire reason `WARM_CURRENCIES` exists.
+
+  Both `rebalance.ts` and `currencyExposure.ts` therefore test `market_price === null ||
+  market_value_eur <= 0`. The old narrow predicate was justified in a comment by "a *priced* holding
+  genuinely worth zero is a real 0%, e.g. a fully-sold one" — **and that premise was false**:
+  `get_positions_breakdown` selects `is_open == True`, so a sold-out security has no open lots and never
+  reaches the client at all. Two tests asserted the wrong behaviour on the strength of it. What a zero
+  value on a priced position actually means is the FX failure above, or a zero-quantity open lot, which
+  is a data anomaly that should equally not drive advice.
+
+  Note this is a *narrower* question than `summary.unpriced_holdings`, which is the backend's own count
+  and the one to trust for the headline — the client predicate exists only to decide per-position
+  weighting.
 - **Targets key on `security_id`, not symbol**, because identity is `isin + exchange` and ASML is two
   securities.
 

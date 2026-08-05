@@ -120,13 +120,24 @@ describe('computeRebalancePlan', () => {
       expect(plan.totalValue).toBe(500)
     })
 
-    it('still treats a priced position worth zero as a genuine 0%', () => {
-      // A fully-sold holding is priced and really is 0% — not the same case.
-      const plan = computeRebalancePlan([pos(1, 'AAA', 1000), pos(2, 'SOLD', 0, 42)], { 2: 10 })
-      const sold = plan.rows.find((r) => r.symbol === 'SOLD')!
-      expect(sold.unpriced).toBe(false)
-      expect(sold.currentPct).toBe(0)
-      expect(sold.tradeValue).toBeCloseTo(100, 10)
+    it('treats a priced position worth zero as unpriced, not as a genuine 0%', () => {
+      // This used to assert the opposite, justified by "a fully-sold holding is priced
+      // and really is 0%". That premise was false: get_positions_breakdown selects
+      // is_open == True, so a sold-out security never appears here at all.
+      //
+      // What this input really represents is the second way the backend fails to value a
+      // holding — the price resolved, its FX rate did not, so market_value_eur is 0 with
+      // market_price still set. Frankfurter cannot serve TWD at all, so this is a live
+      // shape on this account, not a contrivance. Treated as priced it took a 0% weight
+      // and drift advised buying the entire target: the SBI shape by another route.
+      const plan = computeRebalancePlan([pos(1, 'AAA', 1000), pos(2, 'NOFX', 0, 42)], { 2: 10 })
+      const noFx = plan.rows.find((r) => r.symbol === 'NOFX')!
+      expect(noFx.unpriced).toBe(true)
+      expect(noFx.currentPct).toBeNull()
+      expect(noFx.tradeValue).toBeNull()
+      expect(plan.unpricedCount).toBe(1)
+      // ...and it must not be counted as a judged comparison either.
+      expect(plan.judgedCount).toBe(0)
     })
   })
 

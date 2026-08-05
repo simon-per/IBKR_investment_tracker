@@ -80,13 +80,26 @@ export interface RebalancePlan {
 export const DEFAULT_BAND_PP = 5
 
 /**
- * A position is only unpriced when the portfolio genuinely has no price for it.
- * A real price of 0 does not occur, but a *zero market value* on a priced
- * position does (a fully-sold holding), and that is a true 0% weight rather
- * than an unknown one.
+ * A position the portfolio could not value, for **either** reason.
+ *
+ * `market_price === null` alone is not enough. The backend fails to value a holding two
+ * ways, and only one of them clears the price: when the price resolves but its **FX rate
+ * does not**, `get_positions_breakdown` sets `market_value_eur = 0.0` and leaves
+ * `market_price` populated. Such a position slipped through as *priced* and took a 0%
+ * weight, so drift advised buying its entire target — precisely the SBI shape this guard
+ * exists to prevent, reached by the route it did not cover. A missing FX rate is not
+ * hypothetical here: Frankfurter cannot serve TWD at all, which is why `WARM_CURRENCIES`
+ * exists.
+ *
+ * This used to exclude a zero market value on the grounds that a *fully-sold* holding is
+ * priced and genuinely 0%. That premise was false: `get_positions_breakdown` selects
+ * `is_open == True`, so a sold-out security has no open lots and never reaches this
+ * function. What a zero value on a priced position actually means is the FX failure above
+ * — or a zero-quantity open lot, which is a data anomaly that should likewise not drive
+ * "buy the whole target".
  */
 function isUnpriced(p: DriftInput): boolean {
-  return p.market_price === null
+  return p.market_price === null || p.market_value_eur <= 0
 }
 
 export function computeRebalancePlan(

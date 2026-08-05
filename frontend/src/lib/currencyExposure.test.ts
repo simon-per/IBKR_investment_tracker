@@ -70,14 +70,17 @@ describe('computeCurrencyExposure', () => {
       expect(exposure.rows.find((r) => r.currency === 'CAD')).toBeUndefined()
     })
 
-    it('still counts a priced holding worth zero as a real member', () => {
-      // Fully sold but priced: genuinely 0%, and a different case.
+    it('excludes a priced holding worth zero, which means its FX rate is missing', () => {
+      // Was asserted the other way, on the false premise that this is a fully-sold
+      // holding — those have no open lots and never reach here. A zero value with a price
+      // set means the FX conversion failed, so the holding contributes nothing to its
+      // bucket and belongs in the count where that caveat is stated.
       const exposure = computeCurrencyExposure([
         pos(1, 'AAPL', 'USD', 500),
-        pos(2, 'SOLD', 'CAD', 0, 42),
+        pos(2, 'NOFX', 'CAD', 0, 42),
       ])
-      expect(exposure.rows.find((r) => r.currency === 'CAD')?.positionCount).toBe(1)
-      expect(exposure.unpricedCount).toBe(0)
+      expect(exposure.rows.find((r) => r.currency === 'CAD')).toBeUndefined()
+      expect(exposure.unpricedCount).toBe(1)
     })
   })
 
@@ -147,9 +150,13 @@ describe('computeCurrencyExposure', () => {
       expect(exposure.lookThroughPct).toBe(0)
     })
 
-    it('gives every row 0% when nothing is worth anything', () => {
+    it('reports no rows at all when nothing can be valued', () => {
+      // A zero-valued priced holding is now unpriced (its FX rate is missing), so there
+      // is no row to give a percent to — which is the honest answer, and matches
+      // foreignQuotedPct returning null rather than 0 on the same input.
       const exposure = computeCurrencyExposure([pos(1, 'A', 'EUR', 0, 5)])
-      expect(exposure.rows[0].pct).toBe(0)
+      expect(exposure.rows).toHaveLength(0)
+      expect(exposure.unpricedCount).toBe(1)
     })
   })
 })
