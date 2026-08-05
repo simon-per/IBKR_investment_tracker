@@ -2,7 +2,7 @@
 
 **Last updated: 2026-08-06.** Newest first: three ETFs bought on 08-06 are pending IBKR's next
 statement (see *Watching* — the Flex window ends yesterday, so a same-day download cannot carry them);
-the Activity ledger no longer lists every
+the loop audit's eight fixes (see *Held locally*); the Activity ledger no longer lists every
 dividend twice (it was the one reader missing the era splice, overstating dividend income 72%); yield on
 cost is a Positions column; the permanent 27-attribute sync banner is gone; yield on cost no longer
 falls when you add to a holding; Beta shows a value for the first time (β 1.03 / r 0.74 vs S&P 500 — it
@@ -342,6 +342,63 @@ test file it never had, and the latent `useMemo` dep omission in its sort (`tota
 already missing) is fixed — adding a case that reads a separately-fetched map would have made it bite.
 
 Backend 723 → 726, frontend 343 → 352.
+
+## HELD LOCALLY, NOT PUSHED — eight fixes from a /loop audit, 2026-08-05
+
+`git log --oneline origin/main..main`. All eight are committed, tested and mutation-verified; **none is
+wrong on current data**, which is why they were batched rather than shipped one at a time — `deploy.sh`
+does a full `down` + `build --no-cache`, so a push costs ~90s of downtime and a 10-minute loop pushing
+each pass would have taken the dashboard down ~9 minutes an hour.
+
+**Two of them are a matched pair** (`adb992c` adds the completeness signal, `557f82d` acts on it), so
+shipping one without the other is half a fix. Ship the batch together.
+
+### Thread 1 — a zero standing in for "unknown"
+
+The codebase's most repeated bug, found three more times. The refinement worth keeping is **what the
+stand-in value would claim**: a `0` volatility looks broken and gets noticed, a `0.00` Sharpe looks like
+an answer, and a `0.0%` concentration looks like a *good* answer. **Severity tracks plausibility, not
+magnitude** — which is why the concentration one sat in plain sight beside two cards already fixed for
+the identical flaw.
+
+- `5f824c6` **Sharpe returned 0** below the minimum sample. Reachable in one click: MTD in the first days
+  of a month leaves 2–3 daily returns, and the card drew a green `0.00` captioned *Risk-adjusted return*
+  beside a dashed Volatility and Sortino. Its clamp test had also been passing vacuously off the same
+  early return.
+- `244baa8` **Top 5 Weight drew a green `0.0%`** when nothing was priced — the tone ladder calls anything
+  under 50% good news.
+- `03a3a48` **`days_held_in_ttm` measured time since first purchase**, not time held, so a sell-and-rebuy
+  with a gap reported full coverage and the partial-yield badge never fired.
+
+### Thread 2 — an incomplete sum presented as a complete one
+
+`portfolio_service` values an unpriced holding at 0.00 while its cost still counts, so every total built
+that way understates. `find_stale_priced_securities` guarded only the current snapshot.
+
+- `adb992c` **the timeline** — measured on production: at +14 days past the last cached price the total
+  read a plausible **+15.3%**, at +15 days **−100%**. That is what a stalled market-data sync looks like:
+  a smooth decay to zero, not a gap. Each point now carries `unpriced_holdings`.
+- `557f82d` **and it poisoned every risk metric**, not just the line — a complete→incomplete pair is a
+  −100% daily return, and `dailyReturnSeries` feeds drawdown, volatility, Sharpe, Sortino. `beta` needed
+  the guard separately.
+- `eb21c9e` **the headline Market Value**, which is the SBI incident restated: 446.93 CHF once left that
+  figure with only a sync warning to catch it.
+- `b26f75f` **a missing FX rate slipped past the client's unpriced guard** as a 0% weight, so drift
+  advised buying the whole target. It survived because its comment justified the narrow predicate with a
+  *false* fact — that a fully-sold holding reaches the client, which `is_open == True` prevents.
+
+### Thread 3 — a latent 100× money error
+
+- `976e15b` **a pence quote stored as pounds.** Yahoo reports London in `GBp`; the code `.upper()`'d it to
+  `GBP` and left the amount alone. Worse than the factor: normalising the label **defeats the currency
+  guard** rather than tripping it, since the normalised code matches the security's own. Latent — this
+  account holds no GBP security and its one London line is a USD ETF — but three LSE codes already map
+  to `.L`.
+
+**After they deploy, check:** the chart and hero row show no yellow notice (nothing is unpriced today);
+`summary.unpriced_holdings == 0` and equals the last timeline point's; Sharpe and Top 5 Weight still show
+numbers on a normal range and dashes on MTD early in a month; and `days_held_in_ttm` is unchanged for all
+twenty rows carrying it, since every holding is continuously held.
 
 ## Known rough edges (accepted, not bugs)
 
@@ -882,6 +939,14 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
   ending on the last *completed* day. A production dry-run confirmed it was a byte-for-byte no-op
   against what the 06:00 job had already ingested, so nothing was written. Recorded in CLAUDE.md so
   the next "I bought today" does not become a hunt for a broken sync.
+- **2026-08-05 (loop)** — a `/loop` audit over eleven passes: eight fixes, all held locally. Three were
+  a zero standing in for "unknown" (Sharpe, Top 5 Weight, `days_held_in_ttm`), four were an incomplete
+  sum presented as complete (timeline, the risk metrics it feeds, the headline total, the client's
+  unpriced guard), and one was a latent 100x pence-as-pounds error that *defeated* the currency guard
+  rather than tripping it. Two lenses did most of the work: ask what a stand-in value would **claim**
+  (severity tracks plausibility, not magnitude), and ask which code reads the same rows or publishes the
+  same name without applying the same rules. Passes 9 and 11 found nothing, which is the shape of a
+  swept codebase.
 - **2026-08-05 (later still)** — the Activity ledger listed every dividend twice: the yfinance estimate
   under its ex-date and the IBKR actual under its pay date, because `ActivityService._dividends` was the
   one reader not applying `_splice_by_era`. 31 duplicate rows, dividend income overstated 72%, and
