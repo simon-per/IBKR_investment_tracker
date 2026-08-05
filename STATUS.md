@@ -1,9 +1,9 @@
 # Working state
 
-**Last updated: 2026-08-05 (later) — only drops that can change ingested data are warnings now, so the
-permanent 27-attribute sync banner should empty (awaiting one successful IBKR sync to confirm — the
-08:00 run hit a routine `1001`), and yield on cost no longer falls when you add to a holding
-(verified on production). Everything else below is deployed and verified in the browser.
+**Last updated: 2026-08-05 (later) — the permanent 27-attribute sync banner is gone (only drops that
+can change ingested data are warnings now, verified by running the real entry point inside the
+production container) and yield on cost no longer falls when you add to a holding (verified on
+production data). Everything else below is deployed and verified in the browser.
 Beta shows a value for the first time (β 1.03 / r 0.74 vs S&P 500; it was refused by an FX artefact,
 never by a thin window); the Performance tab reports the portfolio's dividend rate (*Dividend Yield*
 and *Yield on Cost*, replacing *Effective Holdings*, which moved into the *Top 5 Weight* footnote);
@@ -218,7 +218,7 @@ way a user can see. Beware comparing a `pct` to an `annual_eur` fetched minutes 
 rolls with `as_of`, so the total moves by a cent or two across a date boundary. That is the rolling
 figure working, not a rounding bug.
 
-## Shipped 2026-08-05 — the permanent sync warning, and a yield on cost that punished buying more — one check outstanding
+## Shipped 2026-08-05 — the permanent sync warning, and a yield on cost that punished buying more
 
 Two reported issues, both real, and neither where it looked.
 
@@ -250,7 +250,7 @@ Now forward-over-cost everywhere, so the gap against the yield beside it is appr
 else. Sell-and-rebuy at a higher price still lowers it, which is the honest answer — more capital
 committed for the same income — but it now equals exactly the new cost's rate rather than a blend.
 
-Backend 705 → 721.
+Backend 705 → 723.
 
 **Yield on cost is verified on production.** All 17 rows carrying both figures satisfy
 `yield_on_cost_pct ÷ forward_yield_pct == market value ÷ cost` to within 2dp rounding, and the
@@ -258,16 +258,25 @@ understated rows recovered as predicted: MCO 0.33 → 0.79, SPGI 0.46 → 0.80, 
 MRVL 0.12 → 0.28. Four securities that had *no* yield on cost now have one, because they carry a
 projection but no trailing income yet.
 
-**The empty banner is NOT yet verified end to end, and needs one successful IBKR sync.** The 08:00
-run after the deploy returned a routine `Code=1001` (IBKR could not generate the statement; it
-correctly did not re-request), so no statement was parsed and neither channel was populated. The next
-IBKR attempt is **00:00 Berlin**. What to check then: `/api/scheduler/history` should show
-`details.flex_schema_notes` populated while `warnings` is empty or absent.
+**The empty banner is verified against the deployed build**, without spending an IBKR request. The
+08:00 run after the deploy returned a routine `Code=1001` and correctly declined to re-request, so
+waiting on a real statement was not an option and retrying is precisely what trips `1025`. Instead
+`IBKRService.parse_flex_xml` — the entry point every sync and the offline CLI both use — was run
+inside the production container against a statement carrying this account's own drift:
 
-What *is* verified meanwhile: the deployed container classifies all 27 attributes from the real
-warning as cosmetic and still flags `CashTransaction.type` and `Trade.tradePrice` as material, and
-`tests/test_flex_ingestion_e2e.py` drives the same split over a real IBKR document. So the remaining
-risk is the plumbing between them, not the rule.
+| input | `flex_warnings` (the banner) | `flex_notes` |
+|---|---|---|
+| 38 unmodelled attributes across `<Trade>` / `<CashTransaction>` | **empty** | 1 compact line |
+| `CashTransaction.type="Broker Fees"` (a field the ingest reads) | 1 warning, *data may be affected* | not filed as harmless |
+
+Pure — no network, no DB, no token, nothing written. The last hop is confirmed present in the running
+container (`sync_helper.py:176` copies `flex_notes` → `flex_schema_notes`) and is driven end to end by
+`tests/test_manual_xml_ingest.py`, which goes through the same `parse_flex_xml` +
+`ingest_flex_statement` pair the scheduled job does.
+
+**Still worth an eyeball on the next successful IBKR sync** (00:00 Berlin): the header should show no
+warning, and `/api/scheduler/history` should carry `details.flex_schema_notes`. That confirms the real
+statement's drift is the drift we modelled, which is the one thing a constructed document cannot.
 
 Note `/api/scheduler/history` names the field **`type`**, not `sync_type` — reading the wrong key
 makes every run look untyped, which briefly looked like a second bug and was not one.

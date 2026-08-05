@@ -178,3 +178,78 @@ async def test_sold_out_security_gets_linked_through_this_path_too():
     finally:
         await session.close()
         await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Schema drift reaches the sync record by the right channel.
+#
+# `_sanitize_flex_xml` classifies a dropped attribute by whether the extractors read it,
+# and `tests/test_flex_xml_sanitizer.py` pins that decision. What those tests cannot see
+# is the wiring that carries it onward: sanitizer -> parse_flex_xml's `flex_notes` ->
+# ingest_flex_statement's `flex_schema_notes`, with `warnings` left clean. That chain is
+# what decides whether the banner in the header is empty, and it is only exercised by the
+# two real entry points — which `_ingest_bytes` above is.
+#
+# Worth pinning here rather than trusting: production could not confirm it. The first
+# IBKR sync after the fix deployed returned a routine `Code=1001`, so no statement was
+# parsed and neither channel was populated.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_harmless_schema_drift_reaches_details_and_not_the_warning_banner():
+    """
+    The real document carries `subCategory`, which no extractor reads. It must be
+    recorded — losing it entirely would make "did a NEW kind of thing start being
+    dropped?" unanswerable — and it must not reach `warnings`, because a banner that is
+    always present is a banner nobody reads.
+    """
+    engine, session = await _make_session()
+    try:
+        result = await _ingest_bytes(session, FLEX_XML)
+
+        notes = result["flex_schema_notes"]
+        assert notes, "harmless drift vanished instead of being recorded"
+        assert any("subCategory" in n for n in notes)
+        # One compact line, not one entry per field: 27 fully-qualified names with
+        # reasons is what made the original unreadable.
+        assert len(notes) == 1
+        assert "nothing was affected" in notes[0]
+
+        assert not any("attribute" in w for w in result["warnings"]), result["warnings"]
+        # And the ingest still worked — the point of dropping the attribute at all.
+        assert result["securities_synced"] > 0
+        assert result["trades_seen"] > 0
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_drift_on_a_field_the_ingest_reads_still_reaches_the_banner():
+    """
+    The half that must stay loud, through the same chain. An unparseable
+    `CashTransaction.type` is dropped to None and the row is then skipped by
+    extract_cash_transactions — a dividend that silently never arrives, which is the
+    exact class of failure `warnings[]` exists to surface.
+    """
+    engine, session = await _make_session()
+    try:
+        # "Broker Fees" is selectable in the Flex Query and absent from ibflex's
+        # CashAction enum — unlike "Bond Interest Paid", which is a *valid* member and
+        # so gets converted rather than dropped. Picked deliberately: the first attempt
+        # at this test used a legal value and passed nothing.
+        broken = FLEX_XML.replace(b'type="Dividends"', b'type="Broker Fees"')
+        assert broken != FLEX_XML, "fixture changed; the substitution no longer applies"
+
+        result = await _ingest_bytes(session, broken)
+
+        assert any("CashTransaction.type" in w for w in result["warnings"]), result["warnings"]
+        assert any("data may be affected" in w for w in result["warnings"])
+        # It must not be filed away as harmless.
+        assert not any("CashTransaction.type" in n for n in result["flex_schema_notes"])
+        # The dividend really is gone, which is what makes the warning worth having.
+        assert (await session.execute(select(DividendPayment))).scalars().first() is None
+    finally:
+        await session.close()
+        await engine.dispose()
