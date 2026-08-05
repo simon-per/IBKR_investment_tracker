@@ -180,6 +180,19 @@ export function Dashboard() {
     staleTime: 30 * 60 * 1000,
   })
 
+  // Per-security yield on cost for the positions table, keyed on `security_id` because
+  // identity is isin + exchange (ASML is two securities). Memoised so the table's column
+  // factory and sort comparator do not see a fresh Map identity on every render.
+  //
+  // Securities with no payments and no projection are simply absent — the breakdown only
+  // carries the ones that have something to say — which the table renders as a dash.
+  const yieldOnCostBySecurity = useMemo(
+    () => new Map(
+      (dividendBreakdown?.securities ?? []).map((r) => [r.security_id, r.yield_on_cost_pct]),
+    ),
+    [dividendBreakdown],
+  )
+
   // Fetch scheduler status (poll every 60s)
   const { data: schedulerStatus } = useQuery({
     queryKey: ['scheduler', 'status'],
@@ -646,8 +659,14 @@ export function Dashboard() {
             {/* Performance Attribution */}
             <PerformanceAttribution data={attribution} isLoading={attributionLoading} isError={attributionError} />
 
-            {/* Positions Table */}
-            <PositionsList positions={positions || []} isLoading={positionsLoading} isError={positionsError} />
+            {/* Positions Table. The yield map rides on the breakdown already fetched
+                above for the KPI cards, so this costs no extra request. */}
+            <PositionsList
+              positions={positions || []}
+              isLoading={positionsLoading}
+              isError={positionsError}
+              yieldOnCost={yieldOnCostBySecurity}
+            />
           </TabsContent>
 
           {/* Activity Tab — the transaction ledger */}

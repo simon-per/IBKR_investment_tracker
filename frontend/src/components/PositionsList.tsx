@@ -9,9 +9,15 @@ interface PositionsListProps {
   positions: Position[]
   isLoading?: boolean
   isError?: boolean
+  /**
+   * Projected yield on cost per `security_id`, from the dividends breakdown the
+   * Dashboard already fetches for the KPI cards. Optional so the table still renders
+   * before that query resolves — every row simply shows a dash until it does.
+   */
+  yieldOnCost?: Map<number, number | null>
 }
 
-type SortColumn = 'symbol' | 'description' | 'rating' | 'quantity' | 'cost_basis_eur' | 'market_value_eur' | 'gain_loss_eur' | 'gain_loss_percent' | 'portfolio_percent'
+type SortColumn = 'symbol' | 'description' | 'rating' | 'quantity' | 'cost_basis_eur' | 'market_value_eur' | 'gain_loss_eur' | 'gain_loss_percent' | 'portfolio_percent' | 'yield_on_cost'
 type SortDirection = 'asc' | 'desc'
 
 const getRatingBadgeColor = (consensus: string): string => {
@@ -70,10 +76,21 @@ const gainTone = (p: Position) =>
 export function positionColumns(deps: {
   formatCurrency: (value: number) => string
   totalMarketValue: number
+  /**
+   * Projected next-12-month income over cost, per security, from
+   * `/api/dividends/breakdown`. Keyed on `security_id` because identity is
+   * isin + exchange — ASML is two securities and must not share a yield.
+   *
+   * A security **absent** from the map is the normal case, not an error: the breakdown
+   * only carries securities with payments or a projection, so every accumulating ETF and
+   * non-payer is missing rather than present-with-null. Both mean "no rate to show".
+   */
+  yieldOnCost: Map<number, number | null>
 }): Column<Position, SortColumn>[] {
-  const { formatCurrency, totalMarketValue } = deps
+  const { formatCurrency, totalMarketValue, yieldOnCost } = deps
   const weightOf = (p: Position) =>
     totalMarketValue > 0 ? (p.market_value_eur / totalMarketValue) * 100 : 0
+  const yocOf = (p: Position) => yieldOnCost.get(p.security_id) ?? null
 
   return [
     {
@@ -200,6 +217,30 @@ export function positionColumns(deps: {
       cellClassName: 'text-muted-foreground',
       cell: (p) => `${weightOf(p).toFixed(2)}%`,
     },
+    {
+      key: 'yoc',
+      header: 'YoC',
+      shortHeader: 'Yield on cost',
+      sortKey: 'yield_on_cost',
+      align: 'right',
+      cellClassName: 'text-muted-foreground',
+      hint: {
+        description:
+          'Projected next-12-month dividend income over what this position cost. The ' +
+          'same figure the Dividends tab shows, and the same definition the Yield on ' +
+          'Cost card above uses. A dash means the holding distributes nothing — every ' +
+          'accumulating ETF reads that way, correctly, because it reinvests internally ' +
+          'instead of paying out.',
+      },
+      // `toFixed(2)` and an em dash, matching DividendsTab's `yoc` column and the KPI
+      // card rather than this file's `formatPercent`/hyphen: it is the same number on a
+      // third screen, and the hyphen belongs to the rating badge, where a lone dash in a
+      // chip row says nothing. A detail row needs a value beside its label.
+      cell: (p) => {
+        const y = yocOf(p)
+        return y != null ? `${y.toFixed(2)}%` : '—'
+      },
+    },
     // Carried by the desktop cells above as sub-lines, so they would be duplicated
     // there; on a phone they are the detail pairs that keep a dual-listed security
     // (ASML is two securities) tellable apart.
@@ -214,7 +255,11 @@ export function positionColumns(deps: {
   ]
 }
 
-export function PositionsList({ positions, isLoading, isError }: PositionsListProps) {
+const NO_YIELDS: Map<number, number | null> = new Map()
+
+export function PositionsList({
+  positions, isLoading, isError, yieldOnCost = NO_YIELDS,
+}: PositionsListProps) {
   const formatCurrency = useFormatCurrency()
   const [sortColumn, setSortColumn] = useState<SortColumn>('market_value_eur')
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc')
@@ -280,6 +325,15 @@ export function PositionsList({ positions, isLoading, isError }: PositionsListPr
           aValue = totalMarketValue > 0 ? (a.market_value_eur / totalMarketValue) * 100 : 0
           bValue = totalMarketValue > 0 ? (b.market_value_eur / totalMarketValue) * 100 : 0
           break
+        case 'yield_on_cost':
+          // A sentinel below every real yield, so descending — the default, and the
+          // direction someone clicking this column wants — puts the 17 rows with no rate
+          // beneath the 19 that have one. Ascending puts them first, which is the same
+          // trade-off the `rating` column makes with its 999 and is honest enough here:
+          // a holding that distributes nothing really is at the bottom of this ranking.
+          aValue = yieldOnCost.get(a.security_id) ?? -1
+          bValue = yieldOnCost.get(b.security_id) ?? -1
+          break
         default:
           return 0
       }
@@ -290,11 +344,15 @@ export function PositionsList({ positions, isLoading, isError }: PositionsListPr
     })
 
     return sorted
-  }, [positions, sortColumn, sortDirection])
+    // `totalMarketValue` and `yieldOnCost` are read by two of the cases above, so they
+    // belong here. The former was already missing — harmless only because a change in
+    // the total always came with a change in `positions`; adding a case that reads a
+    // separately-fetched map would have made the omission actually bite.
+  }, [positions, sortColumn, sortDirection, totalMarketValue, yieldOnCost])
 
   const columns = useMemo(
-    () => positionColumns({ formatCurrency, totalMarketValue }),
-    [formatCurrency, totalMarketValue]
+    () => positionColumns({ formatCurrency, totalMarketValue, yieldOnCost }),
+    [formatCurrency, totalMarketValue, yieldOnCost]
   )
 
   if (isLoading) {
@@ -359,7 +417,9 @@ export function PositionsList({ positions, isLoading, isError }: PositionsListPr
           // Quantity, cost basis, gain and weight are what a review is for; the
           // exchange and ISIN are identifiers you go looking for, so they sit behind
           // the disclosure rather than adding a line to all 29 cards.
-          detailLimit={4}
+          // 5, not 4, so the new yield-on-cost row does not push Weight behind the
+          // "Show all N metrics" disclosure on a phone.
+          detailLimit={5}
           sort={{ column: sortColumn, direction: sortDirection, onSort: handleSort }}
         />
       </CardContent>

@@ -89,7 +89,13 @@ const SPARSE_WATCHLIST = {
 const FAMILY: Array<[string, Column<never, string>[], unknown]> = [
   [
     'Positions',
-    positionColumns({ formatCurrency: money, totalMarketValue: 1000 }) as never,
+    // An EMPTY yield map on purpose: a security with no payments and no projection is
+    // absent from the breakdown rather than present-with-null, and that absence is the
+    // sparse case the null-safety assertion below has to cover. Passing a populated map
+    // would exercise the easy path only.
+    positionColumns({
+      formatCurrency: money, totalMarketValue: 1000, yieldOnCost: new Map(),
+    }) as never,
     SPARSE_POSITION,
   ],
   ['Watchlist', watchlistColumns({ formatCurrency: moneyOrDash }) as never, SPARSE_WATCHLIST],
