@@ -672,3 +672,39 @@ async def test_the_ledger_dividend_total_agrees_with_the_dividends_reader(db):
         if WINDOW_START <= (p.pay_date or p.ex_date) <= TODAY
     )
     assert ledger_total == reader_total
+
+
+@pytest.mark.asyncio
+async def test_the_repository_boundary_agrees_with_the_splice_helper(db):
+    """
+    Two ways of finding the same era boundary, and the ledger depends on them agreeing.
+
+    `_splice_by_era` takes `min(pay_date or ex_date)` over the IBKR rows it is given, and
+    every reader hands it rows **before** the income filter runs (`dividend_service`
+    splices then filters, in both readers). `earliest_ibkr_payment_date()` must therefore
+    also count IBKR rows regardless of income — add an income filter to one side only and
+    a zero-value IBKR row would move one boundary and not the other, dropping estimates
+    that no real IBKR income replaces.
+
+    Asserted over data that contains exactly that trap: an income-free IBKR row dated
+    before any paying one.
+    """
+    from app.repositories.dividend_repository import DividendRepository
+    from app.services.dividend_service import DividendService
+
+    await _seed_both_eras(db)
+    # The trap: an IBKR row carrying nothing, earlier than every paying IBKR row.
+    db.add(DividendPayment(
+        security_id=1, ex_date=IBKR_ERA_START - timedelta(days=7),
+        pay_date=IBKR_ERA_START - timedelta(days=7), shares_held=Decimal("0"),
+        gross_amount_eur=Decimal("0"), withholding_tax_eur=Decimal("0"),
+        net_amount_eur=Decimal("0"), currency="EUR", source="ibkr",
+    ))
+    await db.flush()
+    await db.commit()
+
+    repo = DividendRepository(db)
+    from_repo = await repo.earliest_ibkr_payment_date()
+    _, from_helper = DividendService._splice_by_era(await repo.get_computed_dividends())
+
+    assert from_repo == from_helper == IBKR_ERA_START - timedelta(days=7)
