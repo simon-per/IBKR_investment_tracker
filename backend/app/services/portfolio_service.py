@@ -266,11 +266,17 @@ class PortfolioService:
 
             if d.weekday() < 5:
                 mv_eur = Decimal("0")
+                # Holdings whose cost is in `total_cost` but whose value could not be
+                # resolved. Counted rather than only logged: a 730-day window over 40
+                # securities can emit ~29k of those warnings, which is noise, while the
+                # response carried no sign that its market value was a partial sum.
+                unpriced = 0
                 for sid, qty in qty_by_sec.items():
                     if qty <= 0:
                         continue
                     price = self._get_market_price_with_fallback(sid, d, price_cache)
                     if not price:
+                        unpriced += 1
                         sec = securities_by_id[sid]
                         logger.warning(
                             f"Skipping position for security {sid} ({sec.symbol}) on {d}: "
@@ -287,6 +293,7 @@ class PortfolioService:
                             price_currency, d, exchange_rate_cache
                         )
                         if not rate:
+                            unpriced += 1
                             logger.warning(
                                 f"Skipping position for security {sid} on {d}: "
                                 f"no exchange rate for {price_currency}"
@@ -311,6 +318,14 @@ class PortfolioService:
                     # measure has to net this out, and inferring it from the
                     # cost-basis line books a sale's whole gain as a loss.
                     "external_flow_eur": float(pending_flow),
+                    # > 0 means this day's market value is INCOMPLETE — the unpriced
+                    # holdings still count in cost_basis_eur, so gain_loss_eur and
+                    # gain_loss_percent understate by their whole value. Fifteen days
+                    # past the last cached price every holding drops out and the point
+                    # reads market value 0 / −100%, which is a fabricated wipeout rather
+                    # than a gap; the partial case is worse, because a plausible
+                    # +15% invites no doubt at all.
+                    "unpriced_holdings": unpriced,
                 })
                 pending_flow = Decimal("0")
             d += timedelta(days=1)
@@ -1507,6 +1522,14 @@ class PortfolioService:
         base_fx = base_fx or BaseFx("EUR", {})
         total_cost_basis = Decimal("0.0")      # in base currency
         total_market_value_eur = Decimal("0.0")  # in EUR, converted once at the end
+        # Securities whose cost is counted but whose value could not be resolved, kept in
+        # lockstep with _calculate_timeline_swept — which must stay numerically identical
+        # to this function, including what it reports about its own completeness.
+        #
+        # A SET of ids, not a counter: this function walks tax LOTS while the swept one
+        # walks securities, so incrementing here would report 110 for a holding split
+        # across 110 lots and break the equivalence the two are pinned to.
+        unpriced_securities: set = set()
 
         for taxlot, security in taxlots_with_securities:
             # Only include taxlots opened on or before this date
@@ -1542,6 +1565,7 @@ class PortfolioService:
                     if rate:
                         total_market_value_eur += position_value * rate
                     else:
+                        unpriced_securities.add(security.id)
                         # Log but skip this position if no exchange rate available
                         logger.warning(
                             f"Skipping position for security {security.id} on {target_date}: "
@@ -1550,6 +1574,7 @@ class PortfolioService:
                 else:
                     total_market_value_eur += position_value
             else:
+                unpriced_securities.add(security.id)
                 # Log but skip this position if no market price available
                 logger.warning(
                     f"Skipping position for security {security.id} ({security.symbol}) on {target_date}: "
@@ -1565,5 +1590,6 @@ class PortfolioService:
             "cost_basis_eur": float(total_cost_basis),
             "market_value_eur": float(total_market_value),
             "gain_loss_eur": float(gain_loss),
-            "gain_loss_percent": float((gain_loss / total_cost_basis * 100) if total_cost_basis > 0 else 0)
+            "gain_loss_percent": float((gain_loss / total_cost_basis * 100) if total_cost_basis > 0 else 0),
+            "unpriced_holdings": len(unpriced_securities),
         }

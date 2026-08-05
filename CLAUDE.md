@@ -1214,6 +1214,34 @@ security **with open lots** has no cached price at all, or none newer than `STAL
 enough to absorb a weekend plus a holiday). Closed-out holdings are excluded: they legitimately stop
 getting prices, and warning on them would be permanent noise.
 
+**The timeline had the same silence, and it renders as a loss rather than a gap.** `find_stale_priced_securities`
+guards the *current* snapshot; `/api/portfolio/value-over-time` drops an unpriced holding from
+`market_value_eur` while its cost stays in `cost_basis_eur`, so the point understates by that holding's
+whole value. Measured against production by querying dates past the last cached price:
+
+| date | market value | gain/loss % | |
+|---|---|---|---|
+| today | 64,944 | +33.7 | correct |
+| +7d | 64,944 | +33.7 | carried forward inside `PRICE_LOOKBACK_DAYS` (14) |
+| **+14d** | **56,009** | **+15.3** | **partial — some securities still resolve, some are zero** |
+| +15d | 0.00 | **−100.0** | every holding out of lookback: a fabricated wipeout |
+
+**The partial row is the dangerous one**, by the same rule as the zero-for-unknown cards: `+15.3%` looks
+like an answer, `−100%` looks like a bug. And this is precisely what a **stalled price feed** looks like
+— a smooth decay to zero rather than a missing line — which is the failure mode where nobody is watching
+the sync warnings either.
+
+So each point now carries **`unpriced_holdings`**; anything above 0 means the valuation is incomplete. It
+was previously only a `logger.warning`, which at up to ~29k lines for a 730-day window over 40 securities
+is noise rather than a signal. Counted in **both** `_calculate_timeline_swept` and
+`_calculate_daily_value`, and `test_timeline_equivalence.py` pins them equal — note the point query walks
+tax *lots* while the swept one walks *securities*, so it counts a **set of ids**; incrementing would
+report 110 for a holding split across 110 lots and break that equivalence. The field is declared on
+`PortfolioValuePoint`, without which the `response_model` would have dropped it silently.
+
+Still to do: the frontend reads it and refuses to draw a complete-looking line. Until then the signal is
+on the wire and in the tests but not on screen.
+
 **A sync that never *succeeds* is silent in the same way.** Individually a failed IBKR run is
 unremarkable — `1001` is routine and the schedule shrugs it off — so the thing worth alarming on is
 the **absence of a success**, not any single failure. `find_stale_ibkr_sync()` warns after
@@ -1597,7 +1625,7 @@ raiser for that whole module, so an accidental network reach fails loudly; `/api
 is excluded because it lazy-fetches Yahoo on a cache miss, and POST routes are excluded because they
 start real syncs. **Add a case here when an endpoint's response shape changes.**
 
-Tests (731 backend + 355 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
+Tests (733 backend + 355 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
 calls). Take the number the suite actually prints as your baseline, not this line — it has been stale
 by 200+ on both halves before:
 ```bash
@@ -1738,6 +1766,7 @@ Tests: `tests/test_currency_fallback.py`.
 | `dividend_source` stuck on `yfinance_estimate` | No `<CashTransactions>` ingested — check the section + Withholding Tax option |
 | Yahoo 404/429 | **Stop.** Wait 30-60 min. Check `yfinance >= 1.1.0` |
 | A position is missing from the portfolio | Check `taxlots_skipped` + `warnings[]` on the sync run — usually a currency neither FX provider covers |
+| The value chart declines toward zero over recent days | Check `unpriced_holdings` on `/api/portfolio/value-over-time`. Above 0 means the point is a partial sum: holdings whose price fell outside the 14-day lookback are counted at cost but not at value. Past 15 days every holding drops out and it reads −100%. The cause is a stalled market-data sync, not a loss |
 | A position shows 0.00 / `market_price: null` | No cached price. The market-data sync's `warnings[]` now names it. Fix the `ticker_mappings` row, or fill it with `app/cli/import_prices.py` from IBKR bars |
 | A price looks like an intraday value, not a close | Expected inside the session, and it self-corrects: a weekday within `PROVISIONAL_PRICE_DAYS` (3) is re-fetched at every slot, so the settled close lands after the market shuts. Still wrong **after** 3 days is a real freeze. **Don't diagnose it from `created_at`** — see below |
 | A market-data run reports `rate_limited: true` | Yahoo returned 429 and the pass stopped deliberately, leaving the later securities on their previous prices. **Do not trigger a manual sync** — wait; the next slot resumes and re-fetches only what is missing |

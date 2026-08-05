@@ -69,6 +69,19 @@ class PortfolioValuePoint(BaseModel):
             "deriving it from the cost-basis line books a sale's gain as a loss."
         ),
     )
+    unpriced_holdings: int = Field(
+        0,
+        description=(
+            "Held securities whose value could not be resolved on this date. Anything "
+            "above 0 means market_value_eur is an INCOMPLETE sum while cost_basis_eur "
+            "is not, so gain_loss_eur and gain_loss_percent understate by the whole "
+            "value of those holdings. Fifteen days past the last cached price every "
+            "holding drops out and the point reads 0 / −100%, a fabricated wipeout "
+            "rather than a gap — and the partial case is worse, because a plausible "
+            "+15% invites no doubt. Previously only logged, at up to ~29k lines for a "
+            "730-day window over 40 securities, which is noise rather than a signal."
+        ),
+    )
     base_currency: str = Field("EUR", description="Currency the *_eur values are expressed in")
 
     class Config:

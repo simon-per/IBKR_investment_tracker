@@ -225,3 +225,92 @@ async def test_a_lot_closed_on_the_window_start_adds_no_disposal_flow():
     finally:
         await session.close()
         await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Completeness. An unpriced holding is dropped from market value while its cost stays in
+# cost_basis_eur, so the point silently understates by that holding's whole value.
+#
+# Measured against production: fifteen days past the last cached price every holding
+# falls out of the 14-day lookback and the endpoint reports market value 0.00 with
+# gain_loss_percent −100.0 — a fabricated total loss rather than a gap. The PARTIAL case
+# is the dangerous one: at fourteen days some securities still resolve and the total read
+# +15.3%, which looks like an answer and invites no doubt. That is what a stalled price
+# feed looks like on the chart: a smooth decay to zero, not a missing line.
+#
+# `unpriced_holdings` is the signal. It was previously only a logger.warning, at up to
+# ~29k lines for a 730-day window over 40 securities.
+# ---------------------------------------------------------------------------
+
+
+async def _priced_and_unpriced_session():
+    """Two EUR securities, both held; only one has any cached price."""
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:", poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session = AsyncSession(engine, expire_on_commit=False)
+    for sid, sym in ((1, "AAA"), (2, "BBB")):
+        session.add(Security(id=sid, isin=f"X{sid:011d}", symbol=sym, description=sym,
+                             currency="EUR", conid=100 + sid, asset_category="STK",
+                             exchange="XETRA"))
+    for sid in (1, 2):
+        session.add(TaxLot(
+            security_id=sid, open_date=START, quantity=Decimal("10"),
+            cost_basis=Decimal("100"), cost_basis_eur=Decimal("100"),
+            price_per_unit=Decimal("10"), currency="EUR", is_open=True,
+        ))
+    d = START
+    while d <= END:                      # AAA only — BBB is never priced
+        session.add(MarketPrice(security_id=1, date=d, close_price=Decimal("12"),
+                                currency="EUR", source="test"))
+        d += timedelta(days=1)
+    await session.flush()
+    await session.commit()
+    return engine, session
+
+
+@pytest.mark.asyncio
+async def test_a_partial_valuation_says_so_instead_of_looking_complete():
+    engine, session = await _priced_and_unpriced_session()
+    try:
+        svc = PortfolioService(session)
+        timeline = await svc.get_portfolio_value_over_time(START, END)
+
+        weekday = next(r for r in timeline if r["unpriced_holdings"] is not None)
+        # Both lots' cost counts; only AAA's value does — so the point is a partial sum
+        # and must not present itself as a whole one.
+        assert weekday["cost_basis_eur"] == pytest.approx(200.0)
+        assert weekday["market_value_eur"] == pytest.approx(120.0)
+        assert weekday["unpriced_holdings"] == 1
+
+        # Every emitted day is partial here, and none of them claims otherwise.
+        assert all(r["unpriced_holdings"] == 1 for r in timeline)
+        # The loss it appears to show is entirely the missing holding.
+        assert weekday["gain_loss_eur"] == pytest.approx(-80.0)
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_fully_priced_day_reports_nothing_unpriced():
+    """The other direction: the field must stay 0 on healthy data, or it is just noise."""
+    engine, session = await _priced_and_unpriced_session()
+    try:
+        d = START
+        while d <= END:
+            session.add(MarketPrice(security_id=2, date=d, close_price=Decimal("12"),
+                                    currency="EUR", source="test"))
+            d += timedelta(days=1)
+        await session.commit()
+
+        timeline = await PortfolioService(session).get_portfolio_value_over_time(START, END)
+        assert timeline
+        assert all(r["unpriced_holdings"] == 0 for r in timeline)
+        assert timeline[-1]["market_value_eur"] == pytest.approx(240.0)
+    finally:
+        await session.close()
+        await engine.dispose()
