@@ -6,7 +6,9 @@ interface PerformanceMetricsCardsProps {
     xirr: number | null
     xirrMethod?: string
     maxDrawdown: number
-    sharpeRatio: number
+    /** `null` below the minimum sample or with no volatility to divide by — a 0.00 there
+     *  is a plausible-looking Sharpe and so the worst possible stand-in for "unknown". */
+    sharpeRatio: number | null
     winRate: number
     profitablePositions: number
     totalPositions: number
@@ -38,7 +40,7 @@ export function PerformanceMetricsCards({ metrics, isLoading }: PerformanceMetri
   }
 
   const isPositiveXIRR = metrics.xirr !== null && metrics.xirr >= 0
-  const isPositiveSharpe = metrics.sharpeRatio >= 0
+  const isPositiveSharpe = metrics.sharpeRatio !== null && metrics.sharpeRatio >= 0
 
   return (
     <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 lg:grid-cols-6">
@@ -67,9 +69,13 @@ export function PerformanceMetricsCards({ metrics, isLoading }: PerformanceMetri
       <KpiCard
         label="Sharpe Ratio"
         icon={<Activity className="h-4 w-4 text-muted-foreground" />}
-        value={metrics.sharpeRatio.toFixed(2)}
-        tone={isPositiveSharpe ? 'positive' : 'negative'}
-        sub="Risk-adjusted return"
+        value={metrics.sharpeRatio !== null ? metrics.sharpeRatio.toFixed(2) : null}
+        tone={metrics.sharpeRatio === null ? 'muted' : isPositiveSharpe ? 'positive' : 'negative'}
+        // Says which of the two absences it is, the way the Volatility and Sortino
+        // cards do — the range is too short far more often than the market is flat.
+        sub={metrics.sharpeRatio !== null
+          ? 'Risk-adjusted return'
+          : 'Not enough history in this range'}
       />
 
       <KpiCard

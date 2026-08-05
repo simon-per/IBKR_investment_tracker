@@ -112,9 +112,21 @@ describe('maxDrawdownPct', () => {
 })
 
 describe('sharpeRatio', () => {
-  it('returns 0 below the minimum sample', () => {
+  it('is null, never 0, below the minimum sample', () => {
+    // It used to return 0, and MTD in the first days of a month reaches that in one
+    // click — 2 daily returns, rendered as a green `0.00` captioned "Risk-adjusted
+    // return" beside a dashed Volatility and Sortino. `0.00` is a plausible Sharpe, so
+    // nothing about the number invited doubt.
     const series = [point('2026-01-01', 100, 100, 0), point('2026-01-02', 101, 100, 0)]
-    expect(sharpeRatio(series)).toBe(0)
+    expect(sharpeRatio(series)).toBeNull()
+  })
+
+  it('is null when there is no volatility to divide by', () => {
+    // A perfectly flat series is what a stale price feed looks like, and return per unit
+    // of risk is undefined when there is no risk.
+    const flat = Array.from({ length: 10 }, (_, i) =>
+      point(`2026-01-${String(i + 1).padStart(2, '0')}`, 100, 100, 0))
+    expect(sharpeRatio(flat)).toBeNull()
   })
 
   it('is positive for steady gains and negative for steady losses', () => {
@@ -122,14 +134,22 @@ describe('sharpeRatio', () => {
       point(`2026-01-0${i + 1}`, v, 100, 0))
     const falling = [100, 99, 98, 97, 96, 95, 94].map((v, i) =>
       point(`2026-01-0${i + 1}`, v, 100, 0))
-    expect(sharpeRatio(rising)).toBeGreaterThan(0)
-    expect(sharpeRatio(falling)).toBeLessThan(0)
+    expect(sharpeRatio(rising)!).toBeGreaterThan(0)
+    expect(sharpeRatio(falling)!).toBeLessThan(0)
   })
 
-  it('is clamped rather than exploding when volatility is negligible', () => {
-    const series = Array.from({ length: 10 }, (_, i) =>
-      point(`2026-01-${String(i + 1).padStart(2, '0')}`, 100 + i * 0.5, 100, 0))
-    expect(Math.abs(sharpeRatio(series))).toBeLessThanOrEqual(10)
+  it('is clamped rather than exploding on a high return with small volatility', () => {
+    // This test used to pass without reaching the clamp. Its old series (+0.5/day on 100)
+    // has an annualised σ under 0.001, so it took the negligible-volatility early return
+    // — which was `return 0` — and then asserted `|0| <= 10`, true of anything. Now that
+    // branch returns null and the vacuity was visible.
+    //
+    // ~2% a day with a σ of 0.0005 gives a raw ratio in the hundreds, so the clamp is
+    // what the assertion actually measures.
+    const returns = Array.from({ length: 12 }, (_, i) => (i % 2 === 0 ? 0.02 : 0.021))
+    const ratio = sharpeRatio(compounded(returns))
+    expect(ratio).not.toBeNull()
+    expect(ratio).toBe(10)
   })
 })
 

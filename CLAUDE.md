@@ -1373,8 +1373,21 @@ from one dominant one.
   on every sale date in `externalFlow`'s fallback. That would bias beta on exactly the days the
   portfolio traded. Dropping the pair costs a few days a month and biases nothing. `sampleDays` rides
   along so a thin window declares itself instead of showing a confident slope.
-- **Volatility and Sortino are `null`, not `0`**, below the minimum sample or with no downside at all.
-  A `0` meaning "unknown" being read later as a fact is the most repeated bug in this codebase.
+- **Volatility, Sortino *and Sharpe* are `null`, not `0`**, below the minimum sample or with nothing to
+  divide by. A `0` meaning "unknown" being read later as a fact is the most repeated bug in this
+  codebase.
+
+  **Sharpe was the exception until 2026-08-05**, because it predates the risk row and was missed when
+  the other two were written. It returned `0`, and that was reachable in one click: selecting **MTD** in
+  the first days of a month leaves 2–3 daily returns, so the card drew a green `0.00` captioned
+  *Risk-adjusted return* beside a dashed Volatility and Sortino. Sharpe is the worst possible place for
+  this substitution — `0.00` is a *plausible* Sharpe, so unlike a 0% volatility nothing about the number
+  invites doubt. Its negligible-volatility branch is `null` now too: return per unit of risk is
+  undefined when there is no risk, and a flat series is what a stale feed looks like.
+
+  Its clamp test had also been passing vacuously for the same reason — the old series' σ tripped the
+  negligible-volatility early return, so it asserted `|0| <= 10`, true of anything. It now uses a
+  high-return/low-σ series that reaches the clamp.
 - **`dailyReturnSeries` exists because `dailyReturns` drops days with nothing to divide by**, so the
   nth return is not the nth calendar point. Indexing the input by return position to name a
   drawdown's peak picks the wrong day.
@@ -1570,7 +1583,7 @@ raiser for that whole module, so an accidental network reach fails loudly; `/api
 is excluded because it lazy-fetches Yahoo on a cache miss, and POST routes are excluded because they
 start real syncs. **Add a case here when an endpoint's response shape changes.**
 
-Tests (731 backend + 352 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
+Tests (731 backend + 354 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
 calls). Take the number the suite actually prints as your baseline, not this line — it has been stale
 by 200+ on both halves before:
 ```bash
@@ -1745,6 +1758,7 @@ Tests: `tests/test_currency_fallback.py`.
 | A drift or currency panel says it couldn't load positions | The positions query failed. The panel refuses to build a plan from absent data rather than reporting a portfolio of unheld rows |
 | Currency exposure looks wrong for an ETF | It is quote currency, not economic exposure, and deliberately not re-attributed — a EUR-listed S&P tracker is EUR-quoted with USD risk. The fund share is named on screen |
 | Beta is blank with a benchmark selected | Fewer than the 20 flow-free days a regression needs; the count so far is in the footnote. Flow days are excluded by design |
+| Sharpe, Volatility and Sortino all read `—` on a short range | Expected, and now consistent: all three need 5 daily returns. MTD in the first days of a month gives 2–3. Sharpe used to show `0.00` here instead, which looked like a measurement |
 
 ---
 

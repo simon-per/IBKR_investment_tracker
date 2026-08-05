@@ -59,6 +59,20 @@ describe('PerformanceMetricsCards', () => {
     expect(screen.queryByText('0.00')).toBeNull()
   })
 
+  it('says why Sharpe is absent instead of rendering a plausible 0.00', () => {
+    // Reachable in one click before this: MTD in the first days of a month leaves 2
+    // daily returns, and `sharpeRatio` returned 0 — drawn green, captioned
+    // "Risk-adjusted return", beside a dashed Volatility and Sortino. A 0.00 Sharpe is
+    // plausible, so nothing about it invited doubt.
+    renderWith({ sharpeRatio: null })
+    expect(screen.getByText('Not enough history in this range')).toBeTruthy()
+    expect(screen.queryByText('0.00')).toBeNull()
+  })
+
+  // Not asserting "the absent Sharpe isn't green" here: other cards in this row are
+  // legitimately green, so a container-wide query catches them instead. `KpiCard` refuses
+  // to colour a `value={null}` regardless of the `tone` passed, and owns that test.
+
   it('renders nothing at all rather than an empty shell', () => {
     const { container } = render(<PerformanceMetricsCards metrics={null} />)
     expect(container.firstChild).toBeNull()

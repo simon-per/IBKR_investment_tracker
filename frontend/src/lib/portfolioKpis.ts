@@ -169,14 +169,31 @@ export function annualizedVolatilityPct(series: ValueSeriesPoint[]): number | nu
   return meanAndStdDev(returns).stdDev * Math.sqrt(TRADING_DAYS) * 100
 }
 
-/** Annualised Sharpe of the daily return series; 0 when there isn't enough of it. */
-export function sharpeRatio(series: ValueSeriesPoint[]): number {
+/**
+ * Annualised Sharpe of the daily return series.
+ *
+ * `null` — never `0` — below the minimum sample or with no measurable volatility to
+ * divide by, matching {@link annualizedVolatilityPct} and {@link sortinoRatio}.
+ *
+ * It used to return `0`, and that was reachable in one click: selecting **MTD** in the
+ * first days of a month leaves 2 or 3 daily returns, so the card rendered a green
+ * `0.00` captioned "Risk-adjusted return" — an asserted, measured-looking zero — while
+ * Volatility and Sortino beside it correctly showed a dash. Those two were fixed to
+ * return `null` when the risk row was added; Sharpe predates them and was missed.
+ *
+ * A zero standing for "unknown" is the most repeated bug in this codebase, and Sharpe
+ * is the worst place for it: `0.00` is a *plausible* Sharpe, so nothing about the number
+ * invites doubt.
+ */
+export function sharpeRatio(series: ValueSeriesPoint[]): number | null {
   const returns = dailyReturns(series)
-  if (returns.length < MIN_RETURNS) return 0
+  if (returns.length < MIN_RETURNS) return null
 
   const { mean, stdDev } = meanAndStdDev(returns)
   const annualisedStdDev = stdDev * Math.sqrt(TRADING_DAYS)
-  if (annualisedStdDev <= 0.001) return 0
+  // Not 0 either: a return per unit of risk is undefined when there is no risk, and a
+  // flat series is exactly the shape a stale price feed produces.
+  if (annualisedStdDev <= 0.001) return null
 
   const ratio = (mean * TRADING_DAYS - RISK_FREE_RATE) / annualisedStdDev
   return Math.max(-10, Math.min(10, ratio))
