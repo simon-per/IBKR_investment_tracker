@@ -9,6 +9,7 @@ import {
   drawdownDetail,
   externalFlow,
   herfindahlConcentration,
+  isMeasurable,
   maxDrawdownPct,
   sharpeRatio,
   sortinoRatio,
@@ -451,5 +452,63 @@ describe('concentrationPct', () => {
     // green all-clear drawn from no data at all.
     expect(concentrationPct([])).toBeNull()
     expect(concentrationPct([{ market_value_eur: 0 }])).toBeNull()
+  })
+})
+
+describe('incomplete valuations are not measured', () => {
+  /**
+   * A day the backend could not fully price omits the unpriced holdings from market value
+   * while keeping their cost, so pairing it with a neighbour invents a move. Complete
+   * 1000 followed by fully-unpriced 0 reads as −100% in one day — which then becomes a
+   * real max drawdown, a real volatility and a real Sharpe. That is what a stalled
+   * market-data sync looks like: not a gap in the line but a decay to zero, with the
+   * whole risk row moving to match.
+   */
+  const stalled: PortfolioValuePoint[] = [
+    { ...point(day(0), 1000, 1000, 0) },
+    { ...point(day(1), 1010, 1000, 0) },
+    { ...point(day(2), 1020, 1000, 0) },
+    { ...point(day(3), 1030, 1000, 0) },
+    { ...point(day(4), 1040, 1000, 0) },
+    { ...point(day(5), 1050, 1000, 0) },
+    // The feed stops: value collapses because holdings could not be priced, not because
+    // they fell.
+    { ...point(day(6), 600, 1000, 0), unpriced_holdings: 2 },
+    { ...point(day(7), 0, 1000, 0), unpriced_holdings: 5 },
+  ]
+
+  it('drops a pair with an incomplete end instead of booking a −100% day', () => {
+    const returns = dailyReturns(stalled)
+    // Five real day-over-day moves survive; the two involving unpriced days do not.
+    expect(returns).toHaveLength(5)
+    expect(Math.min(...returns)).toBeGreaterThan(0)
+  })
+
+  it('keeps a stalled feed out of the drawdown', () => {
+    expect(maxDrawdownPct(stalled)).toBe(0)
+    expect(drawdownDetail(stalled).currentDrawdownPct).toBeCloseTo(0, 6)
+  })
+
+  it('keeps a stalled feed out of volatility and Sharpe', () => {
+    // Without the guard the −100% day dominates both.
+    const vol = annualizedVolatilityPct(stalled)
+    expect(vol).not.toBeNull()
+    expect(vol!).toBeLessThan(5)
+    expect(sharpeRatio(stalled)).not.toBeNull()
+  })
+
+  it('excludes an unpriced day from beta as well', () => {
+    // betaAndCorrelation derives its own returns, so it needs the same guard — the loop
+    // that pairs against the benchmark would otherwise regress a fabricated −100%.
+    const bench = stalled.map((p) => ({ date: p.date, value_eur: 1000, cost_basis_eur: 1000 }))
+    const { sampleDays } = betaAndCorrelation(stalled, benchmarkAsValueSeries(bench as never))
+    expect(sampleDays).toBe(5)
+  })
+
+  it('treats an absent field as complete, so an older backend still measures', () => {
+    // The field only exists from 2026-08-05; absent must not mean "unmeasurable".
+    const noField = [point(day(0), 1000, 1000, 0), point(day(1), 1100, 1000, 0)]
+    expect(dailyReturns(noField)).toHaveLength(1)
+    expect(isMeasurable(noField[0])).toBe(true)
   })
 })

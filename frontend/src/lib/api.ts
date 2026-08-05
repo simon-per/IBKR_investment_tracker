@@ -21,6 +21,19 @@ export interface PortfolioValuePoint {
    * sales at market proceeds. Optional so older payloads still parse.
    */
   external_flow_eur?: number;
+  /**
+   * Held securities whose value could not be resolved that day. Above 0 means
+   * `market_value_eur` is an **incomplete** sum while `cost_basis_eur` is not, so the
+   * gain and percent understate by those holdings' whole value.
+   *
+   * A stalled market-data sync produces a smooth decay to zero rather than a gap: at 14
+   * days past the last cached price some securities still resolve and the total reads a
+   * plausible +15%, and at 15 days every one drops out and it reads −100%.
+   *
+   * Optional because a backend older than 2026-08-05 does not send it; absent is read as
+   * complete, which is the only backward-compatible reading.
+   */
+  unpriced_holdings?: number;
   base_currency?: string;
 }
 

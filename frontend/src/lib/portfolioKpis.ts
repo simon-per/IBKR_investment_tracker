@@ -29,6 +29,27 @@ export interface ValueSeriesPoint {
   market_value_eur: number
   cost_basis_eur: number
   external_flow_eur?: number
+  /** Held securities the backend could not value that day; see {@link isMeasurable}. */
+  unpriced_holdings?: number
+}
+
+/**
+ * Whether a point's market value is a complete sum of what was held.
+ *
+ * A day the backend could not fully price is not a small day — it is an unmeasured one.
+ * Its `market_value_eur` omits the unpriced holdings while `cost_basis_eur` keeps them,
+ * so pairing it with a neighbour manufactures a move that never happened: complete
+ * 64,944 followed by fully-unpriced 0 reads as **−100% in a single day**, which then
+ * becomes a real max drawdown, a real volatility, and a real Sharpe.
+ *
+ * That is what a stalled market-data sync looks like — not a gap in the line but a
+ * smooth decay to zero, with every risk metric on the tab moving to match.
+ *
+ * Absent means an older backend that does not report it, read as complete: the only
+ * backward-compatible choice, and the same one `externalFlow` makes.
+ */
+export function isMeasurable(point: ValueSeriesPoint): boolean {
+  return (point.unpriced_holdings ?? 0) === 0
 }
 
 /**
@@ -55,6 +76,10 @@ export function externalFlow(prev: ValueSeriesPoint, curr: ValueSeriesPoint): nu
 export function dailyReturnSeries(series: ValueSeriesPoint[]): { date: string; ret: number }[] {
   const out: { date: string; ret: number }[] = []
   for (let i = 1; i < series.length; i++) {
+    // Either end incomplete disqualifies the pair, exactly as a flow disqualifies a day
+    // for beta: excluding it costs a point and biases nothing, while keeping it invents
+    // a move. See `isMeasurable`.
+    if (!isMeasurable(series[i - 1]) || !isMeasurable(series[i])) continue
     const prevMV = series[i - 1].market_value_eur
     const currMV = series[i].market_value_eur
     const cf = externalFlow(series[i - 1], series[i])
@@ -337,6 +362,11 @@ export function betaAndCorrelation(
     const benchPrev = byDate.get(prev.date)
     const benchCurr = byDate.get(curr.date)
     if (!benchPrev || !benchCurr) continue
+
+    // This loop derives its own returns, so it needs the completeness guard too — a
+    // day the portfolio could not be fully priced would otherwise regress a fabricated
+    // −100% against a real benchmark move.
+    if (!isMeasurable(prev) || !isMeasurable(curr)) continue
 
     // Either side flowing disqualifies the day for both, and the portfolio is
     // what says so — never `externalFlow(benchPrev, benchCurr)`, which measures

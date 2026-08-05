@@ -62,6 +62,20 @@ export function PortfolioValueChart({ data, benchmarks = [], isLoading, isError 
   // going responsive that a media query cannot reach.
   const isCompact = useIsCompact()
 
+  // Days the backend could not fully value. Their market value omits the unpriced
+  // holdings while their cost basis keeps them, so the line dips for a reason that is
+  // not a loss — a stalled market-data sync reads as a smooth decay toward zero. The
+  // risk metrics already exclude these pairs (`isMeasurable`); the line still plots
+  // them, so it has to say so rather than let the shape speak for itself.
+  const incomplete = useMemo(() => {
+    const days = (data ?? []).filter((p) => (p.unpriced_holdings ?? 0) > 0)
+    return {
+      days: days.length,
+      worst: days.reduce((m, p) => Math.max(m, p.unpriced_holdings ?? 0), 0),
+      from: days.length ? days[0].date : null,
+    }
+  }, [data])
+
   // Auto-enable benchmarks when they first appear in the data
   useEffect(() => {
     const newKeys = benchmarks
@@ -237,6 +251,22 @@ export function PortfolioValueChart({ data, benchmarks = [], isLoading, isError 
 
   return (
     <div className="space-y-4">
+      {incomplete.days > 0 && (
+        <div
+          role="alert"
+          className="rounded-md border border-yellow-600/40 bg-yellow-600/10 px-3 py-2 text-xs text-yellow-700 dark:text-yellow-500"
+        >
+          <span className="font-medium">
+            {incomplete.days} {incomplete.days === 1 ? 'day' : 'days'} in this range could not
+            be fully valued
+          </span>{' '}
+          — up to {incomplete.worst} {incomplete.worst === 1 ? 'holding' : 'holdings'} had no
+          usable price{incomplete.from ? `, from ${incomplete.from}` : ''}. Market value and
+          profit are understated on those days by the whole value of the missing holdings, so
+          the dip is a gap in the price data rather than a loss. Risk metrics skip them.
+        </div>
+      )}
+
       {/* Toggle Buttons. Already wrapping; the min-height is the touch target. */}
       <div className="flex gap-2 flex-wrap items-center sm:gap-3 [&>button]:min-h-11 sm:[&>button]:min-h-0">
         <span className="text-sm text-muted-foreground">Show:</span>

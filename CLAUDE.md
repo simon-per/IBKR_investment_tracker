@@ -1239,8 +1239,22 @@ tax *lots* while the swept one walks *securities*, so it counts a **set of ids**
 report 110 for a holding split across 110 lots and break that equivalence. The field is declared on
 `PortfolioValuePoint`, without which the `response_model` would have dropped it silently.
 
-Still to do: the frontend reads it and refuses to draw a complete-looking line. Until then the signal is
-on the wire and in the tests but not on screen.
+**The client acts on it in two places, and the metrics one matters more than the chart.** A pair spanning
+a complete day and an incomplete one manufactures a move that never happened — 64,944 then 0 is **−100%
+in a single day** — and `dailyReturnSeries` feeds *everything*: max drawdown, current drawdown,
+volatility, Sharpe, Sortino. So a stalled feed did not merely bend the line, it moved the whole risk row
+to match, with each number looking individually reasonable. `isMeasurable()` now disqualifies a pair with
+either end incomplete, exactly as a flow disqualifies a day for beta: excluding it costs a point and
+biases nothing, while keeping it invents one. `betaAndCorrelation` needs the guard **separately**,
+because it derives its own returns rather than going through `dailyReturnSeries`.
+
+The chart still *plots* those days — a hole in the line would be its own kind of lie — so
+`PortfolioValueChart` renders a `role="alert"` naming how many days and how many holdings, and saying the
+dip is missing price data rather than a loss.
+
+**Absent means complete**, deliberately: the field only exists from 2026-08-05, so reading `undefined` as
+unmeasurable would put a permanent warning on every chart served by an older backend. Same choice
+`externalFlow` makes about its own optional field.
 
 **A sync that never *succeeds* is silent in the same way.** Individually a failed IBKR run is
 unremarkable — `1001` is routine and the schedule shrugs it off — so the thing worth alarming on is
@@ -1625,7 +1639,7 @@ raiser for that whole module, so an accidental network reach fails loudly; `/api
 is excluded because it lazy-fetches Yahoo on a cache miss, and POST routes are excluded because they
 start real syncs. **Add a case here when an endpoint's response shape changes.**
 
-Tests (733 backend + 355 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
+Tests (733 backend + 365 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
 calls). Take the number the suite actually prints as your baseline, not this line — it has been stale
 by 200+ on both halves before:
 ```bash
@@ -1766,7 +1780,7 @@ Tests: `tests/test_currency_fallback.py`.
 | `dividend_source` stuck on `yfinance_estimate` | No `<CashTransactions>` ingested — check the section + Withholding Tax option |
 | Yahoo 404/429 | **Stop.** Wait 30-60 min. Check `yfinance >= 1.1.0` |
 | A position is missing from the portfolio | Check `taxlots_skipped` + `warnings[]` on the sync run — usually a currency neither FX provider covers |
-| The value chart declines toward zero over recent days | Check `unpriced_holdings` on `/api/portfolio/value-over-time`. Above 0 means the point is a partial sum: holdings whose price fell outside the 14-day lookback are counted at cost but not at value. Past 15 days every holding drops out and it reads −100%. The cause is a stalled market-data sync, not a loss |
+| The value chart declines toward zero over recent days | The chart says so itself now — a yellow notice above it names the day and holding counts. It means `unpriced_holdings > 0`: holdings whose price fell outside the 14-day lookback are counted at cost but not at value, and past 15 days every one drops out and it reads −100%. The cause is a stalled market-data sync, not a loss. The risk metrics already exclude those days |
 | A position shows 0.00 / `market_price: null` | No cached price. The market-data sync's `warnings[]` now names it. Fix the `ticker_mappings` row, or fill it with `app/cli/import_prices.py` from IBKR bars |
 | A price looks like an intraday value, not a close | Expected inside the session, and it self-corrects: a weekday within `PROVISIONAL_PRICE_DAYS` (3) is re-fetched at every slot, so the settled close lands after the market shuts. Still wrong **after** 3 days is a real freeze. **Don't diagnose it from `created_at`** — see below |
 | A market-data run reports `rate_limited: true` | Yahoo returned 429 and the pass stopped deliberately, leaving the later securities on their previous prices. **Do not trigger a manual sync** — wait; the next slot resumes and re-fetches only what is missing |
