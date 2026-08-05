@@ -1,6 +1,7 @@
 # Working state
 
-**Last updated: 2026-08-04 (late) — the Performance tab now reports the portfolio's dividend rate
+**Last updated: 2026-08-04 (latest) — Beta finally has a value (it was refused by an FX artefact, not
+by a thin window, and had never rendered on production); the Performance tab now reports the portfolio's dividend rate
 (*Dividend Yield* and *Yield on Cost*, replacing *Effective Holdings*); market data reprices seven
 times a day, live and verified; the chart's negative axis is clamped; the app's own INFO logging
 reaches the container log for the first time; the sixteen KPI cards are one component; and the deploy
@@ -237,6 +238,47 @@ offline, so this is confirming the wire, not the maths):
   scheduled warm-up deliberately skips the provisional refresh — eight warm tickers × seven slots
   would multiply its burst for a value no one read — and the chart's own lazy fetch refreshes the
   benchmark actually selected. Deliberate Yahoo-budget trade, not an oversight.
+
+## Shipped 2026-08-04 (latest) — Beta was structurally unreachable under a non-EUR base
+
+**The Beta card had never once shown a number on production, and could not have.** It read
+*Needs 20 flow-free days (9 so far)* — and 9 was not a thin window, it was an artefact.
+
+`betaAndCorrelation` disqualified a day if *either* series saw a flow, inferring the benchmark's
+from its cost-basis step because a benchmark point carries no `external_flow_eur`. That inference is
+sound in EUR and false in CHF: **the backend projects the two cost-basis lines into the base currency
+by different rules.** `_calculate_timeline_swept` converts each lot's cost at its own `open_date`, so
+the portfolio's line is flat on a day nothing traded; `BenchmarkService._apply_base_currency`
+converts the *running total* at each point's date, so the benchmark's line moves whenever EUR/CHF
+did. Every such day was thrown away.
+
+Measured on production over the 1Y window, replaying the real series through both rules:
+
+| | flow-free pairs |
+|---|---|
+| portfolio `external_flow_eur` == 0 | **147** of 261 |
+| benchmark cost-basis step == 0, in EUR (the cache) | **147** — the same days |
+| benchmark cost-basis step == 0, after the CHF projection | **9** |
+
+The 147/147 agreement is the point: both series are built from one set of tax lots, so the benchmark's
+line carries no information the portfolio's does not, and consulting it only re-measured the exchange
+rate. The fix is one line — test the portfolio's `external_flow_eur`, plus its own cost-basis step for
+the one flow that field cannot see (a disposal whose proceeds netted to zero). Sample days go 9 → 147.
+
+Resulting figures, computed from the cached timelines rather than guessed: **β ≈ 1.04 / r ≈ 0.73 vs
+S&P 500**, **β ≈ 0.82 / r ≈ 0.83 vs NASDAQ**, **β ≈ 0.54 / r ≈ 0.37 vs FTSE 100** — the ordering a
+growth-heavy global book should produce.
+
+`frontend/src/lib/portfolioKpis.ts` + its test. The old test *drops a day the benchmark saw a flow on*
+encoded the removed rule and is replaced by both halves of the new one. Frontend suite 343 green.
+
+**Left in the working tree, not committed** — another session was working the same branch.
+
+- **The backend inconsistency behind it is NOT fixed**, deliberately (out of the requested scope). It
+  is also visible on the chart: under a non-EUR base the benchmark's cost-basis line drifts from the
+  portfolio's by pure FX — order of ~0.3% over the past year, so small and easy to miss. Fixing it
+  means converting the benchmark's cost events per lot `open_date`, which the EUR-only timeline cache
+  cannot do post-hoc. See *Worth doing next*.
 
 ## Shipped 2026-08-04 — DEPLOYED; a follow-up fix is committed but unpushed
 
@@ -600,6 +642,18 @@ Rough priority. The auto-deploy install moved to *Needs a human* — it is the l
    about automating a deleter over financial rows: the value is small and the downside is silent.
    If it is built, it must reuse the CLI's predicate rather than re-deriving one.
 
+2. **Project the benchmark's cost-basis line the way the portfolio's is projected.** Found while
+   fixing Beta (above) and left alone as out of scope. `_apply_base_currency` converts the running
+   cost basis at each point's date; `_calculate_timeline_swept` converts each lot's cost at its own
+   `open_date`. Same tax lots, two conversion rules — the *dominant failure mode* in CLAUDE.md, in
+   the form where both copies keep working and just stop agreeing. It already cost the Beta card
+   outright, and it leaves the two cost lines on the chart drifting apart with FX. The awkward part
+   is that the timeline cache is EUR-only on purpose (so switching base currency never invalidates
+   it), and a per-lot conversion cannot be derived from the cached aggregate — the cost *events* have
+   to be re-projected at read time. Do not "fix" it by making the portfolio convert per-date instead:
+   that direction breaks the contributions identity, which depends on each leg converting at its own
+   date.
+
 ## Local development traps
 
 Each of these cost real time at least once.
@@ -685,6 +739,13 @@ detail; this exists so the next session knows what just moved without reading it
 confirmed) and gets deleted once nothing in it is outstanding: these lines are permanent, so don't
 "tidy up" the overlap by deleting the wrong one.
 
+- **2026-08-04** — Beta was backfilled, and the "thin window" it reported was never the reason. The
+  card's own count was the clue: 9 flow-free days out of a year, against 147 days the portfolio
+  genuinely sat still. The benchmark's flow was inferred from its cost-basis line, which the backend
+  projects into the base currency at each point's date while the portfolio's converts at each lot's
+  `open_date` — so under CHF the inference measured EUR/CHF, not flow, and beta could never have
+  rendered. One line in `portfolioKpis.ts`; the backend's two conversion rules are recorded in *Worth
+  doing next* rather than fixed.
 - **2026-08-04** — the Performance tab reports the portfolio's dividend rate. The premise that Yahoo
   already supplies per-security yields was wrong (no dividend field exists in the backend at all), but
   `growth.next_12m_eur` and the per-security market values were already in one service call, so the
@@ -717,10 +778,3 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
   not about width — the Performance tab was untappable on a phone (`justify-center` in a flex
   scroller hides its leading items) and a Forecast projections table nobody had noticed. Suites
   268 → 308; every e2e script green bar `ledger`. Not deployed.
-- **2026-08-01** — pushed the overnight batch on request; it auto-deployed at 07:32 UTC and verified
-  clean. Reading the container logs to close out the "watch after the next deploy" list found the
-  **persistent scheduler job store had never once opened**: the compose bind mount named the `.db`
-  file, Docker created it as a directory on both sides, and the in-memory fallback re-registered all
-  five jobs so `/api/scheduler/status` looked identical to success. Mount is now the parent
-  directory, `/health` reports `scheduler_jobstore_persistent`, and the fix is deployed and
-  confirmed on prod.

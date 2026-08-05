@@ -254,8 +254,10 @@ export function herfindahlConcentration(positions: { market_value_eur: number }[
  * The benchmark is a flow-matched hypothetical — the same lot cost basis
  * deployed into the index — so it shares the portfolio's cost-basis line and
  * its flows land on the same days. It carries no `external_flow_eur` of its
- * own, which is precisely why `betaAndCorrelation` refuses to measure a day
- * that has any flow at all rather than inferring one from the cost delta.
+ * own, and its cost-basis line must **not** be used to infer one: the two
+ * lines are projected into the base currency by different rules, so under a
+ * non-EUR base the benchmark's moves with the exchange rate. See
+ * `betaAndCorrelation`.
  */
 export function benchmarkAsValueSeries(points: BenchmarkValuePoint[]): ValueSeriesPoint[] {
   return points.map((p) => ({
@@ -278,6 +280,19 @@ export function benchmarkAsValueSeries(points: BenchmarkValuePoint[]): ValueSeri
  * portfolio traded. Excluding the pair costs a few days a month and biases
  * nothing.
  *
+ * **The portfolio names those days for both sides, and the benchmark's own
+ * cost-basis step must not be consulted.** Both series are built from one set
+ * of tax lots, so in EUR they step on exactly the same dates — but the backend
+ * projects them into the base currency by different rules: the portfolio
+ * converts each lot's cost at its own `open_date`, while the benchmark
+ * converts its running total at *each point's* date. Under a non-EUR base that
+ * makes the benchmark's line move on every day the rate moved, which reads as
+ * a flow and throws the day away — on a year of CHF it left **9** usable days
+ * out of the 147 the portfolio actually sat still for, so beta was permanently
+ * refused. The test is therefore the portfolio's `external_flow_eur`, plus its
+ * own cost-basis step for the one flow that field cannot see: a disposal whose
+ * proceeds netted to zero.
+ *
  * `sampleDays` is always returned, including when the estimate is refused, so a
  * thin window can say so instead of showing a confident-looking slope drawn
  * from a fortnight.
@@ -297,9 +312,11 @@ export function betaAndCorrelation(
     const benchCurr = byDate.get(curr.date)
     if (!benchPrev || !benchCurr) continue
 
-    // Either side flowing disqualifies the day for both.
+    // Either side flowing disqualifies the day for both, and the portfolio is
+    // what says so — never `externalFlow(benchPrev, benchCurr)`, which measures
+    // the exchange rate under a non-EUR base. See the note above.
     if (Math.abs(externalFlow(prev, curr)) > FLOW_EPSILON) continue
-    if (Math.abs(externalFlow(benchPrev, benchCurr)) > FLOW_EPSILON) continue
+    if (Math.abs(curr.cost_basis_eur - prev.cost_basis_eur) > FLOW_EPSILON) continue
 
     if (prev.market_value_eur <= 0 || benchPrev.market_value_eur <= 0) continue
     portReturns.push(curr.market_value_eur / prev.market_value_eur - 1)

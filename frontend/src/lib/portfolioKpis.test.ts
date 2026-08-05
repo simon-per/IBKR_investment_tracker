@@ -369,14 +369,28 @@ describe('betaAndCorrelation', () => {
     expect(betaAndCorrelation(flowed, bench).sampleDays).toBe(27)
   })
 
-  it('drops a day the benchmark saw a flow on', () => {
+  it('drops a day the portfolio closed a lot on for nothing', () => {
+    // A disposal whose proceeds netted to zero leaves `external_flow_eur` at
+    // zero while the cost-basis line still steps down — the one flow the
+    // authoritative field cannot see, which is why its step is tested too.
     const { port, bench } = twiceTheBenchmark(28)
-    // The benchmark carries no `external_flow_eur`, so its flow is the
-    // cost-basis step — the case this rule exists for.
-    const flowed = bench.map((p, i) =>
-      i >= 14 ? { ...p, cost_basis_eur: p.cost_basis_eur + 500 } : p,
+    const flowed = port.map((p, i) =>
+      i >= 14 ? { ...p, cost_basis_eur: p.cost_basis_eur - 500 } : p,
     )
-    expect(betaAndCorrelation(port, flowed).sampleDays).toBe(27)
+    expect(betaAndCorrelation(flowed, bench).sampleDays).toBe(27)
+  })
+
+  it('keeps a day the benchmark cost line moved on but the portfolio did not', () => {
+    // Under a non-EUR base the backend converts the benchmark's running cost
+    // basis at each point's date, so the line moves with the exchange rate on
+    // a day nothing flowed. Reading that as a flow is what left production
+    // with 9 usable days out of 147.
+    const { port, bench } = twiceTheBenchmark(28)
+    const reprojected = bench.map((p, i) => ({
+      ...p,
+      cost_basis_eur: p.cost_basis_eur * (1 + 0.003 * i),
+    }))
+    expect(betaAndCorrelation(port, reprojected).sampleDays).toBe(28)
   })
 
   it('ignores dates the benchmark has no point for', () => {
