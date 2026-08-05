@@ -328,3 +328,83 @@ async def test_a_yahoo_price_is_still_cached_as_yahoo(monkeypatch):
 
     assert await service.fetch_and_cache_prices(security, day, day) == 1
     assert service.market_price_repo.written[0]['source'] == 'yahoo_finance'
+
+
+# ---------------------------------------------------------------------------
+# Minor-unit quotes. Yahoo reports London equities in `GBp` (pence), Johannesburg in
+# `ZAc` and Tel Aviv in `ILA` — and the code used to normalise `GBp` to `GBP` without
+# touching the amount, storing a 5-pound close as 500.
+#
+# The nasty part is not the factor, it is that normalising the label DEFEATS the currency
+# guard instead of tripping it: 'GBp'.upper() equals the security's own 'GBP', so the
+# "reject a variation whose currency disagrees" check passes and nothing downstream can
+# see a position carried 100x high. That is the SBI failure with its safeguard removed.
+# ---------------------------------------------------------------------------
+
+
+def test_a_minor_unit_report_names_its_major_currency():
+    service = make_service()
+    gbp = make_security(symbol="LLOY", exchange="LSE", currency="GBP")
+
+    assert service._get_currency_from_ticker("LLOY.L", gbp, "GBp") == "GBP"
+    assert service._get_currency_from_ticker("XYZ.JO", gbp, "ZAc") == "ZAR"
+    assert service._get_currency_from_ticker("XYZ.TA", gbp, "ILA") == "ILS"
+    # An ordinary code is untouched.
+    assert service._get_currency_from_ticker("LLOY.L", gbp, "GBP") == "GBP"
+
+
+@pytest.mark.asyncio
+async def test_a_pence_quote_is_divided_before_it_is_stored(monkeypatch):
+    """
+    The whole point: label AND amount move together. 512.4 pence is 5.124 pounds, and it
+    must not reach `market_prices` as 512.4 GBP.
+    """
+    _install_fake_yahoo(monkeypatch, {"LLOY.L": (512.4, "GBp")})
+    service = make_service()
+    security = make_security(symbol="LLOY", exchange="LSE", currency="GBP")
+
+    prices, rate_limited = await service._try_fetch_yahoo(
+        "LLOY.L", security, date(2026, 7, 24), date(2026, 7, 24)
+    )
+
+    assert rate_limited is False
+    assert prices[0]["currency"] == "GBP"
+    assert prices[0]["close_price"] == Decimal("5.124")
+
+
+@pytest.mark.asyncio
+async def test_the_currency_guard_still_adopts_a_pence_quoted_variation(monkeypatch):
+    """
+    Scaling must not turn a legitimate London listing into a rejected one: the guard
+    compares the *normalised* code against the security's GBP, so the row is adopted —
+    now with an amount that agrees with its label.
+    """
+    _install_fake_yahoo(monkeypatch, {"LLOY.L": (512.4, "GBp")})
+    service = make_service()
+    security = make_security(symbol="LLOY", exchange="LSE", currency="GBP")
+
+    prices = await service.fetch_prices_from_yahoo(
+        security, date(2026, 7, 24), date(2026, 7, 24)
+    )
+
+    assert [p["close_price"] for p in prices] == [Decimal("5.124")]
+
+
+@pytest.mark.asyncio
+async def test_a_hand_checked_override_is_not_scaled(monkeypatch):
+    """
+    `SMH.L` is the real case in this account: a USD-denominated ETF listed in London, so
+    an override pins USD. An override means someone looked at the listing, so the
+    reported code is not to be trusted — and dividing on the strength of it would move a
+    correct price by 100 in the other direction.
+    """
+    _install_fake_yahoo(monkeypatch, {"SMH.L": (126.12, "GBp")})
+    service = make_service()
+    security = make_security(symbol="SMH", exchange="LSEETF", currency="USD")
+
+    prices, _ = await service._try_fetch_yahoo(
+        "SMH.L", security, date(2026, 7, 24), date(2026, 7, 24)
+    )
+
+    assert prices[0]["currency"] == "USD"
+    assert prices[0]["close_price"] == Decimal("126.12")

@@ -272,6 +272,32 @@ class MarketDataService:
         'SMH.L': 'USD',
     }
 
+    # Yahoo quotes some listings in a currency's MINOR unit and says so in the code it
+    # reports: London equities in `GBp` (pence), Johannesburg in `ZAc`, Tel Aviv in
+    # `ILA`. The row's *label* should still be the major code, but the *amount* has to
+    # be divided or a 5-pound price is stored as 500.
+    #
+    # Uppercasing `GBp` to `GBP` without scaling — which is what this did — does not
+    # merely miss the conversion, it **defeats the currency guard**: the normalised code
+    # matches the security's own currency, so the "reject a variation whose currency
+    # disagrees" check passes and nothing downstream can see a position carried 100x
+    # high. That is the SBI failure with its one safeguard removed, which is why this is
+    # a scale and not just a rename.
+    #
+    # Explicit rather than inferred from letter case: `GBp` and `ZAc` are mixed-case but
+    # `ILA` is not, so "not all-uppercase means minor unit" would silently miss Tel Aviv.
+    # Extend the map when a new venue appears, the way EXCHANGE_SUFFIXES is extended.
+    MINOR_UNIT_CURRENCIES = {
+        'GBp': ('GBP', Decimal('100')),
+        'ZAc': ('ZAR', Decimal('100')),
+        'ILA': ('ILS', Decimal('100')),
+    }
+
+    @classmethod
+    def _minor_unit(cls, reported_currency: Optional[str]):
+        """`('GBP', Decimal(100))` when Yahoo reported a minor unit, else None."""
+        return cls.MINOR_UNIT_CURRENCIES.get((reported_currency or '').strip())
+
     def _get_currency_from_ticker(
         self,
         ticker: str,
@@ -294,7 +320,13 @@ class MarketDataService:
         if ticker in self.TICKER_CURRENCY_OVERRIDES:
             return self.TICKER_CURRENCY_OVERRIDES[ticker]
 
-        # Uppercasing keeps London's 'GBp' mapping to 'GBP', as the suffix map does.
+        # A minor-unit report names its major currency here; `fetch_prices_from_yahoo`
+        # divides the amount to match. The two must move together — labelling pence GBP
+        # without scaling is the 100x error described on MINOR_UNIT_CURRENCIES.
+        minor = self._minor_unit(reported_currency)
+        if minor:
+            return minor[0]
+
         if reported_currency and len(reported_currency) == 3:
             return reported_currency.upper()
 
@@ -383,15 +415,34 @@ class MarketDataService:
                 ticker, security, reported_currency
             )
 
+            # Divide when Yahoo quoted a minor unit. Read off `reported_currency` rather
+            # than off `price_currency`, which by then has been normalised to the major
+            # code and can no longer tell pence from pounds — and skipped entirely when a
+            # hand-checked override decided the currency, since an override means someone
+            # looked at the listing and the reported code is not to be trusted.
+            minor = (
+                None if ticker in self.TICKER_CURRENCY_OVERRIDES
+                else self._minor_unit(reported_currency)
+            )
+            minor_scale = minor[1] if minor else None
+            if minor_scale:
+                logger.info(
+                    f"{ticker} quoted in {reported_currency} (minor units); dividing "
+                    f"closes by {minor_scale} and storing as {price_currency}"
+                )
+
             prices = []
             for date_index, row in hist.iterrows():
                 price_date = date_index.date()
                 close_price = row['Close']
 
                 if close_price and not (close_price != close_price):  # Check for NaN
+                    close_decimal = Decimal(str(close_price))
+                    if minor_scale:
+                        close_decimal /= minor_scale
                     prices.append({
                         'date': price_date,
-                        'close_price': Decimal(str(close_price)),
+                        'close_price': close_decimal,
                         'currency': price_currency,
                         # Each fetcher tags its own rows; the caller used to hardcode
                         # 'yahoo_finance' for both providers.

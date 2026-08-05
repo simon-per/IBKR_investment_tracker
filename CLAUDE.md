@@ -1570,7 +1570,7 @@ raiser for that whole module, so an accidental network reach fails loudly; `/api
 is excluded because it lazy-fetches Yahoo on a cache miss, and POST routes are excluded because they
 start real syncs. **Add a case here when an endpoint's response shape changes.**
 
-Tests (726 backend + 352 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
+Tests (731 backend + 352 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
 calls). Take the number the suite actually prints as your baseline, not this line — it has been stale
 by 200+ on both halves before:
 ```bash
@@ -1613,6 +1613,22 @@ mismatch. Result: the position was carried 61% high (7.70 vs 4.78 CAD).
 Two guards now: prices carry **the currency Yahoo reports** (read from the history metadata already in
 the response — no extra request), and a variation whose currency disagrees with the security's is
 **rejected, not adopted, and not saved**. Tests: `tests/test_market_data_service.py`.
+
+**A minor-unit quote defeats that second guard rather than tripping it, so the amount is scaled too.**
+Yahoo reports London equities in `GBp` (pence), Johannesburg in `ZAc`, Tel Aviv in `ILA`. The code used
+to `.upper()` those into the major code and store the number unchanged — a £5.12 close persisted as
+512.4 GBP, **100× high**. And because the normalised code then *matches* the security's own currency,
+the disagreement check passes and nothing downstream can see it: the SBI failure with its one safeguard
+removed. `MINOR_UNIT_CURRENCIES` now maps each to `(major_code, divisor)`, the label and the amount move
+together, and a `TICKER_CURRENCY_OVERRIDES` hit is **never** scaled — an override means someone read the
+listing, so the reported code is not evidence.
+
+Explicit map rather than inferring from letter case: `GBp`/`ZAc` are mixed-case but `ILA` is not, so
+"not all-uppercase means minor unit" would silently miss Tel Aviv. Extend it like `EXCHANGE_SUFFIXES`.
+
+Latent today, not live — this account holds no GBP security, and its one London line is `SMH@LSEETF`,
+a USD ETF pinned `manual` to `SMH.L` (which is also why bare-ticker auto-discovery never grabbed the
+NASDAQ SMH). The trap opens the day a UK equity or a GBP-line ETF is bought.
 
 ### Managing mappings — `app/cli/manage_mappings.py`
 
@@ -1712,6 +1728,7 @@ Tests: `tests/test_currency_fallback.py`.
 | Dividend Yield says *couldn't load* | The `/api/dividends/breakdown` query failed. The other four cards on that row still render, by design — it is not gated on this one |
 | Yield on Cost ≠ Dividend Yield × some factor you expect | The factor is exactly market value ÷ cost basis, nothing else: same numerator, same securities. If it isn't, one denominator has picked up a different holding set |
 | A position's value is far off IBKR's | Suspect the `ticker_mappings` row before the price feed: run `manage_mappings list` and look for a currency disagreement, then compare `market_prices.close_price` against IBKR's `market_price` in the *same* currency |
+| A UK/Johannesburg/Tel Aviv position is ~100× out | A minor-unit quote (`GBp`/`ZAc`/`ILA`) that wasn't scaled. `MINOR_UNIT_CURRENCIES` handles it; note the currency guard **cannot** catch this one, because the normalised label matches the security. Check the sync log for "quoted in GBp (minor units)" — its absence on a London equity is the tell |
 | App total ≠ IBKR total | Compare against `gross_position_value`, **not** net liquidation (which adds cash); and intraday the app holds the last *close* while IBKR quotes live |
 | Site "down" in the browser | Often TIM home DNS, not the server — verify with `Test-NetConnection`, not `nslookup` |
 | Deploy says health FAILED | Usually the premature check; re-curl `/health` after ~15s |
