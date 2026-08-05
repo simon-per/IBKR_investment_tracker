@@ -95,6 +95,29 @@ class DividendRepository:
             await self.session.flush()
             return payment
 
+    async def earliest_ibkr_payment_date(self) -> Optional[date]:
+        """
+        Date of the first authoritative IBKR payment — the era-splice boundary, taken
+        from the WHOLE table. `None` when no IBKR rows exist yet.
+
+        Exists because a caller that works in a window cannot derive this itself.
+        `DividendService._splice_by_era` computes the boundary from the rows it is
+        handed, which is right for the readers that splice the full history and wrong
+        for the activity ledger, which windows first: fed a slice, it would treat the
+        slice's earliest IBKR row as the start of the era and keep estimates that a
+        real IBKR row already supersedes. Same shape and same reason as
+        `CashFlowRepository.earliest_flow_date()`.
+
+        Uses `coalesce(pay_date, ex_date)` exactly as `has_ibkr_dividends` does — the
+        two must never disagree about which date a payment belongs to, since yfinance
+        stores an ex-date and IBKR a pay date weeks apart.
+        """
+        on_date = func.coalesce(DividendPayment.pay_date, DividendPayment.ex_date)
+        result = await self.session.execute(
+            select(func.min(on_date)).where(DividendPayment.source == "ibkr")
+        )
+        return result.scalar()
+
     async def get_computed_dividends(
         self,
         start_date: Optional[date] = None,

@@ -553,3 +553,122 @@ async def test_a_missing_rate_is_memoized_too(db):
     twd = [r for r in result["items"] if r["currency"] == "TWD"]
     assert len(twd) == 3 and all(r["amount_base"] is None for r in twd)
     assert len([c for c in calls if c[0] == "TWD"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# The era splice. The same dividend is stored twice — yfinance under its ex-date and
+# IBKR under its pay date, a week or two apart — and every reader that COMPUTES a figure
+# drops the superseded estimate (`DividendService._splice_by_era`). The ledger only
+# DISPLAYS, and it had adopted one of the readers' two rules (the income test) while
+# missing this one, so it listed both rows and overstated dividend income by 72% on the
+# real account: 31 duplicated rows, 47 of 113 CHF.
+# ---------------------------------------------------------------------------
+
+IBKR_ERA_START = TODAY - timedelta(days=120)
+
+
+async def _seed_both_eras(session: AsyncSession) -> None:
+    """One dividend paid twice over: the estimate under its ex-date, IBKR under its pay
+    date. Plus an estimate from before the ledger existed, which must survive."""
+    session.add(AppSetting(key="base_currency", value="EUR"))
+    session.add(Security(id=1, isin="US02079K3059", symbol="GOOGL", description="Alphabet",
+                         currency="EUR", conid=100, asset_category="STK", exchange="NASDAQ"))
+    # The era boundary: the first IBKR row anywhere in the table.
+    session.add(DividendPayment(
+        security_id=1, ex_date=IBKR_ERA_START, pay_date=IBKR_ERA_START,
+        shares_held=Decimal("0"), gross_amount_eur=Decimal("12"),
+        withholding_tax_eur=Decimal("2"), net_amount_eur=Decimal("10"),
+        currency="EUR", source="ibkr",
+    ))
+    # A later quarter, present as BOTH: estimate on the ex-date, IBKR on the pay date.
+    ex, pay = TODAY - timedelta(days=40), TODAY - timedelta(days=26)
+    session.add(DividendPayment(
+        security_id=1, ex_date=ex, pay_date=ex, shares_held=Decimal("10"),
+        amount_per_share=Decimal("1.3"), gross_amount_eur=Decimal("13"),
+        withholding_tax_eur=Decimal("0"), net_amount_eur=Decimal("13"),
+        currency="EUR", source="yfinance_estimate",
+    ))
+    session.add(DividendPayment(
+        security_id=1, ex_date=ex, pay_date=pay, shares_held=Decimal("0"),
+        gross_amount_eur=Decimal("12"), withholding_tax_eur=Decimal("2"),
+        net_amount_eur=Decimal("10"), currency="EUR", source="ibkr",
+    ))
+    # Before the ledger reached back to: the only source for that era.
+    session.add(DividendPayment(
+        security_id=1, ex_date=IBKR_ERA_START - timedelta(days=90),
+        pay_date=IBKR_ERA_START - timedelta(days=90), shares_held=Decimal("8"),
+        amount_per_share=Decimal("1.1"), gross_amount_eur=Decimal("9"),
+        withholding_tax_eur=Decimal("0"), net_amount_eur=Decimal("9"),
+        currency="EUR", source="yfinance_estimate",
+    ))
+    await session.flush()
+    await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_the_ledger_does_not_show_both_eras_for_the_same_dividend(db):
+    await _seed_both_eras(db)
+    result = await ActivityService(db).get_activity(
+        start_date=WINDOW_START, end_date=TODAY, kinds=[DIVIDEND], limit=MAX_LIMIT,
+    )
+    divs = result["items"]
+    est = [r for r in divs if r["source"] == "yfinance_estimate"]
+    ibkr = [r for r in divs if r["source"] == "ibkr"]
+
+    # The duplicate is gone: no estimate on or after the boundary.
+    assert not [r for r in est if r["date"] >= IBKR_ERA_START.isoformat()], est
+    # Both IBKR rows survive, and so does the estimate that predates the ledger — the
+    # mirror-image bug is dropping those, which once blanked every pre-IBKR month.
+    assert len(ibkr) == 2
+    assert len(est) == 1
+    assert est[0]["date"] < IBKR_ERA_START.isoformat()
+    # ...still badged, because it really is a gross guess with no withholding.
+    assert est[0]["source"] == "yfinance_estimate"
+
+
+@pytest.mark.asyncio
+async def test_the_boundary_comes_from_the_whole_history_not_the_window(db):
+    """
+    The trap the obvious form of this fix falls into. `_splice_by_era` derives the
+    boundary from the rows handed to it, so `_splice_by_era(get_between(...))` would
+    recompute it from the window — and a window opening after the era began would treat
+    its own first IBKR row as the start and resurrect superseded estimates.
+
+    Here the window starts AFTER the true boundary, so the estimate inside it must still
+    be dropped even though the window contains a later IBKR row.
+    """
+    await _seed_both_eras(db)
+    late_start = TODAY - timedelta(days=45)
+    result = await ActivityService(db).get_activity(
+        start_date=late_start, end_date=TODAY, kinds=[DIVIDEND], limit=MAX_LIMIT,
+    )
+    assert not [r for r in result["items"] if r["source"] == "yfinance_estimate"], result["items"]
+    assert [r["source"] for r in result["items"]] == ["ibkr"]
+
+
+@pytest.mark.asyncio
+async def test_the_ledger_dividend_total_agrees_with_the_dividends_reader(db):
+    """
+    Two readers of one table, and the anti-divergence test worth keeping: the ledger's
+    dividend rows must sum to what `DividendService` reports as received. They differed
+    by 72% in production precisely because nothing compared them.
+    """
+    from app.services.dividend_service import DividendService
+
+    await _seed_both_eras(db)
+    ledger = await ActivityService(db).get_activity(
+        start_date=WINDOW_START, end_date=TODAY, kinds=[DIVIDEND], limit=MAX_LIMIT,
+    )
+    ledger_total = sum(Decimal(str(r["amount_base"] or 0)) for r in ledger["items"])
+
+    spliced, _ = DividendService._splice_by_era(
+        await __import__(
+            "app.repositories.dividend_repository", fromlist=["DividendRepository"]
+        ).DividendRepository(db).get_computed_dividends()
+    )
+    reader_total = sum(
+        (p.net_amount_eur if p.net_amount_eur is not None else p.gross_amount_eur)
+        for p in spliced
+        if WINDOW_START <= (p.pay_date or p.ex_date) <= TODAY
+    )
+    assert ledger_total == reader_total

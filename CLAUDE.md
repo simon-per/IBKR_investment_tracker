@@ -152,6 +152,8 @@ recomputes by hand is the one that is wrong. The known instances:
 | `sync_stale_*` | fundamentals unioned "missing" with "stale"; **analyst ratings took only "stale"**, so a new security could never be rated |
 | the market-data securities loop | the scheduled job gained a Yahoo rate-limit breaker on 2026-08-04; **`POST /api/market-data/sync` kept its own copy without one**, so the *public* path went on asking after a 429. Extracted to `MarketDataService.sync_securities` |
 | the KPI card | sixteen hand-written copies across three files, each with its own idea of what an absent value looks like (`—` in one file, `N/A` in another) — so making the values responsive was sixteen mechanical edits. Extracted to `ui/KpiCard.tsx` |
+| `yield_on_cost_pct` | the Dividends-tab column divided **trailing** income by cost while the Performance card divided the **forward** projection by it. One name, two quantities, two screens — and the column's version broke whenever a position changed size, understating nine of fifteen rows |
+| the dividend reader's two rules | `ActivityService._dividends` adopted the income test and not the era splice, so the ledger listed the same dividend from both sources and overstated income 72%. **Partial** alignment is the nastiest variant: its own docstring cites the readers, so it reads as deliberate rather than forgotten |
 
 **The lens that finds them**, and which found the last four: walk the AST for function names defined in
 more than one module, ignore trivial bodies, and read each cluster. Router-to-service pairs and
@@ -163,6 +165,15 @@ name-keyed AST walk cannot see them, and "router-to-service pairs are noise" act
 skipping it. What gave it away was behavioural: a route and a job that both loop every security and
 both call Yahoo must agree about *when to stop*. So also ask which paths reach the same **upstream**,
 not only which share a name.
+
+**The last two instances were invisible to both lenses, and suggest a third.** Neither shared a
+function name, and neither reached an upstream: `yield_on_cost_pct` was one *name* computed two ways in
+two files, and `ActivityService._dividends` was a reader that applied one of another reader's two
+rules. What would have found both is asking, of every figure and every table, **which other code reads
+the same rows or publishes the same name — and does it apply the same rules?** Both were found by
+reading a screen and disbelieving a number, which is the lens of last resort. Note the tell in the
+second: its docstring said it matched "the same test the two dividend readers use", singular. A comment
+claiming alignment with one rule is evidence worth checking for the others.
 
 **When you find one, extract rather than sync the copies** — that is what `ttm_growth.py`,
 `peg_ratio.py` and `safe_numbers.py` are — and write the test against the **family** ("every service
@@ -1286,10 +1297,27 @@ with **no read surface at all**. The sharpest consequence: the transfer audit th
 before trusting any money-added figure was `manage_cash_flows list` over ssh. Every cash row now
 carries `counts_as_money_in`, badged *Transfer · not money in*.
 
-Four rules, each of which would be a bug the other way:
+Five rules, each of which would be a bug the other way:
 
 - **Paging is applied to the merged list, not per table.** The four sources are separately ordered, so
   a per-table limit would silently drop every dividend in a busy trading month.
+- **Dividends are era-spliced, exactly as every computing reader does it** — and this one was missing
+  until 2026-08-05, which is the whole reason the rule is written here now. The same dividend is stored
+  twice, yfinance under its ex-date and IBKR under its pay date a week or two apart, so without the
+  splice the ledger listed **both**: 31 duplicate rows and a dividend total of 113 CHF against a real
+  65, overstated **72%**. Nothing the app *computes* was affected — the breakdown, the summary card,
+  XIRR and the tax report all splice — which is exactly why it survived: the only wrong surface was the
+  one that merely displays.
+
+  **The boundary must come from the whole table, not the window.** `_splice_by_era` derives
+  `min(ibkr_dates)` from the rows handed to it, which is right for readers that splice the full history
+  and wrong here, because the ledger windows *first*: fed a slice, a window opening after the era began
+  would treat its own earliest IBKR row as the era start and resurrect superseded estimates. Hence
+  `DividendRepository.earliest_ibkr_payment_date()` — same shape and same reason as
+  `CashFlowRepository.earliest_flow_date()`. Do not "simplify" this to
+  `_splice_by_era(get_between(...))`; that is the obvious-looking form and it is the bug.
+  Pre-boundary estimates are still kept and still badged — dropping those is the mirror-image bug, and
+  it once blanked every pre-IBKR month from the dividend card.
 - **Dividends are dated by `pay_date` falling back to `ex_date`** — the same `coalesce`
   `has_ibkr_dividends` uses. yfinance stores under the ex-date and IBKR under the pay date, and
   Mastercard's 29-day lag exceeds a monthly cycle, so the column asked decides the window.
@@ -1299,7 +1327,9 @@ Four rules, each of which would be a bug the other way:
 
 Zero-value dividend rows are excluded on the same test the two dividend readers use, so yfinance's
 pre-ownership history never surfaces. Tests: `tests/test_activity_service.py`, plus cases in
-`tests/test_api_smoke.py`.
+`tests/test_api_smoke.py` — including one comparing the ledger's dividend total against
+`DividendService`'s over the same span, since two readers of one table that nothing compares is how
+the 72% got there.
 
 ---
 
@@ -1528,7 +1558,7 @@ raiser for that whole module, so an accidental network reach fails loudly; `/api
 is excluded because it lazy-fetches Yahoo on a cache miss, and POST routes are excluded because they
 start real syncs. **Add a case here when an endpoint's response shape changes.**
 
-Tests (723 backend + 343 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
+Tests (726 backend + 352 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
 calls). Take the number the suite actually prints as your baseline, not this line — it has been stale
 by 200+ on both halves before:
 ```bash

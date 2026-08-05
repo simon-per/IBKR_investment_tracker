@@ -1,16 +1,15 @@
 # Working state
 
-**Last updated: 2026-08-05 (later) — the permanent 27-attribute sync banner is gone (only drops that
-can change ingested data are warnings now, verified by running the real entry point inside the
-production container) and yield on cost no longer falls when you add to a holding (verified on
-production data). Everything else below is deployed and verified in the browser.
-Beta shows a value for the first time (β 1.03 / r 0.74 vs S&P 500; it was refused by an FX artefact,
-never by a thin window); the Performance tab reports the portfolio's dividend rate (*Dividend Yield*
-and *Yield on Cost*, replacing *Effective Holdings*, which moved into the *Top 5 Weight* footnote);
-the breakdown endpoint has the contract test its eight nested models never had; market data reprices
-seven times a day; the chart's negative axis is clamped; the app's own INFO logging reaches the
-container log; the sixteen KPI cards are one component; and the deploy guard covers all nine slots.
-Working tree clean, nothing unpushed.**
+**Last updated: 2026-08-05 (later still).** Newest first: the Activity ledger no longer lists every
+dividend twice (it was the one reader missing the era splice, overstating dividend income 72%); yield on
+cost is a Positions column; the permanent 27-attribute sync banner is gone; yield on cost no longer
+falls when you add to a holding; Beta shows a value for the first time (β 1.03 / r 0.74 vs S&P 500 — it
+was refused by an FX artefact, never by a thin window); the Performance tab reports the portfolio's
+dividend rate (*Dividend Yield* and *Yield on Cost*, replacing *Effective Holdings*, which moved into
+the *Top 5 Weight* footnote); the breakdown endpoint has the contract test its eight nested models never
+had; market data reprices seven times a day; the chart's negative axis is clamped; the app's own INFO
+logging reaches the container log; the sixteen KPI cards are one component; and the deploy guard covers
+all nine slots.
 
 `CLAUDE.md` is the durable guide — architecture, invariants, and the rules that were each a bug
 first. **This file is the perishable half**: where the work actually stands, what is known-broken,
@@ -280,6 +279,45 @@ statement's drift is the drift we modelled, which is the one thing a constructed
 
 Note `/api/scheduler/history` names the field **`type`**, not `sync_type` — reading the wrong key
 makes every run look untyped, which briefly looked like a second bug and was not one.
+
+## Shipped 2026-08-05 (later still) — the Activity ledger showed every dividend twice
+
+**Found by reading the screen and disbelieving a number** — "why are there 2026 dividends marked *est.*
+when the transfer happened in January?" The labels were the symptom. The defect: the same dividend was
+listed **twice**, once as the yfinance estimate under its ex-date and once as the IBKR actual under its
+pay date a fortnight later. `GOOGL est. 06-08` beside `GOOGL 06-15`, `SPGI est. 05-29` beside `06-10`.
+
+`ActivityService._dividends` was the only reader not applying `_splice_by_era`. Measured before the fix,
+era boundary 2026-02-18: **31 duplicate rows, 47 of 113 CHF — dividend income overstated 72%.**
+
+Nothing the app *computes* was wrong. The breakdown, the summary card, XIRR and the tax report all
+splice, which is exactly why this survived: the only wrong surface was the one that merely displays.
+
+Two things worth carrying forward:
+
+- **The boundary cannot come from the window.** `_splice_by_era` derives `min(ibkr_dates)` from the rows
+  handed to it — right for readers that splice the whole history, wrong for the ledger, which windows
+  first. So `DividendRepository.earliest_ibkr_payment_date()` now exists, mirroring
+  `CashFlowRepository.earliest_flow_date()`. `_splice_by_era(get_between(...))` is the obvious-looking
+  form and is the bug; a test fails if anyone writes it.
+- **Partial alignment is the nastiest form of the duplication failure.** The docstring said zero rows
+  are excluded "on the same test the two dividend readers use" — singular. It was written *with* the
+  readers open and copied one of their two rules, so it reads as deliberate rather than forgotten.
+
+**Expect the ledger to change visibly**: 31 fewer dividend rows and a dividend total falling from ~113
+to ~66 CHF. That is the correction, not data loss. Pre-boundary estimates (29 rows before 2026-02-18)
+are still there and still badged — dropping those is the mirror-image bug, which once blanked every
+pre-IBKR month from the dividend card.
+
+Also: **yield on cost is now a column in the Positions table**, from the breakdown the Dashboard already
+fetches, so it costs no request. 19 of 36 rows show a figure and 17 show a dash — a holding that
+distributes nothing has no rate, and every accumulating ETF reads that way correctly. Sortable, with
+absent sorting below any real yield in the default descending order. `detailLimit` went 4 → 5 so the new
+detail row does not push Weight behind the phone's "Show all" disclosure. `PositionsList` gained the
+test file it never had, and the latent `useMemo` dep omission in its sort (`totalMarketValue` was
+already missing) is fixed — adding a case that reads a separately-fetched map would have made it bite.
+
+Backend 723 → 726, frontend 343 → 352.
 
 ## Known rough edges (accepted, not bugs)
 
@@ -814,6 +852,12 @@ detail; this exists so the next session knows what just moved without reading it
 confirmed) and gets deleted once nothing in it is outstanding: these lines are permanent, so don't
 "tidy up" the overlap by deleting the wrong one.
 
+- **2026-08-05 (later still)** — the Activity ledger listed every dividend twice: the yfinance estimate
+  under its ex-date and the IBKR actual under its pay date, because `ActivityService._dividends` was the
+  one reader not applying `_splice_by_era`. 31 duplicate rows, dividend income overstated 72%, and
+  nothing computed was affected — the only wrong surface was the one that merely displays. Its docstring
+  claimed alignment with "the same test the two dividend readers use", singular: it had copied one of
+  their two rules, which is why it read as deliberate. Also added yield on cost to the Positions table.
 - **2026-08-05 (later)** — two reported issues, neither where it looked. The 27-attribute sync warning
   was the sanitizer working correctly but reporting harmlessly-dropped fields as warnings on every
   sync, which is how a banner stops being read; drops are now classified by whether the ingest reads
@@ -840,14 +884,3 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
   Σincome/Σvalue, so nothing is weighted by hand. Three defects were caught in review after the code
   was written: a hoisted DB call that would have turned "yields omitted" into a 500, a reachable
   `0.00%` that meant "the only payer is unpriced", and a loading gate that hid four working metrics.
-- **2026-08-04** — market data reprices seven times a day instead of three (08/11/13/15/18/20/22
-  Berlin). The cron edit was the small half: `get_missing_dates()` only ever returned dates with no
-  row, so the first job of the day owned that date forever — **production held every European close
-  at its 15:00 Berlin mid-session value**, and an earlier slot would have frozen an earlier price.
-  `PROVISIONAL_PRICE_DAYS` re-fetches the trailing three days for free. Also: a Yahoo 429 now
-  abandons the pass instead of asking 38 more times, and both `finish-deploy` twins had been guarding
-  the wrong sync hours for four days. Deployed and confirmed the same evening, then a pass run on
-  production corrected the live rows (nine European closes restated, worst 2.11%; 24 US rows created
-  where there were none). That run also exposed the public `POST /api/market-data/sync` carrying its
-  own copy of the loop with no breaker — extracted to `MarketDataService.sync_securities`.
-  Suites 664 → 684.

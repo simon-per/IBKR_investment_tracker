@@ -337,11 +337,35 @@ class ActivityService:
 
         Zero rows are excluded on the same test the two dividend readers use: yfinance
         returns a security's whole history, most of it predating ownership.
+
+        **And the two sources are era-spliced, exactly as every other reader does it.**
+        The same dividend is stored twice — yfinance under its ex-date, IBKR under its
+        pay date, a week or two apart — so without the splice the ledger listed both and
+        overstated dividend income by 72% on this account (31 duplicated rows, 47 CHF).
+        Every figure the app *computes* was already right, because the breakdown, the
+        summary card, XIRR and the tax report all splice; this was the one surface that
+        merely *displays*, and it had adopted one of the readers' two rules — the income
+        test — while missing the other.
+
+        The boundary must come from the whole table, which is why the repository has an
+        accessor for it: this method windows first, and `_splice_by_era` derives the
+        boundary from whatever rows it is given, so splicing the window would let a
+        window opening after the era start resurrect superseded estimates. Pre-boundary
+        estimates are still kept and still badged — dropping those is the mirror-image
+        bug, and it once erased every pre-IBKR month from the dividend card.
         """
-        payments = await DividendRepository(self.db).get_between(start, end)
+        repo = DividendRepository(self.db)
+        payments = await repo.get_between(start, end)
+        ibkr_from = await repo.earliest_ibkr_payment_date()
         symbols = await self._symbols_by_id()
         out = []
         for p in payments:
+            if (
+                ibkr_from is not None
+                and p.source != "ibkr"
+                and (p.pay_date or p.ex_date) >= ibkr_from
+            ):
+                continue
             gross = p.gross_amount_eur or Decimal("0")
             # Rows predating the withholding-fields migration carry a NULL net; gross is
             # the honest stand-in, matching DividendService._net_eur.

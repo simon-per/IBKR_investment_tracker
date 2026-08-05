@@ -375,6 +375,28 @@ def test_the_shapes_that_broke_production_serialize(client):
     sell = next(r for r in act["items"] if r["ib_key"] == "T1")
     assert sell["realized_pnl_base"] is not None
 
+    # The ledger is era-spliced like every reader that computes a figure. Without this
+    # it listed the same dividend twice — the yfinance estimate under its ex-date and the
+    # IBKR actual under its pay date — and overstated dividend income by 72%. Asserted
+    # over the HTTP layer because the splice is the sort of thing a response_model or a
+    # windowing change can quietly undo.
+    boundary = bd["ibkr_from"]
+    if boundary:
+        stale = [
+            r for r in act["items"]
+            if r["kind"] == "dividend"
+            and r["source"] == "yfinance_estimate"
+            and r["date"] >= boundary
+        ]
+        assert not stale, f"estimates superseded by IBKR rows are still on the ledger: {stale}"
+        # ...and the mirror-image bug: pre-boundary estimates are the only source for
+        # that era and must survive, still badged.
+        early = [
+            r for r in act["items"]
+            if r["kind"] == "dividend" and r["source"] == "yfinance_estimate"
+        ]
+        assert all(r["date"] < boundary for r in early)
+
     # An unknown kind is refused rather than silently returning everything.
     assert client.get("/api/portfolio/activity?kind=nonsense").status_code == 400
     # And the window is bounded like value-over-time's.
