@@ -47,6 +47,17 @@ describe('PerformanceMetricsCards', () => {
     expect(screen.queryByText(/effective/)).toBeNull()
   })
 
+  it('does not report a green 0.0% concentration when nothing is priced', () => {
+    // The one absence in this row that actively reassures: the tone ladder calls
+    // anything under 50% good news, so an unpriced portfolio rendered a green "0.0%"
+    // claiming the five largest holdings are none of the book — while the effective
+    // count that would have qualified it correctly dropped out of the same footnote.
+    renderWith({ top5Weight: null, effectiveHoldings: null })
+    expect(screen.getByText('No priced positions')).toBeTruthy()
+    expect(screen.queryByText('0.0%')).toBeNull()
+    expect(screen.queryByText(/Concentration risk/)).toBeNull()
+  })
+
   it('labels a short window a period return instead of annualizing it', () => {
     renderWith({ xirrMethod: 'simple_period' })
     expect(screen.getByText('Period Return')).toBeTruthy()

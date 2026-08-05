@@ -447,6 +447,9 @@ describe('concentrationPct', () => {
   })
 
   it('handles an empty portfolio', () => {
-    expect(concentrationPct([])).toBe(0)
+    // null, not 0: the card tones anything under 50% as good news, so a zero here is a
+    // green all-clear drawn from no data at all.
+    expect(concentrationPct([])).toBeNull()
+    expect(concentrationPct([{ market_value_eur: 0 }])).toBeNull()
   })
 })

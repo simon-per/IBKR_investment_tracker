@@ -13,7 +13,9 @@ interface PerformanceMetricsCardsProps {
     profitablePositions: number
     totalPositions: number
     calmarRatio: number | null
-    top5Weight: number
+    /** `null` when nothing is priced. A 0 here reads as *good* concentration, so it is
+     *  the one absence in this row that actively reassures. */
+    top5Weight: number | null
     /**
      * Herfindahl effective holdings, footnoted on the Top 5 card rather than given a
      * card of its own. A top-5 weight cannot tell five equal positions from one
@@ -99,13 +101,18 @@ export function PerformanceMetricsCards({ metrics, isLoading }: PerformanceMetri
       <KpiCard
         label="Top 5 Weight"
         icon={<PieChart className="h-4 w-4 text-muted-foreground" />}
-        value={`${metrics.top5Weight.toFixed(1)}%`}
-        tone={metrics.top5Weight > 70 ? 'negative'
+        value={metrics.top5Weight !== null ? `${metrics.top5Weight.toFixed(1)}%` : null}
+        tone={metrics.top5Weight === null ? 'muted'
+          : metrics.top5Weight > 70 ? 'negative'
           : metrics.top5Weight > 50 ? 'warning'
           : 'positive'}
-        sub={metrics.effectiveHoldings !== null
-          ? `Concentration risk · ${metrics.effectiveHoldings.toFixed(1)} effective`
-          : 'Concentration risk'}
+        sub={metrics.top5Weight === null
+          // Both figures are absent on the same condition — nothing priced — so say that
+          // rather than leaving a bare "Concentration risk" under a dash.
+          ? 'No priced positions'
+          : metrics.effectiveHoldings !== null
+            ? `Concentration risk · ${metrics.effectiveHoldings.toFixed(1)} effective`
+            : 'Concentration risk'}
       />
     </div>
   )

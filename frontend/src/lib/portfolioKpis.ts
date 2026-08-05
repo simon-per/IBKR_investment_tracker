@@ -227,13 +227,22 @@ export function sortinoRatio(series: ValueSeriesPoint[]): number | null {
   return Math.max(-10, Math.min(10, ratio))
 }
 
-/** Share of market value held in the largest N positions, as a percent. */
+/**
+ * Share of market value held in the largest N positions, as a percent.
+ *
+ * `null` — never `0` — when nothing is priced. A `0` here is not merely unknown, it is
+ * *reassuring*: the card tones anything under 50% as good news, so an unpriced portfolio
+ * rendered a green `0.0%` claiming the five largest holdings are none of the book. Its
+ * neighbour `herfindahlConcentration` already returned `null` on this exact condition,
+ * and the two share a card since the effective count moved into its footnote — so the
+ * green zero appeared with the qualifier that would have explained it silently dropped.
+ */
 export function concentrationPct(
   positions: { market_value_eur: number }[],
   topN: number = 5,
-): number {
+): number | null {
   const total = positions.reduce((s, p) => s + p.market_value_eur, 0)
-  if (total <= 0) return 0
+  if (total <= 0) return null
   const top = [...positions]
     .sort((a, b) => b.market_value_eur - a.market_value_eur)
     .slice(0, topN)

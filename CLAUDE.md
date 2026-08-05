@@ -1388,6 +1388,20 @@ from one dominant one.
   Its clamp test had also been passing vacuously for the same reason — the old series' σ tripped the
   negligible-volatility early return, so it asserted `|0| <= 10`, true of anything. It now uses a
   high-return/low-σ series that reaches the clamp.
+
+- **`concentrationPct` is `null` too, and it was the worst of the three**, because its zero does not
+  merely fail to inform — it *reassures*. The tone ladder calls anything under 50% good news, so an
+  unpriced portfolio drew a green `0.0%` asserting the five largest holdings are none of the book.
+  `herfindahlConcentration` already returned `null` on that exact condition, and the two now share a
+  card (the effective count moved into the Top-5 footnote when *Effective Holdings* was replaced), so
+  the green zero appeared with the one qualifier that would have explained it silently dropped out.
+  Both absences are the same condition, so the footnote says *No priced positions* rather than leaving
+  a bare "Concentration risk" under a dash.
+
+  **The lens worth reusing:** when a metric can be unknown, ask what its *stand-in value would claim*.
+  A `0` volatility looks broken and gets noticed; a `0` Sharpe and a `0%` concentration both look like
+  answers, and the concentration one looks like a *good* answer. Severity tracks plausibility, not
+  magnitude.
 - **`dailyReturnSeries` exists because `dailyReturns` drops days with nothing to divide by**, so the
   nth return is not the nth calendar point. Indexing the input by return position to name a
   drawdown's peak picks the wrong day.
@@ -1583,7 +1597,7 @@ raiser for that whole module, so an accidental network reach fails loudly; `/api
 is excluded because it lazy-fetches Yahoo on a cache miss, and POST routes are excluded because they
 start real syncs. **Add a case here when an endpoint's response shape changes.**
 
-Tests (731 backend + 354 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
+Tests (731 backend + 355 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
 calls). Take the number the suite actually prints as your baseline, not this line — it has been stale
 by 200+ on both halves before:
 ```bash
@@ -1759,6 +1773,7 @@ Tests: `tests/test_currency_fallback.py`.
 | Currency exposure looks wrong for an ETF | It is quote currency, not economic exposure, and deliberately not re-attributed — a EUR-listed S&P tracker is EUR-quoted with USD risk. The fund share is named on screen |
 | Beta is blank with a benchmark selected | Fewer than the 20 flow-free days a regression needs; the count so far is in the footnote. Flow days are excluded by design |
 | Sharpe, Volatility and Sortino all read `—` on a short range | Expected, and now consistent: all three need 5 daily returns. MTD in the first days of a month gives 2–3. Sharpe used to show `0.00` here instead, which looked like a measurement |
+| Top 5 Weight reads `—` / *No priced positions* | Nothing held resolved a price, so there is no weight to concentrate. Deliberately not `0.0%`, which the tone ladder would have drawn **green** — a reassuring all-clear from no data |
 
 ---
 
