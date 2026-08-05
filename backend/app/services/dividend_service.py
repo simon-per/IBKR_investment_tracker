@@ -1012,15 +1012,45 @@ class DividendService:
         # it, the same way `yoy_vs_partial` handles the first year of income.
         # One aggregate rather than reusing the forecast's lot map, which only
         # exists when include_forecast is set — this figure must be right either way.
-        earliest_open = dict((await self.db.execute(
-            select(TaxLot.security_id, func.min(TaxLot.open_date))
-            .group_by(TaxLot.security_id)
-        )).all())
-        ttm_days_held: Dict[int, int] = {}
-        for sid, first_open in earliest_open.items():
-            if first_open is None:
+        #
+        # Measured as the UNION of the lot intervals clipped to the window, not as
+        # `as_of - min(open_date)`. That older form asked "how long ago was this security
+        # first bought", which answers the question only while the holding is unbroken:
+        # sell out entirely and rebuy months later and it still reports a full year, so a
+        # yield built from two partial stretches of income was presented unqualified —
+        # the flag under-reporting in exactly the case that most needs it.
+        #
+        # Intervals are [open_date, close_date) because a lot sold on D is not held at D's
+        # close, the same convention as `_calculate_daily_value` and the attribution gates.
+        lot_spans = (await self.db.execute(
+            select(TaxLot.security_id, TaxLot.open_date, TaxLot.close_date)
+        )).all()
+        spans_by_sec: Dict[int, List] = defaultdict(list)
+        for sid, opened, closed in lot_spans:
+            if opened is None:
                 continue
-            ttm_days_held[sid] = max(0, (as_of - max(first_open, ttm_start)).days)
+            span_start = max(opened, ttm_start)
+            span_end = min(closed, as_of) if closed else as_of
+            if span_end > span_start:
+                spans_by_sec[sid].append((span_start, span_end))
+
+        ttm_days_held: Dict[int, int] = {}
+        for sid, spans in spans_by_sec.items():
+            # Overlapping lots must not double-count a day: three lots open across the
+            # same month is one month held, not three.
+            total_days = 0
+            cur_start = cur_end = None
+            for span_start, span_end in sorted(spans):
+                if cur_end is None:
+                    cur_start, cur_end = span_start, span_end
+                elif span_start <= cur_end:
+                    cur_end = max(cur_end, span_end)
+                else:
+                    total_days += (cur_end - cur_start).days
+                    cur_start, cur_end = span_start, span_end
+            if cur_end is not None:
+                total_days += (cur_end - cur_start).days
+            ttm_days_held[sid] = total_days
         # This call must stay the LAST database access in the method. It is allowed to
         # fail into "yields omitted" only because nothing queries afterwards: a
         # DBAPI-level error leaves the AsyncSession needing a rollback, so any later

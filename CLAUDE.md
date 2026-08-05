@@ -746,6 +746,16 @@ a monthly payer 11 payouts a year instead of 12, and 91 days walked a quarterly 
 the 14th to the 13th. A gap near a calendar period snaps to it (`CALENDAR_PERIODS`), keeping the
 schedule's own day and clamping at month end; anything else keeps day-stepping.
 
+**`days_held_in_ttm` is the union of the lot intervals inside the trailing year**, not
+`as_of - min(open_date)`. Those agree only while a holding is unbroken, and diverge in the one case
+the flag exists for: sell out entirely, rebuy months later, and the older form still reported a full
+year because the *first* purchase was a year ago — so a yield built from two partial stretches of
+income was presented unqualified. Intervals are `[open_date, close_date)`, matching the
+exclude-on-close convention, and overlapping lots are merged so three lots open across one month
+count as one month held rather than three. Pinned from all three sides in
+`tests/test_dividend_breakdown.py`: the gap case, the overlap case, and a continuously-held position
+that must keep reporting full coverage.
+
 **Judge staleness from *now*, not from the horizon.** The stopped-payer guard compares against `as_of`,
 because the distance to a future horizon is a property of the question. Otherwise asking about 2027 made
 every payer look stopped and returned an empty year.
@@ -1671,7 +1681,7 @@ raiser for that whole module, so an accidental network reach fails loudly; `/api
 is excluded because it lazy-fetches Yahoo on a cache miss, and POST routes are excluded because they
 start real syncs. **Add a case here when an endpoint's response shape changes.**
 
-Tests (733 backend + 370 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
+Tests (736 backend + 370 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
 calls). Take the number the suite actually prints as your baseline, not this line — it has been stale
 by 200+ on both halves before:
 ```bash

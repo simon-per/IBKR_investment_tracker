@@ -7,7 +7,7 @@ BEFORE the first IBKR payment date and IBKR rows carry everything from there on
 dividend card, and keeping estimates inside the IBKR era would double-count the
 same dividend from both sources.
 """
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
@@ -879,6 +879,90 @@ async def test_the_forward_yield_declares_a_gross_estimate_contribution():
         ))["forward_yield"]
         assert fy["basis"] == "mixed"
         assert 0 < fy["gross_estimate_eur"] < fy["annual_eur"]
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# `days_held_in_ttm` is the union of the lot intervals inside the trailing year, not
+# `as_of - min(open_date)`. The older form answered "how long ago was this first bought",
+# which is the same thing only while the holding is unbroken — and diverges in exactly the
+# case the flag exists for.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_gap_between_selling_and_rebuying_is_not_counted_as_held():
+    """
+    Sold out and rebought months later: the old measure reported a full year because the
+    FIRST purchase was a year ago, so a yield built from two partial stretches of income
+    was presented unqualified. Under-reporting in the case that most needs the badge.
+    """
+    engine, session = await _make_session()
+    try:
+        # Held for ~2 months, out for ~7, back for ~1. Roughly 90 days inside the window.
+        session.add(_lot(1, AS_OF - timedelta(days=330), "10",
+                         close_date=AS_OF - timedelta(days=270)))
+        session.add(_lot(1, AS_OF - timedelta(days=30), "10"))
+        session.add(_price(1, "20"))
+        await session.flush()
+        await _seed_payment(session, 1, AS_OF - timedelta(days=300), "5.00", "ibkr")
+        await _seed_payment(session, 1, AS_OF - timedelta(days=20), "5.00", "ibkr")
+        await session.commit()
+
+        row = (await DividendService(session).get_dividend_breakdown(
+            include_forecast=False, as_of=AS_OF,
+        ))["securities"][0]
+
+        # 60 days in the first stretch + 30 in the second. The old form gave 330.
+        assert row["days_held_in_ttm"] == 90
+        assert row["trailing_yield_partial"] is True
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_overlapping_lots_do_not_double_count_a_day():
+    """Three lots open across the same stretch is one stretch held, not three."""
+    engine, session = await _make_session()
+    try:
+        for _ in range(3):
+            session.add(_lot(1, AS_OF - timedelta(days=100), "5"))
+        session.add(_price(1, "20"))
+        await session.flush()
+        await _seed_payment(session, 1, AS_OF - timedelta(days=20), "5.00", "ibkr")
+        await session.commit()
+
+        row = (await DividendService(session).get_dividend_breakdown(
+            include_forecast=False, as_of=AS_OF,
+        ))["securities"][0]
+        assert row["days_held_in_ttm"] == 100
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_continuously_held_position_still_reports_full_coverage():
+    """
+    The direction that must not regress: a holding bought years ago and never sold is
+    fully covered, and switching to an interval union must not start badging it.
+    """
+    engine, session = await _make_session()
+    try:
+        session.add(_lot(1, AS_OF - timedelta(days=800), "10"))
+        session.add(_price(1, "20"))
+        await session.flush()
+        await _seed_payment(session, 1, AS_OF - timedelta(days=20), "5.00", "ibkr")
+        await session.commit()
+
+        row = (await DividendService(session).get_dividend_breakdown(
+            include_forecast=False, as_of=AS_OF,
+        ))["securities"][0]
+        assert row["days_held_in_ttm"] == 365
+        assert row["trailing_yield_partial"] is False
     finally:
         await session.close()
         await engine.dispose()
