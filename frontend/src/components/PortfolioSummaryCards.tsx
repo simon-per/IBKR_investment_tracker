@@ -56,11 +56,32 @@ export function PortfolioSummaryCards({
   const isProfit = summary.total_gain_loss_eur >= 0
   const isRealizedProfit = summary.total_realized_gain_loss_eur >= 0
 
+  // Holdings the backend could not value today. Their cost still counts, so the total is
+  // a partial sum while Cost Basis is whole — which is the SBI shape exactly: deleting one
+  // security's poisoned prices took 446.93 CHF off this number and only a sync warning
+  // said so. Absent means an older backend, read as complete.
+  const unpriced = summary.unpriced_holdings ?? 0
+
   return (
     /* Two-up rather than one card per row below `md`: stacked, the three KPI rows came
        to ~1,660px of scrolling past numbers before the chart — about two phone screens,
        and the opposite of the reading order this page wants. */
     <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-5">
+      {unpriced > 0 && (
+        <div
+          role="alert"
+          className="col-span-2 lg:col-span-5 rounded-md border border-yellow-600/40 bg-yellow-600/10 px-3 py-2 text-xs text-yellow-700 dark:text-yellow-500"
+        >
+          <span className="font-medium">
+            Market Value is incomplete — {unpriced}{' '}
+            {unpriced === 1 ? 'holding has' : 'holdings have'} no usable price today
+          </span>
+          {' '}— their cost still counts toward Cost Basis, so the total and both gain figures
+          understate by whatever those holdings are worth. Check the market-data sync's
+          warnings and the position's ticker mapping.
+        </div>
+      )}
+
       {/* The hero. Market Value spans both columns on a phone so it keeps the full
           324px and its `text-2xl`, and the other four tile underneath — which is what
           makes the top of the screen read like a portfolio rather than a dashboard. */}

@@ -44,6 +44,16 @@ export interface PortfolioSummary {
   total_gain_loss_eur: number;
   total_gain_loss_percent: number;
   num_positions: number;
+  /**
+   * Held securities whose value could not be resolved today. Above 0 means
+   * `total_market_value_eur` is an **incomplete** sum while `total_cost_basis_eur` is
+   * not, so the gain and percent understate by those holdings' whole value.
+   *
+   * Do not compute this on the client from `market_price === null`: the backend also
+   * fails to value a holding when its FX rate is missing, so a client-side count
+   * under-reports. Optional because a backend older than 2026-08-05 does not send it.
+   */
+  unpriced_holdings?: number;
   date?: string;
   base_currency?: string;
   total_realized_gain_loss_eur: number;

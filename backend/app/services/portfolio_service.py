@@ -356,6 +356,7 @@ class PortfolioService:
                 "total_gain_loss_eur": 0.0,
                 "total_gain_loss_percent": 0.0,
                 "num_positions": 0,
+                "unpriced_holdings": 0,
                 "base_currency": base_fx.base_currency,
                 **realized,
             }
@@ -378,6 +379,12 @@ class PortfolioService:
             "total_gain_loss_eur": daily_value["gain_loss_eur"],
             "total_gain_loss_percent": daily_value["gain_loss_percent"],
             "num_positions": len(set(security.id for _, security in taxlots_with_securities)),
+            # Straight off the same helper the timeline uses, so the headline total and
+            # every point on the chart agree about their own completeness rather than each
+            # deciding. Above 0 means total_market_value_eur is a PARTIAL sum while
+            # total_cost_basis_eur is not — the SBI shape, where 446.93 CHF left the total
+            # with only a sync warning to catch it.
+            "unpriced_holdings": daily_value["unpriced_holdings"],
             "date": daily_value["date"],
             "base_currency": base_fx.base_currency,
             **realized,

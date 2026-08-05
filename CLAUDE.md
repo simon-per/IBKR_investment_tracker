@@ -1256,6 +1256,21 @@ dip is missing price data rather than a loss.
 unmeasurable would put a permanent warning on every chart served by an older backend. Same choice
 `externalFlow` makes about its own optional field.
 
+**`/api/portfolio/summary` carries the same field, and that is the more important one.**
+`total_market_value_eur` is a sum over the holdings the backend could price — the *headline* figure, on
+the hero card — and an unpriced holding leaves it while its cost stays in `total_cost_basis_eur`, so the
+total and both gain figures understate. This is the SBI incident restated: deleting one security's
+poisoned prices took 446.93 CHF off exactly this number and the only thing that said so was a sync
+warning nobody has to read. `PortfolioSummaryCards` now renders a `role="alert"` above the row.
+
+It comes off `_calculate_daily_value`, the same helper the timeline uses, so the headline and every chart
+point agree about their own completeness instead of each deciding — pinned by `test_api_smoke.py`, which
+asserts the summary's count equals the last timeline point's.
+
+**Do not recompute this on the client from `market_price === null`.** The backend fails to value a
+holding for *two* reasons — no price **or** no FX rate — so a client-side count under-reports, and
+`currencyExposure.ts`'s own `unpricedCount` is a different (narrower) question about quote currency.
+
 **A sync that never *succeeds* is silent in the same way.** Individually a failed IBKR run is
 unremarkable — `1001` is routine and the schedule shrugs it off — so the thing worth alarming on is
 the **absence of a success**, not any single failure. `find_stale_ibkr_sync()` warns after
@@ -1639,7 +1654,7 @@ raiser for that whole module, so an accidental network reach fails loudly; `/api
 is excluded because it lazy-fetches Yahoo on a cache miss, and POST routes are excluded because they
 start real syncs. **Add a case here when an endpoint's response shape changes.**
 
-Tests (733 backend + 365 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
+Tests (733 backend + 370 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
 calls). Take the number the suite actually prints as your baseline, not this line — it has been stale
 by 200+ on both halves before:
 ```bash
@@ -1781,6 +1796,7 @@ Tests: `tests/test_currency_fallback.py`.
 | Yahoo 404/429 | **Stop.** Wait 30-60 min. Check `yfinance >= 1.1.0` |
 | A position is missing from the portfolio | Check `taxlots_skipped` + `warnings[]` on the sync run — usually a currency neither FX provider covers |
 | The value chart declines toward zero over recent days | The chart says so itself now — a yellow notice above it names the day and holding counts. It means `unpriced_holdings > 0`: holdings whose price fell outside the 14-day lookback are counted at cost but not at value, and past 15 days every one drops out and it reads −100%. The cause is a stalled market-data sync, not a loss. The risk metrics already exclude those days |
+| Market Value looks low and a yellow notice sits above the cards | `summary.unpriced_holdings > 0`: a holding could not be valued, so the total omits it while Cost Basis keeps its cost. Not a loss — find the security via the market-data sync's `warnings[]` and check its `ticker_mappings` row |
 | A position shows 0.00 / `market_price: null` | No cached price. The market-data sync's `warnings[]` now names it. Fix the `ticker_mappings` row, or fill it with `app/cli/import_prices.py` from IBKR bars |
 | A price looks like an intraday value, not a close | Expected inside the session, and it self-corrects: a weekday within `PROVISIONAL_PRICE_DAYS` (3) is re-fetched at every slot, so the settled close lands after the market shuts. Still wrong **after** 3 days is a real freeze. **Don't diagnose it from `created_at`** — see below |
 | A market-data run reports `rate_limited: true` | Yahoo returned 429 and the pass stopped deliberately, leaving the later securities on their previous prices. **Do not trigger a manual sync** — wait; the next slot resumes and re-fetches only what is missing |

@@ -161,6 +161,20 @@ class PortfolioSummary(BaseModel):
     total_gain_loss_eur: float = Field(..., description="Total unrealized gain/loss")
     total_gain_loss_percent: float = Field(..., description="Total percentage gain/loss")
     num_positions: int = Field(..., description="Number of unique securities held")
+    unpriced_holdings: int = Field(
+        0,
+        description=(
+            "Held securities whose value could not be resolved today. Above 0 means "
+            "total_market_value_eur is an INCOMPLETE sum while total_cost_basis_eur is "
+            "not, so the gain and percent understate by those holdings' whole value. "
+            "This is the SBI shape: deleting one security's poisoned prices took 446.93 "
+            "CHF off the headline with only a sync warning to catch it. Computed by the "
+            "same helper as PortfolioValuePoint.unpriced_holdings, so the total and every "
+            "chart point agree about their own completeness. Note the backend fails to "
+            "value a holding for two reasons — no price OR no FX rate — so a client "
+            "counting `market_price === null` itself would under-report."
+        ),
+    )
     date: Optional[str] = Field(None, description="Date of the summary")
     base_currency: str = Field("EUR", description="Currency the *_eur values are expressed in")
     total_realized_gain_loss_eur: float = Field(0.0, description="Realized gain/loss from closed positions")

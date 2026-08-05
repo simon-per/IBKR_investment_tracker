@@ -297,6 +297,20 @@ def test_the_shapes_that_broke_production_serialize(client):
     unwindowed = client.get("/api/dividends/breakdown").json()
     assert unwindowed["growth"] == growth
 
+    # Completeness travels with the headline. `total_market_value_eur` is a sum over the
+    # holdings the backend could price, so a partial one has to declare itself — the SBI
+    # shape, where 446.93 CHF left this figure with only a sync warning to catch it. The
+    # timeline's per-point field and this one come from the same helper, so they must agree
+    # on the fixture: nothing here is unpriced.
+    summary_now = client.get("/api/portfolio/summary").json()
+    assert "unpriced_holdings" in summary_now, "response_model dropped it"
+    assert isinstance(summary_now["unpriced_holdings"], int)
+    vot = client.get(
+        f"/api/portfolio/value-over-time?start_date={START}&end_date={TODAY}"
+    ).json()
+    assert all("unpriced_holdings" in p for p in vot)
+    assert summary_now["unpriced_holdings"] == vot[-1]["unpriced_holdings"]
+
     # The forward yield is a SIBLING of growth, not a member — it moves with a market
     # price, so it is neither growth nor history. Same year-invariance, for its own
     # reason: a rate describing the next twelve months cannot depend on the window
