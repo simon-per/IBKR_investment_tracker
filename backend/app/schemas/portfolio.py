@@ -342,8 +342,15 @@ class DividendSecurityRow(BaseModel):
     # Not annualized: scaling up would invent income the schedule may not support.
     trailing_yield_partial: bool = False
     days_held_in_ttm: Optional[int] = None
-    # TTM net over what the position cost. Higher than the trailing yield on a
-    # holding that has appreciated, which is the point of showing both.
+    # The projected next-12-month rate over what the position cost — the same numerator
+    # as `forward_yield_pct`, so the two differ only by their denominator and the gap
+    # between them is the holding's own appreciation.
+    #
+    # Deliberately NOT trailing income over current cost. Those describe different
+    # positions whenever the size changed inside the window: adding to a holding divides
+    # a smaller position's income by the finished position's cost and reads far too low,
+    # and a sell-and-rebuy is that at its most extreme. It also disagreed with the
+    # portfolio-level card, which has always been forward-over-cost.
     yield_on_cost_pct: Optional[float] = None
     share_pct: Optional[float] = None       # of the window's total (actual + forecast)
     next_pay_date: Optional[str] = None     # earliest projected payment, if any

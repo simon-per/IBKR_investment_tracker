@@ -1198,12 +1198,30 @@ class DividendService:
                     ttm_days_held.get(sid, 0) < TTM_FULL_COVERAGE_DAYS
                 ),
                 "days_held_in_ttm": ttm_days_held.get(sid),
-                # Same income over what the position cost rather than what it is
-                # worth: on an appreciated holding the two diverge, and the gap is
-                # the part a current-yield figure hides.
+                # The FORWARD annual rate over what the position cost — which is what
+                # "yield on cost" means, and what the portfolio-level card divides.
+                #
+                # It used to be trailing income over current cost, and those two
+                # describe different positions the moment the position size changes
+                # inside the window. Adding to a holding divides a small position's
+                # income by the finished position's cost, so the figure reads far too
+                # low: on this account MCO showed 0.35% against a real forward 0.84%,
+                # SPGI 0.53% against 0.93% — nine of fifteen rows understated, none of
+                # them badged, because the `†` partial marker was only ever on the
+                # trailing *yield* column. Selling and rebuying is the same defect at
+                # its most extreme: the income was earned on shares bought cheaply and
+                # is then divided by the cost of the shares that replaced them.
+                #
+                # Forward over current cost has no such mismatch — the projection is
+                # sized on the shares held now, and `cost` is what those shares cost.
+                # It also makes this column agree with the Performance tab's *Yield on
+                # Cost* card, which computed forward-over-cost from the day it shipped;
+                # two figures with one name and two definitions is the failure this
+                # codebase names first.
                 "yield_on_cost_pct": (
-                    round(float(ttm / cost * 100), 2)
-                    if cost and cost > 0 and ttm > 0 else None
+                    round(float(next_12m_by_sec.get(sid, Decimal("0")) / cost * 100), 2)
+                    if cost and cost > 0 and next_12m_by_sec.get(sid, Decimal("0")) > 0
+                    else None
                 ),
                 "share_pct": (
                     round(float((row["net"] + row["forecast_net"]) / window_total * 100), 1)

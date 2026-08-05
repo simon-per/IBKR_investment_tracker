@@ -101,12 +101,35 @@ def test_unsanitized_trade_subcategory_breaks_ibflex():
         parser.parse(_TRADES)
 
 
-def test_sanitized_trade_parses_and_reports_dropped_attribute():
-    sanitized, warnings = _svc()._sanitize_flex_xml(_TRADES)
+def test_sanitized_trade_parses_and_records_the_dropped_attribute():
+    """
+    `subCategory` is not a field any extractor reads, so dropping it cannot change a
+    number — it is recorded, not warned about. Reporting it as a warning on every sync
+    (27 of them, on one line, for ever) is what taught the reader to skip the banner
+    that also carries a skipped tax lot.
+    """
+    svc = _svc()
+    sanitized, warnings = svc._sanitize_flex_xml(_TRADES)
 
     statement = _statement(sanitized)  # must not raise
     assert len(statement.Trades) == 1
-    assert any('Trade.subCategory' in w for w in warnings)
+    assert any('Trade.subCategory' in n for n in svc.last_schema_notes)
+    assert not any('Trade.subCategory' in w for w in warnings)
+
+
+def test_dropping_an_attribute_the_ingest_reads_is_still_loud():
+    """
+    The other half, and the reason the classification is worth having: an unparseable
+    value on a field we DO read changes what is ingested, so it must reach warnings[].
+    A CashTransaction whose `type` ibflex cannot convert is skipped outright by
+    extract_cash_transactions — a dividend that silently never arrives.
+    """
+    svc = _svc()
+    _, warnings = svc._sanitize_flex_xml(_UNKNOWN_CASH_TYPE)
+
+    assert any('CashTransaction.type' in w for w in warnings), warnings
+    assert any('data may be affected' in w for w in warnings)
+    assert not any('CashTransaction.type' in n for n in svc.last_schema_notes)
 
 
 @pytest.mark.parametrize('raw', [_CASH_TRANSACTIONS, _CORPORATE_ACTIONS])
@@ -345,11 +368,14 @@ def test_attribute_counts_exclude_rows_that_were_already_dropped():
         + '</Trades>'
     )
 
-    _, warnings = _svc()._sanitize_flex_xml(raw)
+    svc = _svc()
+    svc._sanitize_flex_xml(raw)
 
-    # One surviving row carries subCategory, not all three.
-    assert any('Trade.subCategory x1' in w for w in warnings)
-    assert not any('Trade.subCategory x3' in w for w in warnings)
+    # One surviving row carries subCategory, not all three. Counted in the notes now
+    # rather than the warnings, since subCategory is a field nothing reads.
+    notes = svc.last_schema_notes
+    assert any('Trade.subCategory x1' in n for n in notes), notes
+    assert not any('Trade.subCategory x3' in n for n in notes)
 
 
 def test_rows_without_level_of_detail_are_never_dropped():

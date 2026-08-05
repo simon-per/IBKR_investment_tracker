@@ -1,6 +1,8 @@
 # Working state
 
-**Last updated: 2026-08-05 — everything below is deployed and verified in the browser on production.
+**Last updated: 2026-08-05 (later) — the sync's permanent 27-attribute warning is gone (only drops
+that can change ingested data are warnings now) and yield on cost no longer falls when you add to a
+holding. Everything else below is deployed and verified in the browser on production.
 Beta shows a value for the first time (β 1.03 / r 0.74 vs S&P 500; it was refused by an FX artefact,
 never by a thin window); the Performance tab reports the portfolio's dividend rate (*Dividend Yield*
 and *Yield on Cost*, replacing *Effective Holdings*, which moved into the *Top 5 Weight* footnote);
@@ -214,6 +216,44 @@ Value* card's; they were byte-identical when this shipped, and if they drift the
 way a user can see. Beware comparing a `pct` to an `annual_eur` fetched minutes apart — the window
 rolls with `as_of`, so the total moves by a cent or two across a date boundary. That is the rolling
 figure working, not a rounding bug.
+
+## Shipped 2026-08-05 — the permanent sync warning, and a yield on cost that punished buying more
+
+Two reported issues, both real, and neither where it looked.
+
+**1. The 27-attribute warning on every sync.** The sanitizer was working exactly as designed — ibflex
+0.15 cannot model `figi`, `serialNumber`, `weight`, `subCategory`, `Trade.notes` and the rest, and
+dropping them is what stops one schema addition aborting the whole document. The defect was that all
+of it went into `warnings[]`, so a healthy sync carried a permanent unreadable banner. **A warning
+that is always present and never actionable trains the reader to skip the banner** — the same banner
+that carries a skipped tax lot or an unconvertible dividend, which is the only reason it exists.
+
+Drops are now classified by consequence: loud when the attribute is one the extractors read
+(`INGESTED_ATTRS`), recorded in the run's `details` as `flex_schema_notes` otherwise. All 27 on this
+account are cosmetic, so the banner should be **empty** after the next sync.
+
+The guard matters more than the fix, because the two directions are not symmetric — a spurious entry
+is merely noisy, a missing one makes a real problem silent. `tests/test_flex_attr_coverage.py`
+AST-walks the extractors and intersects with ibflex's own dataclass fields rather than trusting the
+map, **and caught a genuine omission on its first run**: `extract_transfers` reads `Transfer.date`,
+which the hand-written map had discarded as a Python builtin.
+
+**2. Yield on cost fell when you added to a holding.** Asked about sell-and-rebuy; the same defect was
+already live on **nine of fifteen rows**. It divided income *already received* by *current* cost, and
+those describe different positions once the size changes: MCO read 0.35% against a real forward rate
+of 0.84%, SPGI 0.53% against 0.93%. Unbadged, too — the `†` partial marker was only ever on the
+trailing yield column. It also disagreed with the Performance card, which has always been
+forward-over-cost: one name, two definitions, two screens.
+
+Now forward-over-cost everywhere, so the gap against the yield beside it is appreciation and nothing
+else. Sell-and-rebuy at a higher price still lowers it, which is the honest answer — more capital
+committed for the same income — but it now equals exactly the new cost's rate rather than a blend.
+
+Backend 705 → 721.
+
+**What to check after it deploys:** the sync banner is gone (`/api/scheduler/history` should show
+`flex_schema_notes` populated in `details` while `warnings` is empty), and every dividend row
+satisfies `forward_yield_pct ÷ yield_on_cost_pct == market value ÷ cost`.
 
 ## Known rough edges (accepted, not bugs)
 
@@ -748,6 +788,12 @@ detail; this exists so the next session knows what just moved without reading it
 confirmed) and gets deleted once nothing in it is outstanding: these lines are permanent, so don't
 "tidy up" the overlap by deleting the wrong one.
 
+- **2026-08-05 (later)** — two reported issues, neither where it looked. The 27-attribute sync warning
+  was the sanitizer working correctly but reporting harmlessly-dropped fields as warnings on every
+  sync, which is how a banner stops being read; drops are now classified by whether the ingest reads
+  the field, and the coverage guard caught a real omission in the map on its first run. And yield on
+  cost divided received income by current cost, so *adding* to a holding dragged it down — live on
+  nine of fifteen rows, and disagreeing with the Performance card that shipped forward-over-cost.
 - **2026-08-05** — shipped and verified the dividend-rate cards and the beta fix on production
   (β 1.03 / r 0.74, its first value ever, landing within a hundredth of what the fix predicted). Also
   killed a `next_12m_vs_ttm_pct: -100.0` the public API served whenever `?forecast=false`: a zero
@@ -779,11 +825,3 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
   where there were none). That run also exposed the public `POST /api/market-data/sync` carrying its
   own copy of the loop with no breaker — extracted to `MarketDataService.sync_securities`.
   Suites 664 → 684.
-- **2026-08-04 (late)** — clamped the portfolio chart's negative axis, which turned out to be
-  reserving a fifth of the plot for a band the data cannot reach (+1,122 minimum, axis floor
-  −20,000 on a phone): padding is a share of the whole range and `niceTicks` rounds the minimum
-  *out* to a step multiple. Then three things found by looking at what a pass actually reports —
-  `settings.log_level` configured nothing so every app INFO line was discarded in production,
-  Docker had no log rotation to absorb turning it on, and `prices_fetched` counted rows in the
-  window rather than rows written. Backend 684 → 689, frontend 308 → 316; `axis` 8/8, `a11y`
-  17/17, `sweep` 16/16, `mobile` 45/45 against production.

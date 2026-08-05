@@ -392,7 +392,14 @@ export interface DividendSecurityRow {
    */
   trailing_yield_partial: boolean;
   days_held_in_ttm: number | null;
-  /** TTM net over what the position cost, rather than what it is worth now. */
+  /**
+   * Projected next-12-month income over what the position cost — the same numerator as
+   * `forward_yield_pct`, so the gap between them is the holding's appreciation, and the
+   * same definition the Performance tab's *Yield on Cost* card uses.
+   *
+   * Not trailing income over current cost: those describe different positions once the
+   * size changes inside the window, which understated nine of fifteen rows.
+   */
   yield_on_cost_pct: number | null;
   /** Share of the window's total (actual + forecast). */
   share_pct: number | null;

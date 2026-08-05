@@ -326,8 +326,35 @@ unrecognised field kills the whole sync, open positions included. IBKR has drift
    both would **double-count trades and realized P&L** — but keeps them if they're all there is, so a
    populated section is never emptied.
 
-It returns the original bytes untouched when nothing changed, never raises, and reports every drop via
-`warnings[]` (surfaced in the sync response). **Don't patch attribute names one by one** — it's generic.
+It returns the original bytes untouched when nothing changed, never raises, and reports drops that
+**can change ingested data** via `warnings[]` (surfaced in the sync response). **Don't patch attribute
+names one by one** — it's generic.
+
+**Only material drops are warnings, and that distinction is the point.** ibflex 0.15 cannot model most
+of what IBKR now sends, so every statement drops ~27 attributes — `figi`, `serialNumber`, `weight`,
+`subCategory`, `commodityType`, `Trade.notes`… — and until 2026-08-05 all of them went into
+`warnings[]` as a single unreadable line, on every sync, for ever. A warning that is always present
+and never actionable is worse than no warning: it is exactly what teaches the reader to skip the
+banner that also carries a skipped tax lot or an unconvertible dividend, which is the whole reason
+`warnings[]` exists.
+
+So `INGESTED_ATTRS` maps each element to the attributes the extractors actually read, and a drop is
+loud only when it hits one. Everything else lands on `IBKRService.last_schema_notes` → `flex_notes` →
+the sync run's `flex_schema_notes` in `details`, where "did a *new* kind of thing start being
+dropped?" stays answerable without a permanent banner.
+
+The two failure directions are not symmetric, which decides how it is guarded. Listing a field we
+don't read merely re-creates the noise; **omitting one we do read makes a real problem silent** — an
+unparseable value on `CashTransaction.type` means `extract_cash_transactions` skips the row and a
+dividend never arrives. So `tests/test_flex_attr_coverage.py` doesn't trust the map: it AST-walks each
+extractor for attribute access, intersects with ibflex's own `__dataclass_fields__` (so `.append` and
+local names can't masquerade as schema), and fails if the map has drifted behind. It caught a real
+omission on its first run — `extract_transfers` reads `Transfer.date`, which a hand-written pass had
+discarded as a Python builtin.
+
+A latch (`last_schema_notes`) rather than a third return value only because eighteen call sites
+unpack a 2-tuple; same shape as `MarketDataService.rate_limited`, and declared in `__init__` so a
+service built via `__new__` in a test still has it.
 `_fix_currency_codes()` still runs first so `RUS`→`RUB` is repaired rather than dropped.
 
 Degradation is graceful: an unknown cash `type` becomes `None` and the row is skipped by
@@ -767,6 +794,26 @@ Four rules, each of which would be a wrong number the other way:
   payment *history*; a figure that moves with a market price is neither growth nor history, and
   `DividendKpiCards` — which answers *is this growing* — must not be handed a valuation ratio. Both are
   year-invariant, and `test_api_smoke.py` pins both from either end.
+
+**Yield on cost is forward-over-cost, and was trailing-over-cost until 2026-08-05.** That is the same
+numerator as the yield beside it, so the gap between the two is the holding's own appreciation and
+nothing else. The old definition divided *income already received* by the *current* cost, and those
+describe different positions the moment the position size changes inside the window:
+
+- **Adding to a holding** divides a small position's income by the finished position's cost, so the
+  figure reads far too low. Live on **nine of fifteen rows** when it was found — MCO showed 0.35%
+  against a real forward 0.84%, SPGI 0.53% against 0.93% — and *unbadged*, because the `†`
+  partial-coverage marker was only ever on the trailing yield column, never on yield on cost.
+- **Selling and rebuying** is the same defect at its most extreme: the income was earned on shares
+  bought cheaply and then divided by the cost of the shares that replaced them, so the result is
+  neither the old holding's yield nor the new one's. Under the current definition a rebuy at a higher
+  price lowers yield on cost to exactly the new cost's rate, which is the honest answer — more capital
+  committed for the same income.
+- **Trimming** runs the error the other way: the full position's income over the remnant's cost.
+
+It also silently disagreed with the Performance tab's *Yield on Cost* card, which has divided the
+forward projection by cost since it shipped — one name, two definitions, on two screens.
+Pinned equal on a single-security book by `test_the_row_and_the_card_agree_on_yield_on_cost`.
 
 `basis` is the same three-way flag as elsewhere (`net` | `mixed` | `gross_estimate`) with
 `gross_estimate_eur` quantifying it, because a projection sized from yfinance gross per-share deducts
@@ -1481,7 +1528,7 @@ raiser for that whole module, so an accidental network reach fails loudly; `/api
 is excluded because it lazy-fetches Yahoo on a cache miss, and POST routes are excluded because they
 start real syncs. **Add a case here when an endpoint's response shape changes.**
 
-Tests (699 backend + 342 frontend as of 2026-08-04, all offline — no IBKR, Yahoo or FX-provider
+Tests (721 backend + 343 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
 calls). Take the number the suite actually prints as your baseline, not this line — it has been stale
 by 200+ on both halves before:
 ```bash
@@ -1598,6 +1645,8 @@ Tests: `tests/test_currency_fallback.py`.
 | Symptom | Cause / fix |
 |---|---|
 | `has no attribute` / `is not a valid` in a sync | IBKR schema drift. `_sanitize_flex_xml` should absorb it — if not, extend it generically (never patch one field) + add a test |
+| A sync warns about dropped attributes | Only fields the ingest **reads** warn now, and that means data may really be affected — read the names. The ~27 harmless ones IBKR sends every time are in the run's `details` as `flex_schema_notes`, not the banner |
+| Yield on cost looks low after buying more, or after selling and rebuying | Fixed 2026-08-05. It is the *projected* annual rate over cost, so it tracks the shares held now. A rebuy at a higher price genuinely lowers it — more capital for the same income. If it still looks off, `forward_yield_pct ÷ yield_on_cost_pct` must equal market value ÷ cost for that row |
 | `Code=1025` | Token lockout, usually self-inflicted. **Wait**, don't retry. The schedule recovers it |
 | `Code=1001` | Not ready. Polled while retrieving; **fatal at the request step** — never re-request, a later job handles it |
 | Sync 200 but 0 trades | Flex Query section/period not covering them |

@@ -169,6 +169,11 @@ async def ingest_flex_statement(db, flex_data: Dict) -> Dict:
     warnings.extend(flex_data.get('flex_warnings') or [])
 
     return {
+        # Harmless schema drift: recorded in the run's details, deliberately NOT hoisted
+        # into warnings. IBKR sends ~27 fields ibflex cannot model on every statement,
+        # and reporting them as a warning that can never be acted on is what trains the
+        # reader to ignore the banner carrying a skipped tax lot.
+        "flex_schema_notes": flex_data.get('flex_notes') or [],
         "securities_synced": len(conid_to_security_id),
         "taxlots_synced": recon["taxlots_synced"],
         "taxlots_skipped": recon["taxlots_skipped"],

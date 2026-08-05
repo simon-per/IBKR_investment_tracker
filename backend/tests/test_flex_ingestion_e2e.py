@@ -132,7 +132,11 @@ async def _ingest(session) -> dict:
         await svc.extract_cash_transactions(flex_data), conid_to_security_id
     )
     await session.commit()
-    return {"warnings": warnings}
+    # `parse_flex_xml` carries the sanitizer's two channels separately — drift that can
+    # change ingested data, and drift that provably cannot. This helper assembles
+    # `flex_data` by hand, so it has to mirror that split or the distinction goes
+    # untested on the one path that parses a real IBKR document.
+    return {"warnings": warnings, "flex_schema_notes": svc.last_schema_notes}
 
 
 @pytest.mark.asyncio
@@ -141,8 +145,12 @@ async def test_real_flex_document_ingests_trades_and_withholding():
     try:
         result = await _ingest(session)
 
-        # The document only parses at all because the sanitizer removed subCategory.
-        assert any("subCategory" in w for w in result["warnings"])
+        # The document only parses at all because the sanitizer removed subCategory —
+        # but no extractor reads that field, so it is recorded in the run's details
+        # rather than raised as a warning nobody could ever act on.
+        assert any("subCategory" in n for n in result["flex_schema_notes"])
+        assert not any("subCategory" in w for w in result["warnings"])
+        # Dropping whole rows IS worth a warning: it changes what was ingested.
         assert any("aggregate <Trade> row(s)" in w for w in result["warnings"])
 
         trades = (await session.execute(select(Trade).order_by(Trade.trade_date))).scalars().all()

@@ -55,11 +55,14 @@ async def _seed_payment(session, security_id, on_date, net, source, gross=None, 
     })
 
 
-def _lot(security_id, open_date, qty, close_date=None):
+def _lot(security_id, open_date, qty, close_date=None, unit_cost="10"):
+    """`unit_cost` defaults to 10 so every existing caller is unchanged; it exists so a
+    rebuy can cost more per share than the lot it replaced."""
+    unit = Decimal(unit_cost)
     return TaxLot(
         security_id=security_id, open_date=open_date, quantity=Decimal(qty),
-        cost_basis=Decimal(qty) * 10, cost_basis_eur=Decimal(qty) * 10,
-        price_per_unit=Decimal("10"), currency="EUR",
+        cost_basis=Decimal(qty) * unit, cost_basis_eur=Decimal(qty) * unit,
+        price_per_unit=unit, currency="EUR",
         is_open=close_date is None, close_date=close_date,
     )
 
@@ -723,6 +726,121 @@ async def test_the_forward_yield_is_the_same_whichever_year_is_selected():
         )
         assert all_time["forward_yield"] == this_year["forward_yield"]
         assert all_time["forward_yield"] == last_year["forward_yield"]
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_yield_on_cost_is_not_dragged_down_by_adding_to_a_holding():
+    """
+    The defect this column had, live on nine of fifteen rows before it was fixed.
+
+    Trailing income over CURRENT cost compares two different positions the moment the
+    position grows: the income was earned while the holding was small, the cost is the
+    finished holding's. MCO read 0.35% against a real forward rate of 0.84%.
+
+    Forward over cost has no such mismatch — the projection is sized on the shares held
+    now, and `cost` is what those shares cost.
+    """
+    engine, session = await _make_session()
+    try:
+        # A tenth of the position for most of the year, the rest bought last month.
+        session.add(_lot(1, date(2025, 6, 1), "1"))          # cost 10
+        session.add(_lot(1, date(2026, 4, 1), "9"))          # cost 90 -> 100 total
+        session.add(_price(1, "20"))
+        await session.flush()
+        for d in QUARTERLY:
+            await _seed_payment(session, 1, d, "10.00", "ibkr")
+        await session.commit()
+
+        row = (await DividendService(session).get_dividend_breakdown(
+            include_forecast=True, as_of=AS_OF,
+        ))["securities"][0]
+
+        # Three payments of 10.00 landed inside the trailing year, two of them while the
+        # holding was a single share. Trailing income is therefore 30 — and the old
+        # definition divided that by the finished position's cost of 100, giving 30%.
+        #
+        # The projection instead scales the per-share rate to the shares held now, so it
+        # is 100 a quarter, 400 a year, and yield on cost is 400%. The replaced figure
+        # understated this holding by more than thirteenfold, which is the same shape as
+        # MCO's 0.35% against 0.84% on the real account — just larger because the
+        # fixture grows the position tenfold rather than by half.
+        assert row["yield_on_cost_pct"] == 400.00
+        assert round(30 / 100 * 100, 2) == 30.00           # what it used to report
+        # Over market value the same projection reads 400 / (10 x 20).
+        assert row["forward_yield_pct"] == 200.00
+        # Trailing income spans only 334 of the 350 days the flag requires, so the
+        # *trailing* yield stays badged. Yield on cost no longer needs that caveat.
+        assert row["trailing_yield_partial"] is True
+        assert row["trailing_yield_pct"] == 15.00          # 30 realised over 200
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_selling_and_rebuying_dearer_lowers_yield_on_cost_by_exactly_the_new_cost():
+    """
+    The case asked about directly. Selling and rebuying at a higher price *should* lower
+    yield on cost — you now have more capital committed for the same income — and the
+    number must reflect the new cost exactly, not a blend of the old holding's income
+    with the new holding's cost.
+
+    Under the old trailing definition the numerator still carried dividends earned on
+    the cheap shares that are gone, so the figure was neither the old yield nor the new
+    one. Here it is exactly the new one.
+    """
+    engine, session = await _make_session()
+    try:
+        # Bought 10 at 10 (cost 100), sold, rebought 10 at 25 (cost 250).
+        session.add(_lot(1, date(2025, 1, 2), "10", close_date=date(2026, 4, 20)))
+        session.add(_lot(1, date(2026, 4, 21), "10", unit_cost="25"))
+        session.add(_price(1, "25"))
+        await session.flush()
+        for d in QUARTERLY:
+            await _seed_payment(session, 1, d, "10.00", "ibkr")
+        await session.commit()
+
+        row = (await DividendService(session).get_dividend_breakdown(
+            include_forecast=True, as_of=AS_OF,
+        ))["securities"][0]
+
+        # 40 projected over the 250 actually committed now — not over the original 100,
+        # and not a mixture. Yield on cost equals the market yield because the rebuy
+        # reset cost to market, which is the honest answer.
+        assert row["yield_on_cost_pct"] == 16.00
+        assert row["forward_yield_pct"] == 16.00
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_row_and_the_card_agree_on_yield_on_cost():
+    """
+    They are one figure on two screens, and they were computed two different ways: the
+    Performance card divided the forward projection by cost from the day it shipped
+    while this column divided trailing income. Two definitions under one name is the
+    failure this codebase names first, so pin them equal on a single-security book,
+    where the weighted aggregate must reduce to the one row exactly.
+    """
+    engine, session = await _make_session()
+    try:
+        session.add(_lot(1, date(2025, 1, 2), "10"))
+        session.add(_price(1, "20"))
+        await session.flush()
+        for d in QUARTERLY:
+            await _seed_payment(session, 1, d, "10.00", "ibkr")
+        await session.commit()
+
+        out = await DividendService(session).get_dividend_breakdown(
+            include_forecast=True, as_of=AS_OF,
+        )
+        row, fy = out["securities"][0], out["forward_yield"]
+        assert row["yield_on_cost_pct"] == fy["on_cost_pct"]
+        assert row["forward_yield_pct"] == fy["pct"]
     finally:
         await session.close()
         await engine.dispose()

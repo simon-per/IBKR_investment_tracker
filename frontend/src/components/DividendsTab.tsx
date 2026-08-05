@@ -233,7 +233,12 @@ function dividendColumns(deps: {
       cellClassName: 'text-muted-foreground',
       hint: {
         description:
-          'Yield on cost: trailing 12-month net over what the position cost — higher than the current yield on a holding that has appreciated.',
+          'Yield on cost: the projected next-12-month income over what the position cost — ' +
+          'higher than Fwd yield on a holding that has appreciated, and the same figure the ' +
+          'Performance tab shows for the whole portfolio. It uses the projection rather than ' +
+          'income already received because those describe different positions once you add to ' +
+          'a holding or sell and rebuy it: the income was earned on shares you no longer hold ' +
+          'at that cost.',
       },
       cell: (row) =>
         row.yield_on_cost_pct != null ? `${row.yield_on_cost_pct.toFixed(2)}%` : '—',

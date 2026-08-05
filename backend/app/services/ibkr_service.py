@@ -83,6 +83,65 @@ _AGGREGATE_LEVELS_OF_DETAIL = {
 }
 
 
+# Every attribute the extractors below actually read, per element. This is what makes a
+# dropped attribute *material* rather than cosmetic: ibflex 0.15 (2021) cannot model
+# most of what IBKR now sends, and reporting all of it as a warning on every sync buried
+# the one kind that matters — an attribute we read, dropped for an unparseable value,
+# which silently changes a figure.
+#
+# Keep it exact rather than generous. Listing a field we do not read only re-creates the
+# noise; omitting one we do read makes a real problem quiet, so
+# `tests/test_flex_attr_coverage.py` derives the truth from the extractors' own source
+# (an AST walk intersected with ibflex's dataclass fields) and fails if this drifts.
+INGESTED_ATTRS: Dict[str, frozenset] = {
+    "OpenPosition": frozenset({
+        "assetCategory", "conid", "currency", "description", "isin", "listingExchange",
+        "symbol", "costBasisMoney", "costBasisPrice", "openDateTime", "position",
+        "reportDate",
+    }),
+    "SecurityInfo": frozenset({
+        "assetCategory", "conid", "currency", "description", "isin", "listingExchange",
+        "symbol",
+    }),
+    "Trade": frozenset({
+        "assetCategory", "buySell", "conid", "currency", "fifoPnlRealized",
+        "ibCommission", "proceeds", "quantity", "reportDate", "symbol", "tradeDate",
+        "tradeID", "tradePrice", "transactionID",
+    }),
+    "CorporateAction": frozenset({
+        "actionDescription", "assetCategory", "conid", "currency", "dateTime",
+        "proceeds", "quantity", "reportDate", "symbol", "transactionID", "type", "value",
+    }),
+    "CashTransaction": frozenset({
+        "amount", "conid", "currency", "dateTime", "description", "reportDate",
+        "settleDate", "symbol", "transactionID", "type",
+    }),
+    "Transfer": frozenset({
+        # `date` is real schema here, not a Python builtin — it is the transfer's own
+        # date, which `_transfer_to_flow` prefers over reportDate. A first hand-written
+        # pass at this map dropped it as noise; the coverage test caught it, which is
+        # the entire reason that test derives its truth from the source.
+        "cashTransfer", "company", "conid", "currency", "date", "direction",
+        "positionAmount", "quantity", "reportDate", "symbol", "transactionID", "type",
+    }),
+    # Read by parse_flex_xml itself, not by an extractor.
+    "FlexStatement": frozenset({"accountId", "fromDate", "toDate"}),
+}
+
+
+def _is_ingested_attr(key: str) -> bool:
+    """
+    Would dropping ``key`` ("Trade.notes") change what we ingest?
+
+    An element we parse nothing from cannot be harmed by losing a field, so an unknown
+    tag is cosmetic by definition — the only way that becomes wrong is a new extractor
+    without a matching INGESTED_ATTRS entry, which is what the coverage test exists to
+    catch.
+    """
+    tag, _, name = key.partition(".")
+    return name in INGESTED_ATTRS.get(tag, frozenset())
+
+
 def _dec(value) -> Optional[Decimal]:
     """Coerce an ibflex value to Decimal, tolerating None/blank."""
     if value is None or value == "":
@@ -124,6 +183,13 @@ class IBKRService:
         """
         self.token = token or settings.ibkr_token
         self.query_id = query_id or settings.ibkr_query_id
+        # Set by _sanitize_flex_xml and read by parse_flex_xml on the next line: the
+        # inventory of harmless schema drift, which belongs in the sync record rather
+        # than the warnings banner. A latch rather than a third return value because
+        # eighteen call sites unpack a 2-tuple; same shape as
+        # MarketDataService.rate_limited, and declared here so a service built via
+        # __new__ in a test still has it.
+        self.last_schema_notes: List[str] = []
 
     @staticmethod
     def _lockout_error(e: ResponseCodeError) -> RuntimeError:
@@ -264,8 +330,18 @@ class IBKRService:
         Returns (xml, warnings). The original bytes are returned untouched when
         there was nothing to drop, and this never raises: on any failure the input
         is returned unchanged so a sanitizer bug can't be worse than not having one.
+
+        **Only drops that can change ingested data become warnings.** IBKR sends dozens
+        of fields ibflex 0.15 never modelled — `figi`, `serialNumber`, `weight`,
+        `commodityType` — and this account's every sync reported all 27 of them, in one
+        unreadable line, for ever. A warning that is always present and never actionable
+        is worse than no warning: it is what teaches the reader to skip the banner that
+        also carries a skipped tax lot or an unconvertible dividend. So a drop is only
+        loud when the attribute is one the extractors actually read (INGESTED_ATTRS);
+        the rest land on `last_schema_notes` for the sync record and the log.
         """
         warnings: List[str] = []
+        self.last_schema_notes = []
         try:
             root = ET.fromstring(xml_content)
             # Materialize the walk before mutating, so removals can't disturb it.
@@ -335,12 +411,30 @@ class IBKRService:
                             if isinstance(exc, KeyError) else str(exc),
                         )
 
-            if dropped_attrs:
+            # Split by consequence, not by cause. Both kinds were dropped for the same
+            # reason — ibflex can't model them — but only one kind can change a number.
+            material = {k: v for k, v in dropped_attrs.items() if _is_ingested_attr(k)}
+            cosmetic = {k: v for k, v in dropped_attrs.items() if k not in material}
+
+            if material:
                 detail = ', '.join(
                     f"{key} x{count} ({drop_reasons.get(key, 'rejected')})"
-                    for key, count in sorted(dropped_attrs.items())
+                    for key, count in sorted(material.items())
                 )
-                warnings.append(f"dropped IBKR attribute(s) this ibflex version can't parse: {detail}")
+                warnings.append(
+                    f"dropped IBKR attribute(s) the ingest READS and this ibflex version "
+                    f"can't parse — data may be affected: {detail}"
+                )
+            if cosmetic:
+                # One line, and it names the tags rather than 27 fully-qualified fields:
+                # the actionable question is "did a NEW kind of thing start being
+                # dropped", and the full inventory is in the sync run's details.
+                tags = sorted({k.split('.', 1)[0] for k in cosmetic})
+                self.last_schema_notes = [
+                    f"{len(cosmetic)} unmodelled IBKR attribute(s) on <{'>, <'.join(tags)}> "
+                    f"dropped; none are fields the ingest reads, so nothing was affected: "
+                    + ', '.join(f"{k} x{v}" for k, v in sorted(cosmetic.items()))
+                ]
 
             for warning in warnings:
                 logger.warning(f"Flex XML sanitizer: {warning}")
@@ -492,7 +586,11 @@ class IBKRService:
             'account_id': statement.accountId if hasattr(statement, 'accountId') else None,
             'from_date': statement.fromDate if hasattr(statement, 'fromDate') else None,
             'to_date': statement.toDate if hasattr(statement, 'toDate') else None,
-            'flex_warnings': flex_warnings,  # Schema drift the sanitizer worked around
+            'flex_warnings': flex_warnings,  # Schema drift that could affect ingested data
+            # Drift that provably could not: fields no extractor reads. Recorded so
+            # "did something NEW start being dropped" stays answerable, without putting
+            # a permanent banner on a healthy sync.
+            'flex_notes': getattr(self, 'last_schema_notes', []),
         }
 
     async def extract_securities(self, flex_data: Dict) -> List[Dict]:
