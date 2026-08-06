@@ -361,13 +361,19 @@ was wrong on current data, which is what made holding them safe.
 The batch rebased onto one remote docs commit, conflicting only in this file's header. **Nothing in
 the sixteen threads below is outstanding** — they are kept as the record of what moved and why.
 
-**What to check on production now that they are live**, in rough order of how visible the change is:
+**Checked on production 2026-08-06 straight after the deploy** — the first two are confirmed, the
+rest are what to look at next:
 
-- **The Activity tab loses 31 dividend rows** and its dividend total drops from ~113 to ~66 CHF
-  (Thread 14). That is the correction, not data loss.
-- **Yield on cost rises on nine of fifteen rows** (it was dividing received income by current cost).
-- **`unpriced_holdings` now rides on the summary, the timeline and attribution** — a yellow notice
-  above the KPI cards means a holding could not be valued, and its absence means the total is complete.
+- ✅ **The Activity tab lost about half its dividend rows** (Thread 14, compounded by Thread 13's
+  boundary-duplicate match): **87 → 44**. That is the correction, not data loss. The check worth
+  keeping is the *relationship* rather than a franc total, which goes stale silently: no row with
+  `source == 'yfinance_estimate'` may be dated on or after the era boundary. Latest surviving estimate
+  reads 2026-01-09 against a boundary of 2026-02-18.
+- ✅ **`unpriced_holdings` is on the summary, the timeline and attribution**, and currently reports
+  **0** — so the headline total covers the whole book. A yellow notice above the KPI cards is what a
+  non-zero looks like.
+- **Yield on cost should rise on nine of fifteen rows** (it was dividing received income by current
+  cost). Not yet eyeballed.
 - **Sharpe, Top 5 Weight and RSI now refuse rather than substituting a plausible number** — expect
   dashes where a `0.00` or a green `0.0%` used to sit on short ranges.
 
