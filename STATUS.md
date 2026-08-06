@@ -66,10 +66,25 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
   fault: the Flex window ends yesterday (now written up in CLAUDE.md's *The Flex Query*), so the
   statement downloaded that evening reads `to=2026-08-05` and contains none of them. A dry-run of it
   through `ingest_flex_xml` on production returned exactly what the 06:00 Berlin job had already
-  written — 36 securities, 979 lots, 13 trades, 7 cash flows — i.e. a no-op. **They should appear by
-  themselves at the 00:00 or 06:00 Berlin slot on 08-07**; the check is `max(trade_date)` in `trades`,
-  which sat at 2026-07-29 before they landed. A **1 META share** bought the same day is in the same
-  position — META itself is long held, so only the lot count and cost basis move.
+  written — a no-op. **Re-confirmed from the file itself on 08-06 evening**, because "the dry-run
+  changed nothing" is a weaker claim than it sounds (a dry-run reports rows *parsed*, not rows *new*):
+  the file's newest rows are `tradeDate=20260803..05`, and **every one of them is an FX pair**
+  (`KRW.CHF`, `USD.CHF`, `USD.TWD`) — `CASH` rows the parser correctly discards. Its last *stock* trade
+  is 07-29, which is exactly what production already holds, and all seven of its deposits are on record
+  too. So the file is a genuine no-op rather than an apparent one.
+
+  **They should appear by themselves at the 00:00 or 06:00 Berlin slot on 08-07** — **06:00 is the one
+  to count on.** 00:00 Berlin is 18:00 ET, only two hours after the US close, which may be too early
+  for IBKR to have finalised 08-06 into a statement; 06:00 (00:00 ET) has the whole overnight run
+  behind it. The check is `max(trade_date)` in `trades`, confirmed sitting at **2026-07-29** on
+  production tonight. A **1 META share** bought the same day is in the same position — META itself is
+  long held, so only its lot count and cost basis move.
+
+  **Expect a gap between 06:00 and 08:00 where the three are held but unpriced**, and expect the app to
+  *say so* rather than quietly understate: the IBKR-only slots deliberately touch no Yahoo, so prices
+  arrive with the 08:00 `full_sync`. In between, `unpriced_holdings` should read **3** and a yellow
+  notice should sit above the KPI cards. That is the completeness signal from this batch working, not a
+  fault — it read **0** tonight with everything priced.
 
   Both follow-ups are now **done ahead of the statement**, so nothing should need doing when it lands:
 
