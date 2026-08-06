@@ -62,6 +62,39 @@ def test_the_semiconductor_funds_held_here_are_both_mapped():
         assert get_etf_allocation(symbol)["sector"] == {"Technology": 100.0}
 
 
+def test_the_three_funds_bought_on_2026_08_06_are_mapped():
+    """
+    The same failure as SOXQ, caught before it lands rather than after.
+
+    VT, GRID and QTUM were bought on 2026-08-06. `sync_helper` never writes
+    `sector`/`country`, so an IBKR-ingested fund arrives with both NULL, and no sync can
+    repair it — `allocation_service` falls through to Yahoo `.info`, which carries no
+    sector or country for a fund. Without an entry here all three would land in the
+    unattributed buckets on the Allocation tab.
+    """
+    for symbol in ("VT", "GRID", "QTUM"):
+        assert is_known_etf(symbol), f"{symbol} was bought and never mapped"
+
+
+def test_the_two_ftse_global_funds_do_not_drift_apart():
+    """
+    VT tracks FTSE Global All Cap and VWCE tracks FTSE All-World: one index family, whose
+    regional weights differ only by small-cap inclusion. Their geographic blocks are
+    pinned equal deliberately, so editing one alone fails here instead of quietly making
+    one index look like two different portfolios depending on which wrapper is held.
+
+    Their *sector* blocks are deliberately NOT compared — those are measured per ticker
+    from Yahoo, so they may legitimately differ by a rounding or a rebalancing date.
+    """
+    assert (
+        get_etf_allocation("VT")["geographic"]
+        == get_etf_allocation("VWCE")["geographic"]
+    ), (
+        "VT and VWCE track the same FTSE global index family. If one gained better "
+        "regional data, the other belongs in the same commit."
+    )
+
+
 def test_an_unmapped_symbol_reports_itself_rather_than_guessing():
     # The caller branches on `is_known_etf`, so the None is the contract.
     assert not is_known_etf("NOT_AN_ETF")

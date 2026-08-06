@@ -1,6 +1,18 @@
 """
 Manual ETF allocation mappings for sector and geographic breakdown.
 These percentages are approximate based on ETF holdings and methodology.
+
+**The two dimensions are not equally well sourced, and the entries say which is which.**
+Yahoo's `Ticker(...).funds_data.sector_weightings` returns a real measured sector split for
+a fund, so a `sector` block can be copied from it and dated. It exposes **no country or
+region weights at all** (`equity_holdings` is valuation ratios, `asset_classes` is
+stock/bond/cash) — so every `geographic` block here is hand-derived, and the best available
+evidence is `top_holdings`, whose usefulness depends entirely on how much of the fund those
+ten names cover. That coverage is recorded per entry, because it is the difference between
+a measurement and a guess: GRID's top ten is 59.6% of the fund, QTUM's is 14.9%.
+
+Do not "improve" a geographic block from an ETF's *sector* data or from `.info` — a fund
+carries no `country`, which is exactly why the look-through table exists.
 """
 
 ETF_ALLOCATIONS = {
@@ -187,6 +199,90 @@ ETF_ALLOCATIONS = {
             "Healthcare": 5.0,
             "Consumer Defensive": 4.0,
             "Utilities": 2.0,
+        },
+    },
+
+    # Vanguard Total World Stock (VT) — bought 2026-08-06.
+    # Sector: Yahoo funds_data, 2026-08-06 (Technology carries the +0.01 rounding).
+    # Geographic: deliberately identical to VWCE above. VT tracks FTSE Global All Cap and
+    # VWCE tracks FTSE All-World — the same index family, differing by small-cap inclusion,
+    # which barely moves a regional weight. Two funds on one index disagreeing in this
+    # table would be this codebase's dominant failure mode in miniature, so they are
+    # pinned together on purpose: change one and change the other.
+    "VT": {
+        "asset_type": "ETF",
+        "geographic": {
+            "North America": 65.0,
+            "Europe": 16.0,
+            "Asia Pacific": 12.0,
+            "Emerging Markets": 7.0,
+        },
+        "sector": {
+            "Technology": 31.19,
+            "Financial Services": 15.72,
+            "Industrials": 11.74,
+            "Consumer Cyclical": 8.99,
+            "Healthcare": 8.31,
+            "Communication Services": 7.4,
+            "Consumer Defensive": 4.53,
+            "Basic Materials": 3.81,
+            "Energy": 3.55,
+            "Utilities": 2.48,
+            "Real Estate": 2.28,
+        },
+    },
+
+    # First Trust NASDAQ Clean Edge Smart Grid Infrastructure (GRID) — bought 2026-08-06.
+    # Sector: Yahoo funds_data, 2026-08-06. Its 0.01 Basic Materials sliver is folded into
+    # Industrials rather than kept — a 0.01% category is noise that renders as a treemap
+    # tile indistinguishable from a real one.
+    # Geographic: derived from top_holdings, which covers **59.6%** of the fund — the
+    # strongest basis of the three. Within it the split is 30.2 North America
+    # (JCI/ETN/PWR/NVT/HUBB) against 29.4 Europe (Schneider FR, ABB CH, E.ON DE,
+    # National Grid GB, Prysmian IT), i.e. almost exactly even. Note JCI, ETN and NVT are
+    # Irish plcs counted by their **US listing**, consistent with the rest of this table
+    # and with `currencyExposure.ts`: where a thing trades is what we can actually observe.
+    # The tail is given a little Asia Pacific, which the measured decile has none of.
+    "GRID": {
+        "asset_type": "ETF",
+        "geographic": {
+            "North America": 48.0,
+            "Europe": 42.0,
+            "Asia Pacific": 10.0,
+        },
+        "sector": {
+            "Industrials": 66.46,
+            "Utilities": 18.76,
+            "Technology": 11.5,
+            "Consumer Cyclical": 3.28,
+        },
+    },
+
+    # Defiance Quantum (QTUM) — bought 2026-08-06.
+    # Sector: Yahoo funds_data, 2026-08-06.
+    # Geographic: the weakest block in this file, and flagged rather than dressed up. The
+    # top ten covers only **14.9%** of the fund, so it is a thin sample — mitigated, but
+    # only partly, by the fund being near equal-weighted (every top holding sits in
+    # 1.41-1.62%), which makes that decile more representative of the whole than a
+    # cap-weighted fund's would be. Within it: 12.0 North America, 1.5 Asia Pacific
+    # (NEC 6701.T), 1.4 Europe (Airbus AIR.PA). The tail of a quantum-computing index
+    # carries more Japanese and European names than the head does, so Asia Pacific and
+    # Europe are set above their measured share deliberately.
+    # If this matters later, replace it with Defiance's own published country weights;
+    # that is a real source and this is an estimate.
+    "QTUM": {
+        "asset_type": "ETF",
+        "geographic": {
+            "North America": 65.0,
+            "Asia Pacific": 20.0,
+            "Europe": 15.0,
+        },
+        "sector": {
+            "Technology": 77.75,
+            "Industrials": 10.95,
+            "Communication Services": 7.16,
+            "Consumer Cyclical": 2.76,
+            "Healthcare": 1.38,
         },
     },
 }

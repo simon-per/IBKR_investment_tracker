@@ -1,10 +1,11 @@
 # Working state
 
-**Last updated: 2026-08-05 (loop audit).** **Fixes are committed and NOT pushed — count them with
-`git log --oneline origin/main..main`**, never from a number written here; this line said "eight"
-while thirteen were held, which is the staleness CLAUDE.md warns about in exactly these words. See
-*Held locally* below; they are batched deliberately and none is wrong on current data. Everything
-else listed here is deployed. Newest first: a backend outage no longer deletes the twelve
+**Last updated: 2026-08-06 (evening).** **The /loop audit's batch is pushed and deployed** — the
+section below still titled *HELD LOCALLY* is history now, not a to-do; `git log --oneline
+origin/main..main` is the only trustworthy count and it is the reason that heading is not a number.
+Newest first: VT, GRID and QTUM are mapped in the ETF look-through table ahead of the statement that
+will create them (bought 08-06, **not on record yet** — see *Watching*); a backend outage no longer
+deletes the twelve
 Performance-tab metrics from the page instead of reporting that it failed; the Activity ledger no
 longer lists every
 dividend twice (it was the one reader missing the era splice, overstating dividend income 72%); yield on
@@ -67,21 +68,24 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
   through `ingest_flex_xml` on production returned exactly what the 06:00 Berlin job had already
   written — 36 securities, 979 lots, 13 trades, 7 cash flows — i.e. a no-op. **They should appear by
   themselves at the 00:00 or 06:00 Berlin slot on 08-07**; the check is `max(trade_date)` in `trades`,
-  which sat at 2026-07-29 before they landed.
+  which sat at 2026-07-29 before they landed. A **1 META share** bought the same day is in the same
+  position — META itself is long held, so only the lot count and cost basis move.
 
-  Two things to look at once they do, in this order:
+  Both follow-ups are now **done ahead of the statement**, so nothing should need doing when it lands:
 
-  - **Prices need no mapping and should just work.** All three are US listings, and every US listing on
-    this account (18 of them) resolves through tier 2's empty suffix to the bare Yahoo ticker with no
-    `ticker_mappings` row at all — the SOXQ shape, where `_get_yahoo_ticker_variations()` yields a
-    single candidate so the bare-symbol auto-save that poisoned SBI is never reached. If any of the
-    three shows `market_price: null` after the next 08:00, *then* check the mapping.
-  - **`app/etf_mappings.py` has no entry for any of them**, so `get_etf_allocation` returns `None` and
-    `allocation_service` falls through to yfinance `.info`, which carries no sector or country for a
-    fund — three ETFs' worth of the book lands in the unattributed buckets on the Allocation tab.
-    Fixing it means hand-written geographic splits, which is why SOXQ's entry is still filed under
-    *Wants Simon's judgement* rather than treated as data. VT is a total-world fund, so its split is
-    the one worth getting from the fund's own country weights rather than estimating.
+  - **Prices need no mapping, and this is now verified rather than predicted.** All three were probed
+    directly on 2026-08-06 with the user's explicit permission (rule 1): the bare tickers `VT`, `GRID`
+    and `QTUM` all resolve, all report **USD**, on NYSEArca / NasdaqGM / NasdaqGM, with a full five-day
+    daily history. That is the SOXQ shape — tier 2's empty suffix yields a single candidate, so the
+    bare-symbol auto-save that poisoned SBI is never reached. If any shows `market_price: null` after
+    the next 08:00, *then* check the mapping.
+  - **`app/etf_mappings.py` now has all three.** Sector blocks are Yahoo's own measured
+    `funds_data.sector_weightings`, dated 08-06. Geographic blocks are hand-derived, because Yahoo
+    exposes **no country or region weights for a fund at all** — so each entry records how much of the
+    fund its top ten actually covers, which is what separates GRID (**59.6%**, a real measurement) from
+    QTUM (**14.9%**, an estimate that says so). VT is pinned equal to VWCE and test-enforced that way:
+    they track the same FTSE global index family, so the two drifting apart in this table would be the
+    codebase's dominant failure mode in miniature.
 
 - **The deploy guard now covers all nine slots, installed 2026-08-04.** `/root/auto-deploy.sh` is
   byte-identical to `ops/auto-deploy.sh` (verified by sha256), so the copy `test_deploy_guard_hours.py`
@@ -347,17 +351,28 @@ already missing) is fixed — adding a case that reads a separately-fetched map 
 
 Backend 723 → 726, frontend 343 → 352.
 
-## HELD LOCALLY, NOT PUSHED — fixes from a /loop audit, 2026-08-05
+## Shipped 2026-08-06 — the /loop audit batch, pushed after being held
 
-`git log --oneline origin/main..main` — **read the count from there, not from this heading**, which
-said "eight" for five commits past the point it was true. Each is committed, tested and
-mutation-verified; **none is wrong on current data**, which is why they were batched rather than
-shipped one at a time — `deploy.sh`
-does a full `down` + `build --no-cache`, so a push costs ~90s of downtime and a 10-minute loop pushing
-each pass would have taken the dashboard down ~9 minutes an hour.
+**Pushed and deployed on 2026-08-06 evening.** They were batched rather than shipped one at a time
+because `deploy.sh` does a full `down` + `build --no-cache`, so each push costs ~90s of downtime and a
+10-minute audit loop pushing every pass would have taken the dashboard down ~9 minutes an hour. None
+was wrong on current data, which is what made holding them safe.
 
-**Two of them are a matched pair** (`adb992c` adds the completeness signal, `557f82d` acts on it), so
-shipping one without the other is half a fix. Ship the batch together.
+The batch rebased onto one remote docs commit, conflicting only in this file's header. **Nothing in
+the sixteen threads below is outstanding** — they are kept as the record of what moved and why.
+
+**What to check on production now that they are live**, in rough order of how visible the change is:
+
+- **The Activity tab loses 31 dividend rows** and its dividend total drops from ~113 to ~66 CHF
+  (Thread 14). That is the correction, not data loss.
+- **Yield on cost rises on nine of fifteen rows** (it was dividing received income by current cost).
+- **`unpriced_holdings` now rides on the summary, the timeline and attribution** — a yellow notice
+  above the KPI cards means a holding could not be valued, and its absence means the total is complete.
+- **Sharpe, Top 5 Weight and RSI now refuse rather than substituting a plausible number** — expect
+  dashes where a `0.00` or a green `0.0%` used to sit on short ranges.
+
+**Two were a matched pair** (`adb992c` adds the completeness signal, `557f82d` acts on it), so they
+had to ship together; they did.
 
 ### Thread 1 — a zero standing in for "unknown"
 
@@ -1206,6 +1221,14 @@ detail; this exists so the next session knows what just moved without reading it
 confirmed) and gets deleted once nothing in it is outstanding: these lines are permanent, so don't
 "tidy up" the overlap by deleting the wrong one.
 
+- **2026-08-06 (evening)** — pushed the sixteen-thread audit batch (25 commits, rebased over one remote
+  docs commit, conflicting only in this file's header) and prepared for three ETFs that do not exist
+  yet. The request was to backfill VT/GRID/QTUM prices *first* and ingest the statement after; the
+  order is not available, because `market_prices` is keyed on a `security_id` and only the statement
+  creates one. What **was** available without the securities: proving the three bare tickers resolve on
+  Yahoo in USD, and writing their look-through entries. Worth remembering as a shape — "fetch the data
+  for X" can be blocked by X not existing yet, and the useful move is to do every part that does not
+  depend on it rather than to wait.
 - **2026-08-06** — asked to ingest a statement carrying that day's VT/GRID/QTUM buys and a fresh
   deposit; the statement could not contain them. Generated 18:27 Berlin, it reads `to=2026-08-05` with
   every open-position row stamped `reportDate=20260805`, because the rolling period is the 30 days
@@ -1232,16 +1255,3 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
   the field, and the coverage guard caught a real omission in the map on its first run. And yield on
   cost divided received income by current cost, so *adding* to a holding dragged it down — live on
   nine of fifteen rows, and disagreeing with the Performance card that shipped forward-over-cost.
-- **2026-08-05** — shipped and verified the dividend-rate cards and the beta fix on production
-  (β 1.03 / r 0.74, its first value ever, landing within a hundredth of what the fix predicted). Also
-  killed a `next_12m_vs_ttm_pct: -100.0` the public API served whenever `?forecast=false`: a zero
-  numerator over a real base, i.e. "dividends will fall 100%" manufactured by a flag rather than
-  measured. And gave `/api/dividends/breakdown` the contract test its eight nested models never had —
-  proven by mutation, after it caught its own fixture passing vacuously.
-- **2026-08-04** — Beta was backfilled, and the "thin window" it reported was never the reason. The
-  card's own count was the clue: 9 flow-free days out of a year, against 147 days the portfolio
-  genuinely sat still. The benchmark's flow was inferred from its cost-basis line, which the backend
-  projects into the base currency at each point's date while the portfolio's converts at each lot's
-  `open_date` — so under CHF the inference measured EUR/CHF, not flow, and beta could never have
-  rendered. One line in `portfolioKpis.ts`; the backend's two conversion rules are recorded in *Worth
-  doing next* rather than fixed.
