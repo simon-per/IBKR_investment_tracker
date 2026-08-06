@@ -28,6 +28,27 @@ Protections in `market_data_service.py`: random 1-3s delay per request, 2-4s bet
 User-Agent, rate-limit detection that aborts the run, and incremental caching (only missing dates).
 `yfinance` must stay **>= 1.1.0**.
 
+**Every service that loops against Yahoo must abandon the pass on a 429, and until
+2026-08-05 only `market_data_service` did.** Six services import `yfinance`;
+`fundamentals` (~5 endpoints per security, the most expensive), `analyst ratings`,
+`watchlist`, `allocation`, `dividends` and the scheduler's benchmark warm-up all caught
+the error, logged it, and asked the next one seconds later — the exact shape fixed for
+market data, five times over. The predicate now lives once in
+`app/services/yahoo_rate_limit.py` and `tests/test_yahoo_rate_limit_family.py` walks the
+AST for any module importing `yfinance` without consulting it, so a seventh service is
+caught without anyone remembering.
+
+Two details are load-bearing. **The marker list stays narrow** (`429`, `too many
+requests`, `rate limit`, `blocked`) and deliberately excludes the `Expecting value: line
+1 column 1` and 404 symptoms named above: `_try_fetch_yahoo` uses the same verdict to
+decide whether to keep trying ticker *variations*, so matching those would abort
+auto-discovery for every ticker Yahoo simply does not know. And **allocation checks
+before it stamps** — its failure path writes `allocation_last_updated` to bound retries
+against securities with no `.info`, which is right for a real "no data" answer and badly
+wrong for a rate limit, where it would mark every remaining security attempted and
+suppress its sector and country for the whole staleness window.
+
+
 The IBKR Flex sync (`POST /api/sync/ibkr`) is Flex-only and touches **no** Yahoo — it's always safe.
 
 **Yahoo is not the only price provider, which this rule used to imply.** `market_data_service.py`
@@ -155,6 +176,8 @@ recomputes by hand is the one that is wrong. The known instances:
 | `yield_on_cost_pct` | the Dividends-tab column divided **trailing** income by cost while the Performance card divided the **forward** projection by it. One name, two quantities, two screens — and the column's version broke whenever a position changed size, understating nine of fifteen rows |
 | "stale" fundamentals | three definitions: the repository defaulted to **7** days, the sync passed **1**, and `/api/fundamentals/status` ran its own hardcoded 7-day query — so the status endpoint could report `stale_metrics: 0` beside a sync about to refresh every row. One `STALE_AFTER_DAYS`, and `/status` now counts through the repository |
 | the dividend reader's two rules | `ActivityService._dividends` adopted the income test and not the era splice, so the ledger listed the same dividend from both sources and overstated income 72%. **Partial** alignment is the nastiest variant: its own docstring cites the readers, so it reads as deliberate rather than forgotten |
+| the Yahoo rate-limit breaker | `market_data_service` latched on a 429 and abandoned the pass; the **five other** services importing `yfinance` — fundamentals, ratings, watchlist, allocation, dividends — plus the benchmark warm-up all caught, logged and asked again seconds later. Extracted to `yahoo_rate_limit.is_rate_limit`, with an AST test over every module that imports `yfinance` |
+| `_to_eur`'s third site | after the tax copy and then the dividend copy were both fixed to return `None` on FX failure, `compute_dividend_income` **still had the original `gross_eur = gross_amount  # fallback: store unconverted`** — a few dozen lines below the helper it never called. Fixing a helper is not fixing the file; grep the *pattern*, not the function |
 | the three allocation charts | one function buckets each holding three times, and only asset type used `or 'Unknown'`. Sector and geography used `if security.sector:` / `if security.country:` and **dropped** the holding, so those two summed to under 100% while the UI printed every slice as "% of portfolio". Not one module copied into another — three adjacent call sites of the same helper, one of which got the rule |
 | the 12-month deployment average | `ContributionsStrip` renders the server's `avg_deployed_per_month_eur`; `MonthlyDeploymentCard`, on the same tab a few hundred pixels below, recomputed it as `monthly.slice(-12)` divided by its own length. `monthly` omits months with no activity, so that takes the last twelve *rows* — which can span more than twelve months — and divides by a count smaller than the period covered. Both errors push it up. **Two numbers under one name on one screen** is the cheapest instance of this failure to find and the easiest to leave: neither is obviously wrong on its own |
 
@@ -1717,7 +1740,7 @@ raiser for that whole module, so an accidental network reach fails loudly; `/api
 is excluded because it lazy-fetches Yahoo on a cache miss, and POST routes are excluded because they
 start real syncs. **Add a case here when an endpoint's response shape changes.**
 
-Tests (755 backend + 394 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
+Tests (769 backend + 394 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
 calls). Take the number the suite actually prints as your baseline, not this line — it has been stale
 by 200+ on both halves before:
 ```bash

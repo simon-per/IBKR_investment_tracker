@@ -518,6 +518,41 @@ are being dropped. The tax report and the dividend breakdown agree to the cent f
 so both apply the era splice. The 0.01 between the dividend chart's month totals and its per-symbol
 stack is 2dp rounding across twelve rows, not a gap.
 
+### Thread 10 — rule 1 was enforced in one service out of six
+
+The largest finding of the loop, and it sits on the project's most important rule.
+
+- **Five Yahoo loops kept asking after a 429.** `market_data_service` latches and
+  abandons the pass; `fundamentals` (~5 endpoints per security), `analyst ratings`,
+  `watchlist`, `allocation`, `dividends` and the scheduler's benchmark warm-up all
+  caught the error, logged it, and hit the same IP again seconds later — the exact shape
+  fixed for market data on 2026-08-04, five times over. Continuing is what turns a short
+  block into a long one.
+  Extracted to `app/services/yahoo_rate_limit.py`; `tests/test_yahoo_rate_limit_family.py`
+  walks the **AST** for any module importing `yfinance` without consulting it, so a
+  seventh service is caught automatically. **Allocation needed the most care**: its
+  failure path stamps `allocation_last_updated` to bound retries, so a rate limit would
+  have marked every remaining security attempted and suppressed its sector and country
+  for the full staleness window — the check runs before the stamp.
+- **A pre-existing crash the new tests exposed: two failures in one pass killed it.**
+  The handlers call `db.rollback()`, which expires **every** object in the session, so
+  the next iteration's `security.symbol` became a lazy refresh — and in async SQLAlchemy
+  that raises `MissingGreenlet`. In fundamentals and ratings that read sits *outside*
+  the try, so it propagated out of the sync entirely. One security Yahoo has no data for
+  is completely ordinary, which made this reachable on any pass with two of them. Each
+  loop now reloads through an awaited `db.get`.
+- **`_to_eur`'s third site.** After the tax copy and then this file's own copy were both
+  fixed to return `None` on FX failure, `compute_dividend_income` still carried the
+  original `gross_eur = gross_amount  # fallback: store unconverted`, a few dozen lines
+  below the helper it never called. Worse than the other two: it is an **ingest** path,
+  so the foreign figure is *persisted* into `gross_amount_eur`/`net_amount_eur` and then
+  read by the Dividends tab, the forecast, the forward yield and the tax report's DA-1
+  income. The row is now left uncomputed — `shares_held IS NULL` is the sentinel the
+  prune CLI already refuses to delete, so it retries once a rate exists.
+  **Latent, not live**: TSMC reads 0.80% forward yield on production, so its TWD rows
+  converted correctly. `WARM_CURRENCIES` keeps TWD fresh and pre-ownership history is
+  skipped, which is what has kept it out of reach.
+
 **After they deploy, check:** the chart and hero row show no yellow notice (nothing is unpriced today);
 `summary.unpriced_holdings == 0` and equals the last timeline point's; Sharpe and Top 5 Weight still show
 numbers on a normal range and dashes on MTD early in a month; and `days_held_in_ttm` is unchanged for all

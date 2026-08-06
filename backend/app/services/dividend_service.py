@@ -21,6 +21,7 @@ from app.models.taxlot import TaxLot
 from app.repositories.dividend_repository import DividendRepository
 from app.repositories.sync_run_repository import utc_iso
 from app.services.currency_service import CurrencyService
+from app.services.yahoo_rate_limit import is_rate_limit
 from app.services.dividend_forecast import HistPayment, infer_gap_days, project_dividends
 
 logger = logging.getLogger(__name__)
@@ -72,8 +73,14 @@ def _forward_basis(total: Decimal, gross_estimate: Decimal) -> str:
 class DividendService:
     """Service for fetching and computing dividend income."""
 
+    # Latched the first time Yahoo answers with a rate limit, mirroring
+    # `MarketDataService.rate_limited`. On the class as well as the instance so a
+    # service built through `__new__` in a test can still read it.
+    rate_limited = False
+
     def __init__(self, db: AsyncSession):
         self.db = db
+        self.rate_limited = False
         self.repo = DividendRepository(db)
         self.currency_service = CurrencyService(db)
 
@@ -121,8 +128,19 @@ class DividendService:
         skipped = 0
         pre_ownership_skipped = 0
 
-        for i, security in enumerate(securities, 1):
+        pending_ids = [s.id for s in securities]
+
+        for i, security_id in enumerate(pending_ids, 1):
             try:
+                # Reloaded by id each iteration rather than held across the loop.
+                # `db.rollback()` in the handler below expires EVERY object in the
+                # session, so the next iteration's attribute read became a lazy
+                # refresh — and in async SQLAlchemy an expired-attribute load outside
+                # an await raises MissingGreenlet. `db.get` is awaited and serves the
+                # identity map on the happy path, so this costs nothing normally.
+                security = await self.db.get(Security, security_id)
+                if security is None:
+                    continue
                 # Staleness check: skip if we fetched dividends < 7 days ago
                 last_fetch = await self.repo.get_last_fetch_time(security.id)
                 if last_fetch and (utcnow() - last_fetch) < timedelta(days=7):
@@ -130,7 +148,7 @@ class DividendService:
                     continue
 
                 yahoo_ticker = await self._get_yahoo_ticker(security)
-                logger.info(f"[{i}/{len(securities)}] Fetching dividends for {security.symbol} ({yahoo_ticker})")
+                logger.info(f"[{i}/{len(pending_ids)}] Fetching dividends for {security.symbol} ({yahoo_ticker})")
 
                 # Rate limit before API call
                 await asyncio.sleep(random.uniform(1.0, 2.0))
@@ -167,9 +185,22 @@ class DividendService:
                 await self.db.commit()
 
             except Exception as e:
-                logger.error(f"Error fetching dividends for {security.symbol}: {e}")
+                # Before the rollback -- it expires the ORM attributes, and a lazy
+                # refresh inside an except handler raises MissingGreenlet.
+                symbol = security.symbol
                 errors += 1
                 await self.db.rollback()
+                # Rule 1: stop on a rate limit. The 7-day staleness check at the top of
+                # this loop means a security this pass never reached simply stays stale
+                # and the next run fetches it, so abandoning costs nothing but freshness.
+                if is_rate_limit(e):
+                    self.rate_limited = True
+                    logger.warning(
+                        f"Yahoo rate limit at {symbol} "
+                        f"({i}/{len(pending_ids)}); abandoning the rest of this pass"
+                    )
+                    break
+                logger.error(f"Error fetching dividends for {symbol}: {e}")
                 continue
 
         logger.info(
@@ -203,6 +234,9 @@ class DividendService:
             taxlots_by_security[tl.security_id].append(tl)
 
         computed = 0
+        # Rows left uncomputed because no FX rate could be resolved. Reported rather
+        # than silent: the alternative used to be storing the foreign amount as EUR.
+        fx_skipped = 0
         errors = 0
 
         for dp in uncomputed:
@@ -245,8 +279,32 @@ class DividendService:
                         )
                         gross_eur = gross_amount * fx_rate
                     except Exception as e:
-                        logger.warning(f"FX conversion failed for {currency} on {dp.ex_date}: {e}")
-                        gross_eur = gross_amount  # fallback: store unconverted
+                        # `gross_eur = gross_amount  # fallback: store unconverted` is
+                        # what stood here — the identical defect fixed in
+                        # `TaxService._to_eur`, and then in this file's own `_to_eur`,
+                        # surviving in the second conversion path a few dozen lines
+                        # below both of them. Fixing a helper is not fixing the file:
+                        # this code never went through either helper.
+                        #
+                        # It writes a foreign figure into a column named `_eur`, on an
+                        # ingest path, so the wrong number is *persisted* and then read
+                        # by the Dividends tab, the forecast, the forward yield and the
+                        # tax report's DA-1 income. A TWD payment would sit in
+                        # `gross_amount_eur` roughly 35x high with nothing marking it.
+                        #
+                        # Leaving the row uncomputed is what makes this self-healing:
+                        # `shares_held IS NULL` is the "awaiting computation" sentinel
+                        # `prune_empty_dividends` already refuses to touch, so the next
+                        # pass retries the row once a rate exists. Reachable whenever
+                        # `get_exchange_rate` exhausts both providers — TWD is outside
+                        # the ECB set entirely, and the er-api fallback refuses any date
+                        # older than FALLBACK_MAX_AGE_DAYS.
+                        logger.warning(
+                            f"No {currency}->EUR rate for {dp.ex_date} ({e}); leaving this "
+                            f"dividend uncomputed rather than storing {currency} as EUR"
+                        )
+                        fx_skipped += 1
+                        continue
 
                 dp.shares_held = shares
                 dp.gross_amount_eur = gross_eur
@@ -264,8 +322,23 @@ class DividendService:
                 continue
 
         await self.db.commit()
-        logger.info(f"Dividend computation complete: computed={computed}, errors={errors}")
-        return {'computed': computed, 'errors': errors, 'message': f'Computed {computed} dividend payments'}
+        logger.info(
+            f"Dividend computation complete: computed={computed}, errors={errors}, "
+            f"fx_skipped={fx_skipped}"
+        )
+        result = {
+            'computed': computed,
+            'errors': errors,
+            'fx_skipped': fx_skipped,
+            'message': f'Computed {computed} dividend payments',
+        }
+        if fx_skipped:
+            result['warnings'] = [
+                f'{fx_skipped} dividend(s) left uncomputed: no exchange rate for their '
+                f'currency on the ex-date. They are retried automatically once a rate '
+                f'exists — see WARM_CURRENCIES if the currency is not an ECB one.'
+            ]
+        return result
 
     async def _to_eur(self, amount: Decimal, currency: str, on_date: date) -> Optional[Decimal]:
         """
