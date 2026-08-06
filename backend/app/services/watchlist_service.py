@@ -257,7 +257,7 @@ class WatchlistService:
         # entirely, so the two endpoints disagreed. See app/services/peg_ratio.py.
         if data["peg_ratio"] is None:
             data["peg_ratio"] = self._safe_float(
-                peg_from_growth(data["trailing_pe"], fwd_eps)
+                peg_from_growth(data["trailing_pe"], fwd_eps, is_fraction=True)
             )
 
         # Fallback 2 (last resort): Trailing P/E / analyst 5-yr EPS CAGR %

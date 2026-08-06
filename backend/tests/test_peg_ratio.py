@@ -109,3 +109,55 @@ def test_neither_service_still_normalises_growth_inline():
             f"{module.__name__} normalises a growth estimate inline again — that is "
             f"the duplication peg_ratio.py exists to remove"
         )
+
+
+# ---------------------------------------------------------------------------
+# The decimal-vs-percent inference is wrong in the direction that matters.
+#
+# `growth_estimates['+1y']['stockTrend']` is a decimal fraction that legitimately exceeds
+# 1 whenever a company is expected to grow more than 100%. The inference read anything
+# >= 1 as already-a-percent, so 222% growth became 2.2245% and a PEG of 0.25 became
+# 24.56 — a factor of 100, in the direction that makes a fast grower look catastrophically
+# overvalued. Three of this account's watchlist rows carry such a value today.
+#
+# That the column is a decimal is not a judgement call: the same value is stored as
+# `fwd_eps_growth` and rendered by the UI as `(v * 100).toFixed(1)%`.
+# ---------------------------------------------------------------------------
+
+
+def test_a_fraction_above_one_is_not_mistaken_for_a_percent():
+    # SNDK, live: P/E 54.64, +1y stockTrend 2.2245 (i.e. 222% growth).
+    assert peg_from_growth(54.64, 2.2245, is_fraction=True) == pytest.approx(54.64 / 222.45)
+    # The inference, left to itself, is 100x out.
+    assert peg_from_growth(54.64, 2.2245) == pytest.approx(54.64 / 2.2245)
+
+
+def test_the_scoring_consequence_of_getting_that_wrong():
+    """A 10-point swing on the buy score's 25-point valuation block."""
+    ladder = lambda p: 10 if p <= 0.5 else 8 if p <= 1 else 6 if p <= 1.5 else 4 if p <= 2 else 2 if p <= 3 else 0
+    right = peg_from_growth(54.64, 2.2245, is_fraction=True)
+    wrong = peg_from_growth(54.64, 2.2245)
+    assert ladder(right) == 10
+    assert ladder(wrong) == 0
+
+
+def test_a_known_fraction_below_one_is_unchanged_by_the_flag():
+    """The common case must be identical either way, or the flag would be a second rule."""
+    for growth in (0.05, 0.15, 0.30, 0.999):
+        assert peg_from_growth(20.0, growth, is_fraction=True) == peg_from_growth(20.0, growth)
+
+
+def test_the_long_term_tier_keeps_inferring():
+    """
+    `longTermGrowth` has no established convention in this codebase, so its tier keeps the
+    inference rather than assuming. The flag is opt-in precisely so one tier can know its
+    input while the other admits it does not.
+    """
+    assert growth_pct_from_estimate(15) == 15          # read as a percent
+    assert growth_pct_from_estimate(0.15) == pytest.approx(15)   # read as a fraction
+
+
+def test_a_non_positive_growth_is_still_refused_under_the_flag():
+    for bad in (None, 0, -0.2):
+        assert growth_pct_from_estimate(bad, is_fraction=True) is None
+        assert peg_from_growth(20.0, bad, is_fraction=True) is None

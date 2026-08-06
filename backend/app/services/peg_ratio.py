@@ -21,38 +21,64 @@ services now run the same three tiers in the same order over the same inputs.
 from typing import Optional
 
 
-def growth_pct_from_estimate(growth: Optional[float]) -> Optional[float]:
+def growth_pct_from_estimate(
+    growth: Optional[float], *, is_fraction: bool = False
+) -> Optional[float]:
     """
     Normalise an analyst growth estimate to a **percentage**.
 
     yfinance is inconsistent about whether these arrive as a decimal (``0.30``) or
-    already as a percent (``30``), so the convention is inferred: below 1 it is
-    read as a decimal and scaled.
+    already as a percent (``30``), so where the convention is genuinely unknown it is
+    inferred: below 1 it is read as a decimal and scaled.
 
-    The ambiguity is real but narrow — it misreads only a value that is *already*
-    a percent and below 1, i.e. sub-1% growth, which would become sub-100%. Both
-    call sites guard on ``growth > 0`` before reaching here, so a negative
-    estimate never takes the ``< 1`` branch and cannot be scaled by 100; that
-    guard is load-bearing and is asserted in the tests rather than left implicit.
+    **Pass ``is_fraction=True`` when the caller knows it is a decimal**, because the
+    inference is wrong in the direction that matters. It reads anything ``>= 1`` as
+    already-a-percent, but ``growth_estimates['+1y']['stockTrend']`` is a decimal that
+    legitimately exceeds 1 whenever a company is expected to grow more than 100% — and
+    this account has three such rows today (SNDK 2.2245, LITE 1.23, MU 1.0933). Inferred,
+    SNDK's 222% growth was read as 2.2245%, turning a PEG of **0.25 into 24.56**: not a
+    rounding difference but a factor of 100, in the direction that makes a fast-growing
+    company look catastrophically overvalued. The buy-score PEG ladder scores the first
+    10/10 and the second 0/10.
+
+    That the column is a decimal is not a judgement call — the same value is stored as
+    ``fwd_eps_growth`` and rendered by the UI as ``(v * 100).toFixed(1)%``, so the app
+    reads it as a fraction everywhere except here.
+
+    This docstring used to call the ambiguity "real but narrow — it misreads only a value
+    that is *already* a percent and below 1". That is the harmless direction. The harmful
+    one is a fraction above 1, which it did not mention and which is live.
+
+    Both call sites guard on ``growth > 0`` before reaching here, so a negative estimate
+    never takes the ``< 1`` branch and cannot be scaled by 100; that guard is load-bearing
+    and is asserted in the tests rather than left implicit.
 
     Returns None for a missing, zero or negative estimate — a PEG divided by one
     of those is not a small number, it is meaningless.
     """
     if growth is None or growth <= 0:
         return None
+    if is_fraction:
+        return growth * 100
     return growth * 100 if growth < 1 else growth
 
 
-def peg_from_growth(trailing_pe: Optional[float], growth: Optional[float]) -> Optional[float]:
+def peg_from_growth(
+    trailing_pe: Optional[float], growth: Optional[float], *, is_fraction: bool = False
+) -> Optional[float]:
     """
     ``trailing_pe / growth%``, or None when either side is unusable.
 
     Refuses rather than guessing on a missing P/E, a non-positive P/E (a loss-making
     company has no meaningful PEG) or an unusable growth estimate.
+
+    ``is_fraction`` forwards to {@link growth_pct_from_estimate}: set it for the
+    forward-EPS tier, whose input is a known decimal, and leave it off for the long-term
+    CAGR tier, where yfinance's convention really is unknown.
     """
     if trailing_pe is None or trailing_pe <= 0:
         return None
-    growth_pct = growth_pct_from_estimate(growth)
+    growth_pct = growth_pct_from_estimate(growth, is_fraction=is_fraction)
     if growth_pct is None:
         return None
     return trailing_pe / growth_pct

@@ -125,7 +125,7 @@ class FundamentalsService:
         # already computed above, so closing that costs no extra request.
         if metrics_data['peg_ratio'] is None:
             metrics_data['peg_ratio'] = self._safe_float(
-                peg_from_growth(metrics_data['trailing_pe'], fwd_eps)
+                peg_from_growth(metrics_data['trailing_pe'], fwd_eps, is_fraction=True)
             )
 
         if metrics_data['peg_ratio'] is None:
