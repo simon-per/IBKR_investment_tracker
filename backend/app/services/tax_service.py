@@ -271,6 +271,26 @@ class TaxService:
                 f"The {as_of.isoformat()} holdings snapshot could not be built, so the "
                 f"wealth-tax base is unavailable — it is not zero."
             )
+        else:
+            # The PARTIAL case, which had no reporting at all until 2026-08-05. A
+            # snapshot that raises is handled above and yields None rather than a
+            # figure; a snapshot that quietly returned fewer rows yielded a plausible
+            # number that reads as the complete wealth-tax base. That asymmetry is the
+            # one this codebase keeps paying for — a missing figure reads as a fault, a
+            # partial one reads as an answer — and it matters most here, because this
+            # figure goes on a tax return.
+            #
+            # Read from the latch immediately after the call: it is per-run state, so
+            # anything between the two would risk reporting another date's snapshot.
+            skipped = portfolio.last_snapshot_skipped
+            if skipped:
+                warnings.append(
+                    f"The {as_of.isoformat()} holdings snapshot omits "
+                    f"{len(skipped)} security(ies) that could not be valued that day "
+                    f"({', '.join(skipped)}), so the wealth-tax base below understates "
+                    f"by their value. Fix the ticker mapping or import prices for that "
+                    f"date, then re-run."
+                )
 
         # The label reflects what actually contributed inside the year window:
         # "mixed" is the boundary year, where estimates cover the weeks before the

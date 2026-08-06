@@ -387,7 +387,14 @@ def test_the_shapes_that_broke_production_serialize(client):
     tax = client.get(f"/api/tax/report?year={TODAY.year}").json()
     assert tax["holdings_snapshot_error"] is False
     assert tax["holdings_snapshot_total"] is not None
-    assert tax["warnings"] == []
+    # This asserted `warnings == []` until 2026-08-05, which was pinning the bug: the
+    # fixture holds an unpriced TSMC, so the snapshot really does omit it and the
+    # wealth-tax base really does understate. A silent partial snapshot was the whole
+    # defect, so the clean-report expectation belongs on a fixture that IS clean —
+    # `test_tax_snapshot_partial.py` covers that direction.
+    assert any("TSMC" in w and "understates" in w for w in tax["warnings"]), (
+        "the Steuerwert omits an unpriceable holding without saying so"
+    )
     assert tax["realized_source"] in {"trades", "closed_lot_estimate"}
 
     # The activity ledger unions four tables that each had no read surface at all.

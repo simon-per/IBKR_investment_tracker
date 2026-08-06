@@ -575,6 +575,27 @@ The largest finding of the loop, and it sits on the project's most important rul
   The smoke fixture's unpriced TSMC makes the new assertion the **non-zero** case rather than one that
   would pass on any book.
 
+### Thread 12 — the wealth-tax base could omit a holding and not say so
+
+- **`holdings_snapshot_as_of` dropped an unvaluable lot silently**, and the tax report summed
+  whatever it got. Omitting is the right arithmetic — CLAUDE.md says so, and counting the holding at
+  zero would be worse — but the report already treated a snapshot that **raised** as a stated failure
+  (`holdings_snapshot_total: None` plus a warning) while a snapshot that quietly returned fewer rows
+  produced a plausible number that reads as the complete book. Loud on total failure, mute on partial
+  failure, which is backwards: this is the same asymmetry that made the value timeline's `+15.3%` more
+  dangerous than its `-100%`, on the one figure in the app that goes on a tax return.
+  `last_snapshot_skipped` is a per-run latch naming the dropped securities; the report turns it into a
+  `warnings[]` line — the surface `TaxTab` renders as a banner and `to_csv` writes as a WARNINGS block
+  — and still serves the figure, because a partial base is the best available and must not be confused
+  with the `None` that means no base at all.
+  **The tests caught a bug in the fix**: the latch was not reset on the early-return path, so an empty
+  snapshot would have inherited a previous date's skip list and reported the wrong date's
+  completeness.
+  **And `test_api_smoke` was pinning the bug** — it asserted `tax["warnings"] == []` on a fixture
+  whose Steuerwert genuinely omits its unpriced TSMC. That expectation now asserts the warning is
+  present and names the security; the clean-report direction moved to a fixture that is actually
+  clean.
+
 **After they deploy, check:** the chart and hero row show no yellow notice (nothing is unpriced today);
 `summary.unpriced_holdings == 0` and equals the last timeline point's; Sharpe and Top 5 Weight still show
 numbers on a normal range and dashes on MTD early in a month; and `days_held_in_ttm` is unchanged for all

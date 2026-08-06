@@ -624,6 +624,20 @@ Two honesty flags, both badged in the UI and CSV:
 - `realized_source`: `trades` (IBKR FIFO) vs `closed_lot_estimate` (market price at close date — was
   ~8% off on a spot check, hence the badge)
 
+**A partial Steuerwert says so.** `holdings_snapshot_as_of` omits a lot it cannot price or
+convert — correct, and stated below — but until 2026-08-05 it omitted it *silently*, so a wealth-tax
+base missing a holding was served as though it covered the book. The report already handled the
+snapshot **raising** (`holdings_snapshot_total` becomes `None`, plus a warning), and that asymmetry
+is the bug: total failure was loud, partial failure was mute, which is backwards. A missing figure
+reads as a fault; a plausible one reads as an answer — the same reason the timeline's `+15.3%` was
+more dangerous than its `−100%`, and it matters more here than anywhere else in the app because this
+number goes on a tax return. `PortfolioService.last_snapshot_skipped` is a per-run latch (same shape
+as `MarketDataService.rate_limited`) naming the securities dropped; the report turns it into a
+`warnings[]` line and still serves the figure, because a partial base is the best available and must
+not be confused with the `None` reserved for no base at all. Note the latch resets on the
+**early-return** path too — an empty snapshot inheriting a previous date's skip list would report the
+wrong date's completeness.
+
 **Steuerwert is valued at 31 December**, not today: `holdings_snapshot_as_of()` rebuilds the holdings
 for `holdings_as_of` (= 31 Dec for a past year, today for the current one) using the same
 `open_date`/`close_date` window as `_calculate_daily_value`, so it can't disagree with the portfolio
@@ -1758,7 +1772,7 @@ raiser for that whole module, so an accidental network reach fails loudly; `/api
 is excluded because it lazy-fetches Yahoo on a cache miss, and POST routes are excluded because they
 start real syncs. **Add a case here when an endpoint's response shape changes.**
 
-Tests (773 backend + 399 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
+Tests (778 backend + 399 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
 calls). Take the number the suite actually prints as your baseline, not this line — it has been stale
 by 200+ on both halves before:
 ```bash

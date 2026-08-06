@@ -95,10 +95,18 @@ class PortfolioService:
     - Portfolio composition by security
     """
 
+    # Securities `holdings_snapshot_as_of` had to drop on its most recent run because
+    # they could not be valued at that date. A latch rather than a second return value,
+    # the same shape as `MarketDataService.rate_limited` and
+    # `IBKRService.last_schema_notes`; declared on the class as well so a service built
+    # through `__new__` in a test can still read it.
+    last_snapshot_skipped: List[str] = []
+
     def __init__(self, db: AsyncSession):
         self.db = db
         self.market_data_service = MarketDataService(db)
         self.currency_service = CurrencyService(db)
+        self.last_snapshot_skipped = []
 
     async def get_base_currency(self) -> str:
         """Return the configured base (display) currency."""
@@ -706,6 +714,10 @@ class PortfolioService:
             .order_by(Security.symbol.asc())
         )
         lots = result.all()
+        # Reset before the early return too, not only on the main path: the latch is
+        # per-run state, and an empty snapshot that inherited a previous date's skip
+        # list would report the wrong date's completeness — worse than reporting none.
+        self.last_snapshot_skipped = []
         if not lots:
             return []
 
@@ -718,12 +730,16 @@ class PortfolioService:
         )
 
         by_security: Dict[int, Dict] = {}
+        # Reset per run: this is the answer to "is the total below complete?", and a
+        # stale value from a previous call would answer for the wrong date.
+        skipped: set = set()
         for lot, security in lots:
             price = self._get_market_price_with_fallback(security.id, on_date, price_cache)
             if price is None:
                 logger.warning(
                     f"Holdings snapshot {on_date}: no price for {security.symbol}, skipping lot {lot.id}"
                 )
+                skipped.add(security.symbol)
                 continue
 
             price_currency = price_currency_cache.get(security.id, security.currency)
@@ -737,6 +753,7 @@ class PortfolioService:
                     logger.warning(
                         f"Holdings snapshot {on_date}: no FX for {price_currency}, skipping lot {lot.id}"
                     )
+                    skipped.add(security.symbol)
                     continue
 
             row = by_security.setdefault(security.id, {
@@ -749,6 +766,13 @@ class PortfolioService:
             row["market_value"] += base_fx.convert(lot.quantity * price * fx_rate, on_date)
             row["cost_basis"] += base_fx.convert(lot.cost_basis_eur, lot.open_date)
 
+        # A dropped holding makes the total below understate with nothing saying so.
+        # The tax report already reports a snapshot that RAISED (holdings_snapshot_total
+        # becomes None); a snapshot that quietly returned fewer rows is the partial case,
+        # and the partial case is the dangerous one — a plausible number reads as an
+        # answer where a missing one reads as a fault. On a Swiss wealth-tax base that
+        # matters more than anywhere else in the app.
+        self.last_snapshot_skipped = sorted(skipped)
         return list(by_security.values())
 
     async def realized_rows_from_closed_lots(
