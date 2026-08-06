@@ -433,6 +433,27 @@ that way understates. `find_stale_priced_securities` guarded only the current sn
   The `null` return survives for the genuine no-data-yet case, pinned by its own test, or the fix
   would turn every empty portfolio into a reported outage.
 
+### Thread 6 — a chart that summed to less than it claimed
+
+- **Two of the three allocation charts dropped a holding whose category is unknown.**
+  `get_portfolio_allocation` buckets each position three times; asset type used
+  `security.asset_type or 'Unknown'` while sector and geography used `if security.sector:` /
+  `if security.country:` and simply skipped it. So those two summed to under 100% while
+  `AllocationTab` printed every slice as *"% of portfolio"* — and the treemap sizes by area, so it
+  renormalised and still drew a full rectangle. The picture looked complete; only the printed
+  percentages were short.
+  **The trigger is routine, not theoretical.** `sync_helper` never writes `sector` or `country`, so
+  every IBKR-ingested security starts with both NULL while `asset_type` has a `"Stock"` column
+  default — a newly bought holding appeared in the asset-type chart and in neither of the others.
+  Only `sync_allocation_data` fills them and **nothing schedules it** (it needs Yahoo), so the gap
+  lasted until someone ran it by hand.
+  Both now use `or 'Unknown'`, the convention three lines above them, and `AllocationTab` already had
+  a grey colour defined for that bucket. Five tests, written against the **family** — *every*
+  breakdown the endpoint returns must sum to 100% — so a fourth chart is held to the rule without
+  anyone remembering to add a case.
+  **Checked against production before fixing:** all three currently sum to 100.00/100.01, so nothing
+  on screen is wrong today. This is hardening against the next purchase, not a live correction.
+
 **After they deploy, check:** the chart and hero row show no yellow notice (nothing is unpriced today);
 `summary.unpriced_holdings == 0` and equals the last timeline point's; Sharpe and Top 5 Weight still show
 numbers on a normal range and dashes on MTD early in a month; and `days_held_in_ttm` is unchanged for all

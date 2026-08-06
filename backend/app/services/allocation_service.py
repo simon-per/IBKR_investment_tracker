@@ -272,7 +272,10 @@ class AllocationService:
             sym = security.symbol
             desc = security.description or sym
 
-            # Asset type
+            # Asset type. The `or 'Unknown'` here is the convention the other two
+            # charts must follow: a holding whose category we don't know still owns
+            # its share of the portfolio, so it gets a named bucket rather than being
+            # dropped. Sector and geography silently dropped it until 2026-08-05.
             asset_type = security.asset_type or 'Unknown'
             _add_to_category(asset_alloc, asset_type, pos_weight, pos_value, sym, desc)
 
@@ -290,10 +293,23 @@ class AllocationService:
                     mv = pos_value * (pct / 100)
                     _add_to_category(geo_alloc, region, w, mv, sym, desc, is_etf_contribution=True)
             else:
-                if security.sector:
-                    _add_to_category(sector_alloc, security.sector, pos_weight, pos_value, sym, desc)
-                if security.country:
-                    _add_to_category(geo_alloc, security.country, pos_weight, pos_value, sym, desc)
+                # `or 'Unknown'`, not `if security.sector:` — a holding with no sector on
+                # record is still part of the portfolio, and dropping it made these two
+                # charts sum to less than 100 while the frontend labelled every slice
+                # "% of portfolio". The treemap sizes by area and so renormalises, which
+                # is what kept the gap invisible: the picture looked complete and only the
+                # printed percentages were short.
+                #
+                # This is reached routinely rather than in theory. `sync_helper` never
+                # writes sector or country, so a newly bought security has both NULL,
+                # while `asset_type` carries a "Stock" column default — so a new holding
+                # appeared in the asset-type chart and in neither of these. Only
+                # `sync_allocation_data` fills them and nothing schedules it (it needs
+                # Yahoo), so the gap lasts until someone runs it by hand.
+                _add_to_category(
+                    sector_alloc, security.sector or 'Unknown', pos_weight, pos_value, sym, desc)
+                _add_to_category(
+                    geo_alloc, security.country or 'Unknown', pos_weight, pos_value, sym, desc)
 
         def _finalize(store: Dict[str, Dict]) -> Dict:
             """Convert weights to percentages, sort, and round."""

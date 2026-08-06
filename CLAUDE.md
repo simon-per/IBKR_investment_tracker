@@ -155,6 +155,7 @@ recomputes by hand is the one that is wrong. The known instances:
 | `yield_on_cost_pct` | the Dividends-tab column divided **trailing** income by cost while the Performance card divided the **forward** projection by it. One name, two quantities, two screens — and the column's version broke whenever a position changed size, understating nine of fifteen rows |
 | "stale" fundamentals | three definitions: the repository defaulted to **7** days, the sync passed **1**, and `/api/fundamentals/status` ran its own hardcoded 7-day query — so the status endpoint could report `stale_metrics: 0` beside a sync about to refresh every row. One `STALE_AFTER_DAYS`, and `/status` now counts through the repository |
 | the dividend reader's two rules | `ActivityService._dividends` adopted the income test and not the era splice, so the ledger listed the same dividend from both sources and overstated income 72%. **Partial** alignment is the nastiest variant: its own docstring cites the readers, so it reads as deliberate rather than forgotten |
+| the three allocation charts | one function buckets each holding three times, and only asset type used `or 'Unknown'`. Sector and geography used `if security.sector:` / `if security.country:` and **dropped** the holding, so those two summed to under 100% while the UI printed every slice as "% of portfolio". Not one module copied into another — three adjacent call sites of the same helper, one of which got the rule |
 
 **The lens that finds them**, and which found the last four: walk the AST for function names defined in
 more than one module, ignore trivial bodies, and read each cluster. Router-to-service pairs and
@@ -1697,7 +1698,7 @@ raiser for that whole module, so an accidental network reach fails loudly; `/api
 is excluded because it lazy-fetches Yahoo on a cache miss, and POST routes are excluded because they
 start real syncs. **Add a case here when an endpoint's response shape changes.**
 
-Tests (747 backend + 376 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
+Tests (752 backend + 376 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
 calls). Take the number the suite actually prints as your baseline, not this line — it has been stale
 by 200+ on both halves before:
 ```bash
@@ -1873,6 +1874,7 @@ Tests: `tests/test_currency_fallback.py`.
 | Drift says "no target could be compared" | Nothing had both a target and a weight. **Not** an all-clear — that wording exists because "0 outside the band" was one |
 | A drift or currency panel says it couldn't load positions | The positions query failed. The panel refuses to build a plan from absent data rather than reporting a portfolio of unheld rows |
 | Currency exposure looks wrong for an ETF | It is quote currency, not economic exposure, and deliberately not re-attributed — a EUR-listed S&P tracker is EUR-quoted with USD risk. The fund share is named on screen |
+| A recently bought holding sits in an *Unknown* sector or region | Expected, and correct rather than missing. `sync_helper` never writes `sector`/`country`, so an IBKR-ingested security has both NULL while `asset_type` has a `"Stock"` column default. Only `POST /api/allocation/sync` fills them and **nothing schedules it** (it needs Yahoo), so run it by hand. Before 2026-08-05 the holding was silently dropped from those two charts instead, which made them sum to under 100% under a "% of portfolio" label |
 | Beta is blank with a benchmark selected | Fewer than the 20 flow-free days a regression needs; the count so far is in the footnote. Flow days are excluded by design |
 | Sharpe, Volatility and Sortino all read `—` on a short range | Expected, and now consistent: all three need 5 daily returns. MTD in the first days of a month gives 2–3. Sharpe used to show `0.00` here instead, which looked like a measurement |
 | Top 5 Weight reads `—` / *No priced positions* | Nothing held resolved a price, so there is no weight to concentrate. Deliberately not `0.0%`, which the tone ladder would have drawn **green** — a reassuring all-clear from no data |
