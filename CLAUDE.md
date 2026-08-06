@@ -1619,6 +1619,14 @@ did not cause.
   needs no vitest setup file, and keeps `e2e/a11y.mjs`'s `aria-sort` count non-zero. Flip it and two
   component tests plus an e2e check fail on day one.
 
+**`MAX_RANGE_DAYS` is the other cross-language constant**, and it drifts with no other symptom:
+`dateRanges.ts` clamps the ALL button to `365 * 5` precisely so it never asks
+`/api/portfolio/value-over-time` for a span the router's own `max_days = 365 * 5` returns 400 for. The
+clamp lands *on* the boundary — the client sends exactly `max_days` and the server compares with `>` —
+so an off-by-one on either side breaks ALL for anyone with enough history while both suites stay
+green. `tests/test_range_limit_agreement.py` reads both files and pins them **equal**, not merely
+compatible: a client that shrank to one year would satisfy "not larger" and silently truncate.
+
 `lib/breakpoints.ts` holds the two boundaries as numbers because a Recharts axis width is a prop and
 a card list is a different DOM tree — neither is expressible as a `sm:` utility. Everything that
 *can* stay in CSS does. `breakpoints.test.ts` pins those constants against Tailwind's own scale and
@@ -1709,7 +1717,7 @@ raiser for that whole module, so an accidental network reach fails loudly; `/api
 is excluded because it lazy-fetches Yahoo on a cache miss, and POST routes are excluded because they
 start real syncs. **Add a case here when an endpoint's response shape changes.**
 
-Tests (752 backend + 388 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
+Tests (755 backend + 394 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
 calls). Take the number the suite actually prints as your baseline, not this line — it has been stale
 by 200+ on both halves before:
 ```bash

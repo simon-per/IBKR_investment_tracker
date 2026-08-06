@@ -488,6 +488,36 @@ that way understates. `find_stale_priced_securities` guarded only the current sn
   **Not currently wrong on this account** — 27 monthly rows from 2024-05 to 2026-07 with no calendar
   gaps, so only the rolling-vs-calendar boundary separated the two figures.
 
+### Thread 9 — a sweep that mostly confirmed things, and two unpinned invariants
+
+This pass found **no live miscalculation**. What it did find were two rules the codebase already
+states, applied incompletely — both now pinned.
+
+- **`Dashboard` trusted the *shape* of its stored benchmark selection.** `JSON.parse` was wrapped in
+  a `try/catch`, which covers malformed JSON but not well-formed JSON of the wrong shape: `42` and
+  `{"a":1}` both parse cleanly and were handed back as `string[]`. `selectedBenchmarks.map(...)`
+  feeds `useQueries`, so a non-array throws inside the **root** component rather than a tab — and
+  because the value is re-read on every mount, reloading cannot recover it. Clearing site data would
+  be the only way out. `RebalanceCard.readTargets` already draws this line for one tab; this is the
+  same reader with a larger blast radius. Six tests, including the property that matters: whatever is
+  stored, the result must be mappable.
+- **`MAX_RANGE_DAYS` was a constant written in two languages with nothing holding them together.**
+  The ALL button clamps to `365 * 5` so it never asks for a span the router rejects with a 400, and
+  the clamp lands *on* the boundary. Tighten the server and ALL starts 400ing for anyone with enough
+  history, with both suites still green. `tests/test_range_limit_agreement.py` reads both files and
+  pins them equal — same shape as `breakpoints.test.ts` and `test_deploy_guard_hours.py`.
+
+**Verified correct and not worth re-chasing** (each looked like a defect and was not):
+`allocation_service` has no `BaseFx` but inherits the projection from `get_positions_breakdown` —
+its total matches `/summary` to the cent under CHF. `ActivityService`'s `counts_as_money_in` uses the
+same `DEPOSITWITHDRAW` whitelist constant as `get_deposits()`. `cash_flows.amount_eur` is NOT NULL and
+ingest skips rather than storing a null, so the ledger's conversion cannot meet a `None`. Benchmark
+timeline points survive market holidays through the 14-day carry-forward (523 points for ~522 business
+days), and its cost-basis line tracks the portfolio's to within a sign-changing FX residual, so no lots
+are being dropped. The tax report and the dividend breakdown agree to the cent for 2026 (48.14 CHF),
+so both apply the era splice. The 0.01 between the dividend chart's month totals and its per-symbol
+stack is 2dp rounding across twelve rows, not a gap.
+
 **After they deploy, check:** the chart and hero row show no yellow notice (nothing is unpriced today);
 `summary.unpriced_holdings == 0` and equals the last timeline point's; Sharpe and Top 5 Weight still show
 numbers on a normal range and dashes on MTD early in a month; and `days_held_in_ttm` is unchanged for all
