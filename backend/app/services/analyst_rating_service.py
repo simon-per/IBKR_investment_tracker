@@ -248,8 +248,13 @@ class AnalystRatingService:
 
         That is the shape CLAUDE.md describes for benchmarks: refreshing only
         what already has rows means nothing ever bootstraps.
-        `FundamentalsService.sync_stale_fundamentals` already unions the two
-        sets; this now matches it.
+
+        This docstring used to say `FundamentalsService.sync_stale_fundamentals`
+        "already unions the two sets; this now matches it". It did not: the union
+        lived in the function it delegated to, one call below a pre-filter that
+        bailed on an empty stale list, so it had this same bug. Fixed 2026-08-05.
+        The lesson is about the citation rather than the code — a fix justified by
+        a sibling's supposed correctness should read the sibling's entry point.
         """
         result = await self.db.execute(select(Security))
         all_securities = list(result.scalars().all())

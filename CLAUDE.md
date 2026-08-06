@@ -149,7 +149,7 @@ recomputes by hand is the one that is wrong. The known instances:
 | `_get_yahoo_ticker` | three services delegated to `MarketDataService`; **allocation had its own**, with no suffix table, no ARCA/BATS, and `None` for every non-US listing |
 | PEG fallbacks | the watchlist tried forward-EPS growth before the 5-year CAGR; **fundamentals had no forward-EPS tier at all** |
 | `_safe_float` | the watchlist rounded to 4dp, fundamentals did not — the same P/E read differently on two screens |
-| `sync_stale_*` | fundamentals unioned "missing" with "stale"; **analyst ratings took only "stale"**, so a new security could never be rated |
+| `sync_stale_*` | **both** took only "stale" in the end. Analyst ratings was fixed first, citing fundamentals as the sibling that already unioned "missing" with "stale" — but fundamentals' union sat one call *below* a pre-filter that bailed on an empty stale list, so a security with no row could never bootstrap there either. A correct fix justified by a false reading of the code it copied; when citing a sibling as right, read its **entry point** |
 | the market-data securities loop | the scheduled job gained a Yahoo rate-limit breaker on 2026-08-04; **`POST /api/market-data/sync` kept its own copy without one**, so the *public* path went on asking after a 429. Extracted to `MarketDataService.sync_securities` |
 | the KPI card | sixteen hand-written copies across three files, each with its own idea of what an absent value looks like (`—` in one file, `N/A` in another) — so making the values responsive was sixteen mechanical edits. Extracted to `ui/KpiCard.tsx` |
 | `yield_on_cost_pct` | the Dividends-tab column divided **trailing** income by cost while the Performance card divided the **forward** projection by it. One name, two quantities, two screens — and the column's version broke whenever a position changed size, understating nine of fifteen rows |
@@ -1681,7 +1681,7 @@ raiser for that whole module, so an accidental network reach fails loudly; `/api
 is excluded because it lazy-fetches Yahoo on a cache miss, and POST routes are excluded because they
 start real syncs. **Add a case here when an endpoint's response shape changes.**
 
-Tests (736 backend + 370 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
+Tests (740 backend + 370 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
 calls). Take the number the suite actually prints as your baseline, not this line — it has been stale
 by 200+ on both halves before:
 ```bash

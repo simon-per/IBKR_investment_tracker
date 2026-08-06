@@ -8,8 +8,9 @@ ratings to update" and fetched nothing at all.
 
 That is the shape CLAUDE.md describes for benchmarks — "only refreshes benchmarks
 that *already have rows*, so ... a first-time selection [stays] empty forever" —
-and `FundamentalsService.sync_stale_fundamentals` already unions the two sets
-(`s.id not in existing_ids or s.id in stale_ids`). The sibling had it right.
+and `FundamentalsService.sync_stale_fundamentals` was cited here as the sibling that
+"had it right" — it did not. Its union sat below a pre-filter with this same bug, fixed
+on 2026-08-05; see `tests/test_fundamentals_bootstrap.py`.
 
 Offline: `fetch_rating_for_security` is faked, so yfinance is never reached.
 """

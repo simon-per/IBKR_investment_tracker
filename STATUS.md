@@ -387,7 +387,24 @@ that way understates. `find_stale_priced_securities` guarded only the current sn
   advised buying the whole target. It survived because its comment justified the narrow predicate with a
   *false* fact — that a fully-sold holding reaches the client, which `is_open == True` prevents.
 
-### Thread 3 — a latent 100× money error
+### Thread 3 — a fix justified by a false reading of the code it copied
+
+- **`sync_stale_fundamentals` could never bootstrap a security** (newest in the batch). It pre-filtered on
+  `get_stale_metrics`, which selects rows that already **exist**, and bailed when that came back
+  empty — while the union that would have caught a security with no row sat one call *below* the
+  guard. So whenever every existing row was fresh, a newly-bought security never acquired
+  fundamentals through `POST /api/fundamentals/sync-stale` at all.
+
+  **`sync_stale_ratings` was fixed for this exact shape and cited this method as the sibling that
+  "already unions the two sets".** So did CLAUDE.md's duplicated-logic table, and so did the ratings
+  bootstrap test's opening paragraph. All three were describing the *inner* function while the entry
+  point pre-filtered. Three places asserting a fix that was not there is what kept it alive; all three
+  are corrected. **When citing a sibling as correct, read its entry point.**
+
+  Masked on production today only because all 40 fundamentals rows are stale, so the guard happens to
+  pass. One fundamentals run would have hidden the next new security indefinitely.
+
+### Thread 4 — a latent 100× money error
 
 - `976e15b` **a pence quote stored as pounds.** Yahoo reports London in `GBp`; the code `.upper()`'d it to
   `GBP` and left the amount alone. Worse than the factor: normalising the label **defeats the currency

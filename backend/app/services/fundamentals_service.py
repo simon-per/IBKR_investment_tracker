@@ -278,16 +278,27 @@ class FundamentalsService:
         }
 
     async def sync_stale_fundamentals(self) -> Dict:
-        """Sync only fundamentals that are stale (> 1 day old)."""
-        stale = await self.repo.get_stale_metrics(days_old=1)
-        if not stale:
-            return {
-                'securities_processed': 0,
-                'metrics_updated': 0,
-                'earnings_updated': 0,
-                'errors': 0,
-                'message': 'No stale fundamentals to update',
-            }
+        """
+        Sync fundamentals that are stale (> 1 day old) **or missing entirely**.
+
+        A thin delegate on purpose. `sync_fundamentals_data(force_refresh=False)` already
+        builds the right work list — `s.id not in existing_ids or s.id in stale_ids` — and
+        has its own "all fundamentals are up to date" early return in the same shape, so
+        there is nothing left for this method to decide.
+
+        It used to pre-filter on `get_stale_metrics(days_old=1)` and bail when that came
+        back empty. That query selects rows which already **exist**, so a security with no
+        metrics row was invisible to it: whenever every existing row happened to be fresh,
+        this path reported "No stale fundamentals to update" and a newly-bought security
+        never acquired fundamentals through it at all. The union it delegates to was
+        sitting one call below the guard that prevented it being reached.
+
+        Worth knowing how that survived: `sync_stale_ratings` was fixed for this exact
+        shape and its docstring cites *this* method as the sibling that "already unions
+        the two sets", as did CLAUDE.md's duplicated-logic table. Both were describing the
+        inner function while the entry point pre-filtered — a correct fix justified by a
+        false reading of the code it was copying.
+        """
         return await self.sync_fundamentals_data(force_refresh=False)
 
     async def get_fundamentals_for_portfolio(self) -> List[Dict]:
