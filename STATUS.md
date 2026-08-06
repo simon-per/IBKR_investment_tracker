@@ -471,6 +471,23 @@ that way understates. `find_stale_priced_securities` guarded only the current sn
   and incomplete on the same day: two were found by reading the risk row, and the third only turned up
   by listing every importer of the timeline type. Grep the type, not the screen.
 
+### Thread 8 — two numbers under one name, on one screen
+
+- **`MonthlyDeploymentCard` recomputed the 12-month deployment average** that
+  `ContributionsStrip` — a few hundred pixels above it on the same tab — already renders from the
+  server's `avg_deployed_per_month_eur`. On live data they read **2,546 and 2,530**: close enough
+  that neither looks wrong, far enough apart to be visibly different once rounded.
+  The client's version was wrong twice over, both times upward. `monthly` is built from a dict keyed
+  only by months that had activity, so a quiet month is simply absent: `slice(-12)` takes the last
+  twelve *rows* (which can span more than twelve months) and then divides by that row count rather
+  than by the months covered. The server divides by the window's elapsed months, clamped to available
+  history, and reports the clamp via `partial`.
+  The card now reads the server's figure and names the shorter window when `partial` is set, so a
+  four-month-old portfolio stops claiming a twelve-month average. Five tests, including one that
+  seeds a six-month gap in `monthly` to prove the rows can no longer influence it.
+  **Not currently wrong on this account** — 27 monthly rows from 2024-05 to 2026-07 with no calendar
+  gaps, so only the rolling-vs-calendar boundary separated the two figures.
+
 **After they deploy, check:** the chart and hero row show no yellow notice (nothing is unpriced today);
 `summary.unpriced_holdings == 0` and equals the last timeline point's; Sharpe and Top 5 Weight still show
 numbers on a normal range and dashes on MTD early in a month; and `days_held_in_ttm` is unchanged for all

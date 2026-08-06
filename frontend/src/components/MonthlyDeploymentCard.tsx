@@ -46,20 +46,40 @@ export function MonthlyDeploymentCard({ data, isLoading, isError }: MonthlyDeplo
   const monthly = data?.monthly ?? []
   const chartData: ChartRow[] = monthly.map(m => ({ ...m, label: monthLabel(m.month) }))
 
-  // Collapsed summary: last month + 12M average of capital deployed
+  // Collapsed summary: last month + the 12M average of capital deployed.
+  //
+  // The average is READ from the server's 12m window, not recomputed here. It was
+  // recomputed until 2026-08-05 as `monthly.slice(-12)` summed and divided by its own
+  // length, which is the same quantity the strip directly above this card already
+  // renders from `avg_deployed_per_month_eur` — two numbers under one name on one
+  // screen, 16 apart on live data.
+  //
+  // Both halves of the recomputation were wrong in the same direction. `monthly` is
+  // built from a dict keyed only by months with activity, so a quiet month is absent:
+  // `slice(-12)` takes the last twelve *rows*, which can span more than twelve months,
+  // and dividing by `window.length` then uses a divisor smaller than the months
+  // covered. The server divides by the window's elapsed months, clamped to available
+  // history, and says so via `partial`.
+  const twelveMonth = data?.windows.find(w => w.label === '12m')
   let summaryText: React.ReactNode = 'Capital deployed per month'
   if (isError) {
     summaryText = 'Could not load contributions'
   } else if (monthly.length > 0) {
     const last = monthly[monthly.length - 1]
-    const window = monthly.slice(-12)
-    const avg = window.reduce((sum, m) => sum + m.deployed_eur, 0) / window.length
     summaryText = (
       <>
         {monthLabel(last.month)}: {curSym}
         {last.deployed_eur.toLocaleString('en-US', { maximumFractionDigits: 0 })} deployed
-        {' · '}12M avg: {curSym}
-        {avg.toLocaleString('en-US', { maximumFractionDigits: 0 })}/mo
+        {twelveMonth && (
+          <>
+            {' · '}
+            {/* A four-month-old portfolio has no twelve-month average, and the server
+                already refuses to pretend otherwise by clamping the divisor. Naming the
+                window it actually measured is the matching honesty on this side. */}
+            {twelveMonth.partial ? `${twelveMonth.months.toFixed(0)}M avg` : '12M avg'}: {curSym}
+            {twelveMonth.avg_deployed_per_month_eur.toLocaleString('en-US', { maximumFractionDigits: 0 })}/mo
+          </>
+        )}
       </>
     )
   }
