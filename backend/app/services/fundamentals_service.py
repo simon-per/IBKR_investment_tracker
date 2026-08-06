@@ -199,7 +199,7 @@ class FundamentalsService:
 
         # Determine which securities need updating
         if not force_refresh:
-            stale_metrics = await self.repo.get_stale_metrics(days_old=1)
+            stale_metrics = await self.repo.get_stale_metrics()
             stale_ids = {m.security_id for m in stale_metrics}
             all_metrics = await self.repo.get_all_metrics()
             existing_ids = {m.security_id for m in all_metrics}

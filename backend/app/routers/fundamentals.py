@@ -1,10 +1,10 @@
 import logging
-from app.clock import utcnow
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal, get_db
+from app.repositories.fundamentals_repository import FundamentalsRepository
 from app.services.fundamentals_service import FundamentalsService
 from app.single_flight import (
     SYNC_PIPELINE,
@@ -71,7 +71,7 @@ async def sync_fundamentals(
 
 @router.post("/sync-stale")
 async def sync_stale_fundamentals(db: AsyncSession = Depends(get_db)):
-    """Sync only fundamentals that are stale (older than 7 days)."""
+    """Sync fundamentals that are stale or missing entirely — see the service."""
     try:
         with single_flight(SYNC_PIPELINE, cooldown_seconds=300):
             service = FundamentalsService(db)
@@ -120,7 +120,6 @@ async def get_fundamentals_status(db: AsyncSession = Depends(get_db)):
     from app.models.fundamental_metrics import FundamentalMetrics
     from app.models.earnings_event import EarningsEvent
     from app.models.security import Security
-    from datetime import timedelta
 
     # Count total securities
     total_result = await db.execute(select(func.count(Security.id)))
@@ -130,13 +129,10 @@ async def get_fundamentals_status(db: AsyncSession = Depends(get_db)):
     metrics_result = await db.execute(select(func.count(FundamentalMetrics.id)))
     total_metrics = metrics_result.scalar() or 0
 
-    # Count stale metrics
-    seven_days_ago = utcnow() - timedelta(days=7)
-    stale_result = await db.execute(
-        select(func.count(FundamentalMetrics.id))
-        .where(FundamentalMetrics.last_updated < seven_days_ago)
-    )
-    stale_metrics = stale_result.scalar() or 0
+    # Through the repository, so this reports the same threshold a sync acts on. It
+    # used to run its own 7-day query while the sync refreshed anything over a day old,
+    # so `stale_metrics: 0` could sit beside a sync that would rewrite every row.
+    stale_metrics = await FundamentalsRepository(db).count_stale_metrics()
 
     # Count earnings events
     earnings_result = await db.execute(select(func.count(EarningsEvent.id)))

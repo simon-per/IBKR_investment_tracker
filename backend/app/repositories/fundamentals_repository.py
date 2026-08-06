@@ -1,12 +1,25 @@
 from typing import List, Optional
 from datetime import timedelta
 from app.clock import utcnow
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, func
 from sqlalchemy.orm import joinedload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.fundamental_metrics import FundamentalMetrics
 from app.models.earnings_event import EarningsEvent
+
+#: How old a metrics row has to be before a sync will refresh it.
+#:
+#: One number, because there used to be three and they disagreed: this default was 7,
+#: `sync_fundamentals_data` passed `days_old=1`, and `/api/fundamentals/status` ran its own
+#: hardcoded 7-day query. So the status endpoint could report `stale_metrics: 0` while a
+#: sync would in fact refresh nearly every row — a status figure that did not describe the
+#: behaviour it was reporting on. The `/sync-stale` docstring claimed 7 days too.
+#:
+#: A day is short because fundamentals have no scheduled job: every pass is user-triggered
+#: and costs ~5 Yahoo requests per security, so the threshold decides how much a manual
+#: click spends rather than how often a timer fires.
+STALE_AFTER_DAYS = 1
 
 
 class FundamentalsRepository:
@@ -27,12 +40,32 @@ class FundamentalsRepository:
         result = await self.session.execute(select(FundamentalMetrics))
         return list(result.scalars().all())
 
-    async def get_stale_metrics(self, days_old: int = 7) -> List[FundamentalMetrics]:
-        cutoff_date = utcnow() - timedelta(days=days_old)
+    async def get_stale_metrics(
+        self, days_old: int = STALE_AFTER_DAYS
+    ) -> List[FundamentalMetrics]:
         result = await self.session.execute(
-            select(FundamentalMetrics).where(FundamentalMetrics.last_updated < cutoff_date)
+            select(FundamentalMetrics).where(
+                FundamentalMetrics.last_updated < self._stale_cutoff(days_old)
+            )
         )
         return list(result.scalars().all())
+
+    async def count_stale_metrics(self, days_old: int = STALE_AFTER_DAYS) -> int:
+        """
+        How many rows a sync would refresh. Exists so `/status` cannot answer that
+        question with a different query than the sync asks — which is exactly how the
+        two came to use different thresholds.
+        """
+        result = await self.session.execute(
+            select(func.count(FundamentalMetrics.id)).where(
+                FundamentalMetrics.last_updated < self._stale_cutoff(days_old)
+            )
+        )
+        return int(result.scalar() or 0)
+
+    @staticmethod
+    def _stale_cutoff(days_old: int):
+        return utcnow() - timedelta(days=days_old)
 
     async def upsert_metrics(self, data: dict) -> FundamentalMetrics:
         existing = await self.get_metrics_by_security_id(data['security_id'])

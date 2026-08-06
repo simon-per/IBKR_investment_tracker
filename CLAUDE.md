@@ -153,6 +153,7 @@ recomputes by hand is the one that is wrong. The known instances:
 | the market-data securities loop | the scheduled job gained a Yahoo rate-limit breaker on 2026-08-04; **`POST /api/market-data/sync` kept its own copy without one**, so the *public* path went on asking after a 429. Extracted to `MarketDataService.sync_securities` |
 | the KPI card | sixteen hand-written copies across three files, each with its own idea of what an absent value looks like (`—` in one file, `N/A` in another) — so making the values responsive was sixteen mechanical edits. Extracted to `ui/KpiCard.tsx` |
 | `yield_on_cost_pct` | the Dividends-tab column divided **trailing** income by cost while the Performance card divided the **forward** projection by it. One name, two quantities, two screens — and the column's version broke whenever a position changed size, understating nine of fifteen rows |
+| "stale" fundamentals | three definitions: the repository defaulted to **7** days, the sync passed **1**, and `/api/fundamentals/status` ran its own hardcoded 7-day query — so the status endpoint could report `stale_metrics: 0` beside a sync about to refresh every row. One `STALE_AFTER_DAYS`, and `/status` now counts through the repository |
 | the dividend reader's two rules | `ActivityService._dividends` adopted the income test and not the era splice, so the ledger listed the same dividend from both sources and overstated income 72%. **Partial** alignment is the nastiest variant: its own docstring cites the readers, so it reads as deliberate rather than forgotten |
 
 **The lens that finds them**, and which found the last four: walk the AST for function names defined in
@@ -1681,7 +1682,7 @@ raiser for that whole module, so an accidental network reach fails loudly; `/api
 is excluded because it lazy-fetches Yahoo on a cache miss, and POST routes are excluded because they
 start real syncs. **Add a case here when an endpoint's response shape changes.**
 
-Tests (745 backend + 370 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
+Tests (747 backend + 370 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
 calls). Take the number the suite actually prints as your baseline, not this line — it has been stale
 by 200+ on both halves before:
 ```bash

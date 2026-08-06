@@ -148,3 +148,70 @@ async def test_an_all_fresh_portfolio_still_reports_nothing_to_do(db, fetched):
     assert fetched == []
     assert result["securities_processed"] == 0
     assert result["message"] == "All fundamentals are up to date"
+
+
+# ---------------------------------------------------------------------------
+# One definition of "stale". There used to be three that disagreed: the repository
+# defaulted to 7 days, `sync_fundamentals_data` passed `days_old=1`, and
+# `/api/fundamentals/status` ran its own hardcoded 7-day query — so the status endpoint
+# could report `stale_metrics: 0` beside a sync that would refresh nearly every row.
+# The `/sync-stale` docstring claimed 7 days as well.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_status_counts_exactly_what_a_sync_would_refresh(db, fetched):
+    """
+    The anti-drift assertion: the number `/status` reports and the work the sync does
+    have to come from one threshold. A row three days old is stale under the real
+    (1-day) rule and was invisible to the old 7-day count.
+    """
+    from app.repositories.fundamentals_repository import FundamentalsRepository
+
+    add_security(db, 1, "AAA")
+    add_security(db, 2, "BBB")
+    add_metrics(db, 1, age_days=3)      # stale under 1 day, fresh under the old 7
+    add_metrics(db, 2, age_days=0)      # genuinely fresh
+    await db.commit()
+
+    counted = await FundamentalsRepository(db).count_stale_metrics()
+    await FundamentalsService(db).sync_stale_fundamentals()
+
+    assert counted == 1, "the status count disagrees with the sync's own threshold"
+    assert fetched == ["AAA"], f"the sync refreshed {fetched}, not what /status counted"
+
+
+@pytest.mark.asyncio
+async def test_the_threshold_lives_in_one_place(db):
+    """
+    The repository default and what the service asks for must be the same number, or the
+    two drift apart again the first time someone changes one of them.
+    """
+    import inspect
+    from app.repositories.fundamentals_repository import (
+        FundamentalsRepository, STALE_AFTER_DAYS,
+    )
+    from app.services import fundamentals_service as fs
+
+    default = inspect.signature(
+        FundamentalsRepository.get_stale_metrics
+    ).parameters["days_old"].default
+    assert default == STALE_AFTER_DAYS
+    assert inspect.signature(
+        FundamentalsRepository.count_stale_metrics
+    ).parameters["days_old"].default == STALE_AFTER_DAYS
+    # And no call site may reintroduce a literal of its own. Checked by AST, not by a
+    # text scan: the first version of this assertion matched the *docstring* that
+    # explains the old bug, which quotes `get_stale_metrics(days_old=1)` verbatim.
+    import ast
+    offenders = []
+    for module in (fs, __import__(
+        "app.repositories.fundamentals_repository", fromlist=["x"]
+    )):
+        for node in ast.walk(ast.parse(inspect.getsource(module))):
+            if (isinstance(node, ast.Call)
+                    and getattr(node.func, "attr", "") in
+                    ("get_stale_metrics", "count_stale_metrics")
+                    and any(k.arg == "days_old" for k in node.keywords)):
+                offenders.append(f"{module.__name__}:{node.lineno}")
+    assert not offenders, f"a call site passes its own staleness threshold: {offenders}"
