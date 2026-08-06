@@ -86,6 +86,13 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
     QTUM (**14.9%**, an estimate that says so). VT is pinned equal to VWCE and test-enforced that way:
     they track the same FTSE global index family, so the two drifting apart in this table would be the
     codebase's dominant failure mode in miniature.
+  - **And mapping them exposed a third thing, now fixed:** the asset-type chart would still have drawn
+    all three as **Stock**. It read `securities.asset_type`, whose `"Stock"` column default
+    `sync_helper` never overwrites and which only the unscheduled `POST /api/allocation/sync` fills —
+    while the sector and geography charts beside it decide the same question from `is_known_etf(symbol)`
+    live. One holding, a Stock in one chart and an ETF distributed across eleven sectors a few pixels
+    below. The look-through table now wins for mapped funds; an unmapped security still reads its own
+    column, so a manual allocation sync is never discarded. Mutation-verified.
 
 - **The deploy guard now covers all nine slots, installed 2026-08-04.** `/root/auto-deploy.sh` is
   byte-identical to `ops/auto-deploy.sh` (verified by sha256), so the copy `test_deploy_guard_hours.py`

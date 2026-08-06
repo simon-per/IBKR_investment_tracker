@@ -301,7 +301,20 @@ class AllocationService:
             # charts must follow: a holding whose category we don't know still owns
             # its share of the portfolio, so it gets a named bucket rather than being
             # dropped. Sector and geography silently dropped it until 2026-08-05.
-            asset_type = security.asset_type or 'Unknown'
+            #
+            # The look-through table wins over the column, because otherwise this chart
+            # and the two below answer "is this a fund?" by different rules. They decide
+            # it from `is_known_etf(symbol)` alone — a live lookup needing no sync — while
+            # `securities.asset_type` is written *only* by `POST /api/allocation/sync`,
+            # which nothing schedules. `sync_helper` never writes it, so an IBKR-ingested
+            # fund carries the column default "Stock" indefinitely: it would be a Stock
+            # here and an ETF distributed across eleven sectors a few pixels away, on the
+            # same tab. Every entry declares `asset_type: "ETF"` and
+            # `test_etf_mappings.py` pins that, so the table is the better source.
+            etf_entry = get_etf_allocation(sym)
+            asset_type = (
+                etf_entry['asset_type'] if etf_entry else security.asset_type
+            ) or 'Unknown'
             _add_to_category(asset_alloc, asset_type, pos_weight, pos_value, sym, desc)
 
             # ETFs: distribute across sectors/regions

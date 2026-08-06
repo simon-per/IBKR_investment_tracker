@@ -195,3 +195,56 @@ async def test_an_unpriced_holding_does_not_break_the_percentages(db):
 
     for name, total in _sums(allocation).items():
         assert total == pytest.approx(100.0, abs=0.05), f"{name} sums to {total}"
+
+
+@pytest.mark.asyncio
+async def test_a_fund_is_a_fund_in_all_three_charts(db):
+    """
+    The three charts must not answer "is this a fund?" by different rules.
+
+    Sector and geography branch on `is_known_etf(symbol)` — a live table lookup that
+    needs no sync. The asset-type chart read `securities.asset_type`, which is written
+    *only* by `POST /api/allocation/sync`; `sync_helper` never writes it and nothing
+    schedules that route, so an IBKR-ingested fund keeps the column default "Stock"
+    indefinitely.
+
+    The result was one holding described two ways on one tab: a Stock in the asset-type
+    chart, and simultaneously an ETF spread across eleven sectors a few pixels below.
+    Reachable the moment any mapped fund is bought — VT, GRID and QTUM were mapped on
+    2026-08-06 for exactly that reason, ahead of the statement that creates them.
+    """
+    # asset_type left at the ingest default on purpose: this is what IBKR gives us.
+    await _hold(db, symbol="VT", isin="US9220427424", conid=1,
+                sector=None, country=None, asset_type="Stock")
+
+    allocation = await AllocationService(db).get_portfolio_allocation()
+
+    buckets = {
+        name: cat for name, cat in allocation["asset_type_allocation"].items()
+        if any(p["symbol"] == "VT" for p in cat["positions"])
+    }
+    assert list(buckets) == ["ETF"], (
+        f"VT is bucketed as {list(buckets)} while the sector and geography charts "
+        "distribute it as a fund"
+    )
+    # And the look-through it is being given at the same time, so the two really are
+    # describing one holding.
+    assert any(p["symbol"] == "VT"
+               for cat in allocation["sector_allocation"].values()
+               for p in cat["positions"])
+
+
+@pytest.mark.asyncio
+async def test_an_unmapped_holding_still_reads_its_own_column(db):
+    """
+    The mirror direction: the table wins only where it has an entry. A security the
+    look-through does not know must keep whatever `asset_type` it carries, or a manual
+    allocation sync's work would be discarded.
+    """
+    await _hold(db, symbol="NOTAFUND", isin="US0000000009", conid=9,
+                sector="Technology", country="United States", asset_type="Bond")
+
+    allocation = await AllocationService(db).get_portfolio_allocation()
+
+    assert any(p["symbol"] == "NOTAFUND"
+               for p in allocation["asset_type_allocation"]["Bond"]["positions"])
