@@ -673,6 +673,25 @@ with data), a Forecast toggle, and a per-stock table (payouts, net, projected, t
 Unlike `/summary` it **never enqueues a sync**, so it cannot reach Yahoo (rule 1) — everything comes
 from `dividend_payments`, `taxlots`, `market_prices` and `exchange_rates`.
 
+**The boundary itself leaked one dividend per security until 2026-08-05, and the reason is the
+splice's own premise.** The rule keeps estimates strictly *before* the first IBKR payment — but the
+two sources file the **same** payment under different dates, yfinance under its ex-date and IBKR under
+its pay-date. So the first IBKR payment's own estimate sits before the boundary and is kept, beside
+the IBKR row it duplicates. Measured on production (boundary 2026-02-18, ASML held on two exchanges):
+`02-09` and `02-10` estimates surviving next to two `02-18` IBKR rows — four rows for two dividends,
+**13.7% of the year's dividend income**, on every reader that splices at once (breakdown, summary
+card, XIRR inflows, DA-1 income, ledger).
+
+`_splice_by_era` now also matches estimate to IBKR row **per security, nearest-first, one-to-one, and
+bounded by `EX_TO_PAY_MAX_LAG_DAYS`** (30 — Mastercard's 29-day lag is the widest real one here).
+Never by amount: one side is gross and the other net, so equal amounts are exactly what cannot be
+relied on. One-to-one is what makes the window safe for a monthly payer, whose cycle is shorter than
+the window — each IBKR payment consumes at most one estimate, so earlier months survive.
+**The width errs deliberately toward keeping.** 45 was tried and matched a genuine dividend 45 days
+out; too wide deletes real income from a filing aid (understating taxable income), too narrow leaves
+one dividend double-counted (overstating it, visibly, already badged `mixed`). For a filing aid the
+understatement is the worse failure.
+
 **The two sources are era-spliced, never mixed or dropped.** `_splice_by_era()` keeps
 `yfinance_estimate` rows strictly *before* the first IBKR payment date and IBKR rows from there on.
 `get_dividend_summary()` used to call `has_ibkr_dividends()` **unwindowed** and then filter to
@@ -1772,7 +1791,7 @@ raiser for that whole module, so an accidental network reach fails loudly; `/api
 is excluded because it lazy-fetches Yahoo on a cache miss, and POST routes are excluded because they
 start real syncs. **Add a case here when an endpoint's response shape changes.**
 
-Tests (778 backend + 399 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
+Tests (785 backend + 399 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
 calls). Take the number the suite actually prints as your baseline, not this line — it has been stale
 by 200+ on both halves before:
 ```bash

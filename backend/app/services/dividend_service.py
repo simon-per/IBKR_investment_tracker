@@ -39,6 +39,23 @@ PRE_OWNERSHIP_HISTORY_YEARS = 3
 TTM_FULL_COVERAGE_DAYS = 350
 
 
+# How far an ex-date may precede its pay-date for the two sources to be treated as the
+# same dividend at the era boundary. Mastercard's 29-day lag is the widest this account
+# has — CLAUDE.md cites it as exceeding a whole monthly cycle — so 30 covers every real
+# lag here while staying well inside a quarterly payer's 91-day cycle.
+#
+# **Deliberately not wider**, and the two error directions are not symmetric. Too wide
+# swallows a genuinely separate earlier dividend and DELETES real income from a Swiss
+# filing aid, which understates taxable income. Too narrow leaves one boundary dividend
+# counted twice, which overstates it — visible, already badged `mixed`, and the
+# status quo this fix improves on rather than a new fault. For a filing aid the
+# understatement is the worse failure, so the window errs toward keeping.
+#
+# 45 was tried first and was too wide: it matched an estimate exactly 45 days before the
+# boundary that was real January income, not the March payment's ex-date.
+EX_TO_PAY_MAX_LAG_DAYS = 30
+
+
 def _summary_source(payments, ibkr_from) -> str:
     """
     Which provenance the summary's figures actually carry: 'ibkr', 'mixed' or
@@ -522,14 +539,50 @@ class DividendService:
         dividend from both sources. Returns (kept_payments, ibkr_from) where
         ibkr_from is None when no IBKR rows exist.
         """
-        ibkr_dates = [(p.pay_date or p.ex_date) for p in payments if p.source == "ibkr"]
-        if not ibkr_dates:
+        ibkr_rows = [p for p in payments if p.source == "ibkr"]
+        if not ibkr_rows:
             return list(payments), None
-        boundary = min(ibkr_dates)
+        boundary = min((p.pay_date or p.ex_date) for p in ibkr_rows)
         kept = [
             p for p in payments
             if p.source == "ibkr" or (p.pay_date or p.ex_date) < boundary
         ]
+
+        # The boundary alone leaks one dividend per security, because the two sources
+        # file the SAME payment under different dates: yfinance under its ex-date, IBKR
+        # under its pay-date, weeks apart. So the first IBKR payment's own estimate sits
+        # *before* the boundary, and the rule above keeps it — beside the IBKR row it
+        # duplicates.
+        #
+        # Seen on production, ASML dual-listed, boundary 2026-02-18:
+        #     2026-02-09  yfinance_estimate     2026-02-18  ibkr
+        #     2026-02-10  yfinance_estimate     2026-02-18  ibkr
+        # Four rows for two dividends, on every reader that splices.
+        #
+        # Matched per security, nearest-first, one-to-one, and bounded — never by
+        # amount, which cannot work when one side is gross and the other net. The
+        # one-to-one part is what makes a window wider than a monthly cycle safe: an
+        # IBKR payment consumes at most one estimate, so a monthly payer's earlier
+        # estimates survive instead of being swallowed by the same window.
+        consumed: set = set()
+        candidates = sorted(
+            (p for p in kept if p.source != "ibkr"),
+            key=lambda p: (p.ex_date or p.pay_date),
+            reverse=True,  # nearest to the pay date first
+        )
+        for row in sorted(ibkr_rows, key=lambda p: (p.pay_date or p.ex_date)):
+            pay = row.pay_date or row.ex_date
+            earliest = pay - timedelta(days=EX_TO_PAY_MAX_LAG_DAYS)
+            for est in candidates:
+                if id(est) in consumed or est.security_id != row.security_id:
+                    continue
+                ex = est.ex_date or est.pay_date
+                if earliest <= ex < pay:
+                    consumed.add(id(est))
+                    break
+
+        if consumed:
+            kept = [p for p in kept if id(p) not in consumed]
         return kept, boundary
 
     @staticmethod

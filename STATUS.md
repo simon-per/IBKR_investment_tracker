@@ -596,6 +596,27 @@ The largest finding of the loop, and it sits on the project's most important rul
   present and names the security; the clean-report direction moved to a fixture that is actually
   clean.
 
+### Thread 13 — the era splice leaked one dividend per security, at the boundary
+
+- **13.7% of 2026's dividend income was double-counted**, on every reader that splices.
+  `_splice_by_era` keeps estimates strictly before the first IBKR payment — but the two sources file
+  the *same* payment under different dates (yfinance by ex-date, IBKR by pay-date), so the first IBKR
+  payment's own estimate sits before the boundary and survives beside the IBKR row it duplicates.
+  Found by reading the Activity ledger, boundary 2026-02-18, ASML held on two exchanges:
+  `02-09` + `02-10` estimates next to two `02-18` IBKR rows. **Four rows for two dividends.**
+  Measured: 2026 read **48.14 CHF**, of which **5.80** is the duplicate pair → **42.34 CHF** correct.
+  It moved the breakdown, the summary card, XIRR's dividend inflows, the tax report's DA-1 income and
+  the ledger simultaneously, which is why nothing disagreed and nothing caught it.
+  Now matched per security, nearest-first, **one-to-one**, bounded by `EX_TO_PAY_MAX_LAG_DAYS` (30).
+  One-to-one is what makes the window safe for a monthly payer whose cycle is shorter than it.
+  **The width errs toward keeping**: 45 was tried first and deleted a genuine dividend 45 days out —
+  too wide removes real income from a filing aid, too narrow leaves a visible, already-badged
+  duplicate, and understating taxable income is the worse failure.
+  The account's one genuine pre-boundary estimate (MA, 40 days before the boundary) is preserved.
+
+**Expect after deploy:** 2026 dividend income drops ~5.80 CHF across the Dividends tab, the
+Performance card, the tax report and the ledger. That is the correction, not data loss.
+
 **After they deploy, check:** the chart and hero row show no yellow notice (nothing is unpriced today);
 `summary.unpriced_holdings == 0` and equals the last timeline point's; Sharpe and Top 5 Weight still show
 numbers on a normal range and dashes on MTD early in a month; and `days_held_in_ttm` is unchanged for all
