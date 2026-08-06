@@ -454,6 +454,23 @@ that way understates. `find_stale_priced_securities` guarded only the current sn
   **Checked against production before fixing:** all three currently sum to 100.00/100.01, so nothing
   on screen is wrong today. This is hardening against the next purchase, not a live correction.
 
+### Thread 7 — the consumer missed when its siblings were guarded
+
+- **`computeModifiedDietzReturn` had no unpriced-day guard**, so the Monthly Returns heatmap and its
+  **YTD column** were still exposed to the stalled-feed failure the risk row had just been protected
+  from. Modified Dietz reads only the two endpoint market values and the flows between them, so an
+  incomplete endpoint is not a small error but the whole answer: a stale month end reads as a loss, a
+  stale start as a gain, and past the backend's 14-day lookback the period prints **-100%**. YTD is the
+  worst case — it ends on *today*, exactly the day a stalled feed breaks.
+  It now **trims** leading and trailing unmeasurable points rather than refusing the period. That is
+  exact, not approximate: Dietz never reads an interior market value, so the result over the kept days
+  is a true return for those days, and discarding a whole month over one stale day would lose more than
+  it protects. `partial` rides on the result, the cell is badged `†`, and a footnote explains it —
+  a caveat living only in a `title` attribute does not exist on a phone.
+  **The lesson is the miss, not the fix.** "I guarded the consumers of `unpriced_holdings`" was true
+  and incomplete on the same day: two were found by reading the risk row, and the third only turned up
+  by listing every importer of the timeline type. Grep the type, not the screen.
+
 **After they deploy, check:** the chart and hero row show no yellow notice (nothing is unpriced today);
 `summary.unpriced_holdings == 0` and equals the last timeline point's; Sharpe and Top 5 Weight still show
 numbers on a normal range and dashes on MTD early in a month; and `days_held_in_ttm` is unchanged for all

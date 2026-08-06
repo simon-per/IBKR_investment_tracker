@@ -74,3 +74,92 @@ describe('computeModifiedDietzReturn', () => {
     ).toBeNull()
   })
 })
+
+/**
+ * The third consumer of `unpriced_holdings`, and the one missed when
+ * `dailyReturnSeries` and `betaAndCorrelation` were guarded.
+ *
+ * Modified Dietz reads only the two endpoint values and the flows between them,
+ * so an incomplete endpoint is not a small error. `market_value_eur` omits the
+ * holdings the backend could not price while the flows do not, so a stale end
+ * reads as a loss and a stale start as a gain — and past the backend's 14-day
+ * lookback every holding drops out and the period prints -100%.
+ */
+describe('days the backend could not fully value', () => {
+  function partialPoint(date: string, mv: number, cost: number, unpriced: number): PortfolioValuePoint {
+    return { ...point(date, mv, cost, 0), unpriced_holdings: unpriced }
+  }
+
+  it('does not read a stalled feed at month end as a loss', () => {
+    // Flat month, then the last day loses half the book to an unpriced holding.
+    const r = computeModifiedDietzReturn([
+      point('2026-03-01', 1000, 900, 0),
+      point('2026-03-30', 1000, 900, 0),
+      partialPoint('2026-03-31', 500, 900, 3),
+    ])
+    expect(r?.returnPercent).toBeCloseTo(0, 6)
+    expect(r?.endValue).toBe(1000)
+    expect(r?.partial).toBe(true)
+  })
+
+  it('does not read a stalled feed at period start as a gain', () => {
+    const r = computeModifiedDietzReturn([
+      partialPoint('2026-03-01', 500, 900, 3),
+      point('2026-03-02', 1000, 900, 0),
+      point('2026-03-31', 1000, 900, 0),
+    ])
+    expect(r?.returnPercent).toBeCloseTo(0, 6)
+    expect(r?.startValue).toBe(1000)
+    expect(r?.partial).toBe(true)
+  })
+
+  it('never manufactures the -100% a fully unpriced tail produces', () => {
+    // Every holding past the lookback: the backend reports 0.00 market value.
+    const r = computeModifiedDietzReturn([
+      point('2026-03-01', 1000, 900, 0),
+      point('2026-03-30', 1020, 900, 0),
+      partialPoint('2026-03-31', 0, 900, 5),
+    ])
+    expect(r?.returnPercent).toBeCloseTo(2, 6)
+    expect(r?.returnPercent).toBeGreaterThan(-100)
+  })
+
+  it('leaves a complete period untouched and unflagged', () => {
+    const r = computeModifiedDietzReturn([
+      point('2026-03-01', 1000, 900, 0),
+      point('2026-03-31', 1050, 900, 0),
+    ])
+    expect(r?.returnPercent).toBeCloseTo(5, 6)
+    expect(r?.partial).toBeUndefined()
+  })
+
+  it('ignores an interior gap, which cannot affect the arithmetic', () => {
+    // Nothing reads an interior market value, so trimming there would discard
+    // real days for no gain — and would wrongly flag the period as partial.
+    const r = computeModifiedDietzReturn([
+      point('2026-03-01', 1000, 900, 0),
+      partialPoint('2026-03-15', 400, 900, 2),
+      point('2026-03-31', 1050, 900, 0),
+    ])
+    expect(r?.returnPercent).toBeCloseTo(5, 6)
+    expect(r?.partial).toBeUndefined()
+  })
+
+  it('refuses rather than guessing when nothing in the period is measurable', () => {
+    expect(computeModifiedDietzReturn([
+      partialPoint('2026-03-01', 500, 900, 3),
+      partialPoint('2026-03-31', 400, 900, 3),
+    ])).toBeNull()
+  })
+
+  it('treats an absent field as complete, not as unmeasurable', () => {
+    // The field only exists from 2026-08-05; reading `undefined` as incomplete
+    // would flag every period served by an older backend.
+    const r = computeModifiedDietzReturn([
+      point('2026-03-01', 1000, 900, 0),
+      point('2026-03-31', 1050, 900, 0),
+    ])
+    expect(r).not.toBeNull()
+    expect(r?.partial).toBeUndefined()
+  })
+})

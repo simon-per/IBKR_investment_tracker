@@ -21,6 +21,22 @@ interface YearRow {
 
 const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
+/**
+ * One tooltip builder for both the month cells and the YTD column — they carried
+ * two copies of the same template string, so the partial note would have had to be
+ * added twice, and the YTD one is the likelier to be forgotten.
+ */
+function cellTitle(label: string, m: MonthReturn, curSym: string): string {
+  const money = (n: number) => `${curSym}${n.toLocaleString('en-US', { maximumFractionDigits: 0 })}`
+  const sign = m.returnPercent >= 0 ? '+' : ''
+  return [
+    `${label}: ${sign}${m.returnPercent.toFixed(2)}% (${money(m.startValue)} → ${money(m.endValue)})`,
+    ...(m.newInvestment > 0 ? [`+${money(m.newInvestment)} invested`] : []),
+    // Names which days were dropped and why, rather than leaving a bare dagger.
+    ...(m.partial ? ['† measured over part of the period — the edge days could not be fully valued'] : []),
+  ].join(' · ')
+}
+
 function getReturnColor(pct: number): string {
   // Clamp to [-10, 10] for color scaling
   const clamped = Math.max(-10, Math.min(10, pct))
@@ -93,6 +109,10 @@ export function MonthlyReturnsHeatmap({ data, isLoading, isError }: MonthlyRetur
     rows.sort((a, b) => b.year - a.year)
     return rows
   }, [data])
+
+  const hasPartial = yearRows.some(
+    row => row.ytd?.partial || row.months.some(m => m?.partial)
+  )
 
   // Summary text for collapsed state
   let summaryText: React.ReactNode = 'Monthly return percentages by year'
@@ -185,9 +205,10 @@ export function MonthlyReturnsHeatmap({ data, isLoading, isError }: MonthlyRetur
                                 'rounded px-1.5 py-1 text-center text-xs font-medium',
                                 getReturnColor(m.returnPercent)
                               )}
-                              title={`${MONTH_LABELS[i]} ${row.year}: ${m.returnPercent >= 0 ? '+' : ''}${m.returnPercent.toFixed(2)}% (${curSym}${m.startValue.toLocaleString('en-US', { maximumFractionDigits: 0 })} → ${curSym}${m.endValue.toLocaleString('en-US', { maximumFractionDigits: 0 })})${m.newInvestment > 0 ? ` · +${curSym}${m.newInvestment.toLocaleString('en-US', { maximumFractionDigits: 0 })} invested` : ''}`}
+                              title={cellTitle(`${MONTH_LABELS[i]} ${row.year}`, m, curSym)}
                             >
                               {m.returnPercent >= 0 ? '+' : ''}{m.returnPercent.toFixed(1)}%
+                              {m.partial && <span aria-hidden="true">†</span>}
                             </div>
                           ) : (
                             <div className="text-center text-xs text-muted-foreground py-1">–</div>
@@ -201,9 +222,10 @@ export function MonthlyReturnsHeatmap({ data, isLoading, isError }: MonthlyRetur
                               'rounded px-1.5 py-1 text-center text-xs font-medium',
                               getReturnColor(row.ytd.returnPercent)
                             )}
-                            title={`YTD ${row.year}: ${row.ytd.returnPercent >= 0 ? '+' : ''}${row.ytd.returnPercent.toFixed(2)}% (${curSym}${row.ytd.startValue.toLocaleString('en-US', { maximumFractionDigits: 0 })} → ${curSym}${row.ytd.endValue.toLocaleString('en-US', { maximumFractionDigits: 0 })})${row.ytd.newInvestment > 0 ? ` · +${curSym}${row.ytd.newInvestment.toLocaleString('en-US', { maximumFractionDigits: 0 })} invested` : ''}`}
+                            title={cellTitle(`YTD ${row.year}`, row.ytd, curSym)}
                           >
                             {row.ytd.returnPercent >= 0 ? '+' : ''}{row.ytd.returnPercent.toFixed(1)}%
+                            {row.ytd.partial && <span aria-hidden="true">†</span>}
                           </div>
                         ) : (
                           <div className="text-center text-xs text-muted-foreground py-1">–</div>
@@ -214,6 +236,16 @@ export function MonthlyReturnsHeatmap({ data, isLoading, isError }: MonthlyRetur
                 </tbody>
               </table>
             </ScrollableTable>
+          )}
+          {/* The dagger has to be explained somewhere reachable without a pointer —
+              a caveat that only exists in a `title` attribute does not exist on a
+              phone, which this codebase has already learned once. */}
+          {hasPartial && (
+            <p className="mt-2 text-xs text-muted-foreground">
+              † Measured over part of the period: some days could not be fully valued, so they
+              are excluded rather than counted at zero. A stalled market-data sync is the usual
+              cause.
+            </p>
           )}
         </CardContent>
       )}

@@ -1251,7 +1251,7 @@ tax *lots* while the swept one walks *securities*, so it counts a **set of ids**
 report 110 for a holding split across 110 lots and break that equivalence. The field is declared on
 `PortfolioValuePoint`, without which the `response_model` would have dropped it silently.
 
-**The client acts on it in two places, and the metrics one matters more than the chart.** A pair spanning
+**The client acts on it in three places, and the metric ones matter more than the chart.** A pair spanning
 a complete day and an incomplete one manufactures a move that never happened — 64,944 then 0 is **−100%
 in a single day** — and `dailyReturnSeries` feeds *everything*: max drawdown, current drawdown,
 volatility, Sharpe, Sortino. So a stalled feed did not merely bend the line, it moved the whole risk row
@@ -1259,6 +1259,16 @@ to match, with each number looking individually reasonable. `isMeasurable()` now
 either end incomplete, exactly as a flow disqualifies a day for beta: excluding it costs a point and
 biases nothing, while keeping it invents one. `betaAndCorrelation` needs the guard **separately**,
 because it derives its own returns rather than going through `dailyReturnSeries`.
+
+**`computeModifiedDietzReturn` is the third, and it was missed when the other two were written** —
+which is the part worth remembering, because "I guarded the consumers" was true and incomplete on the
+same day. It behaves differently from them by necessity: Modified Dietz reads only the two **endpoint**
+market values and the flows between, so an incomplete endpoint is not a small error but the entire
+answer, while an incomplete *interior* day cannot affect it at all. Dropping a whole month over one
+stale day would also lose far more than it protects. So it **trims** leading and trailing unmeasurable
+points instead of refusing, which is exact rather than approximate — a true Dietz return over the days
+it kept — and sets `partial` so `MonthlyReturnsHeatmap` can badge the cell `†` with a footnote. The
+**YTD column is the one that matters**: it ends on *today*, precisely the day a stalled feed breaks.
 
 The chart still *plots* those days — a hole in the line would be its own kind of lie — so
 `PortfolioValueChart` renders a `role="alert"` naming how many days and how many holdings, and saying the
@@ -1698,7 +1708,7 @@ raiser for that whole module, so an accidental network reach fails loudly; `/api
 is excluded because it lazy-fetches Yahoo on a cache miss, and POST routes are excluded because they
 start real syncs. **Add a case here when an endpoint's response shape changes.**
 
-Tests (752 backend + 376 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
+Tests (752 backend + 383 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
 calls). Take the number the suite actually prints as your baseline, not this line — it has been stale
 by 200+ on both halves before:
 ```bash
