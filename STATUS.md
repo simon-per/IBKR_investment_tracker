@@ -1,6 +1,8 @@
 # Working state
 
-**Last updated: 2026-08-05 (later still).** Newest first: the Activity ledger no longer lists every
+**Last updated: 2026-08-06.** Newest first: three ETFs bought on 08-06 are pending IBKR's next
+statement (see *Watching* — the Flex window ends yesterday, so a same-day download cannot carry them);
+the Activity ledger no longer lists every
 dividend twice (it was the one reader missing the era splice, overstating dividend income 72%); yield on
 cost is a Positions column; the permanent 27-attribute sync banner is gone; yield on cost no longer
 falls when you add to a holding; Beta shows a value for the first time (β 1.03 / r 0.74 vs S&P 500 — it
@@ -54,6 +56,28 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
   on its own once ingested.
 
 ## Watching
+
+- **Three new ETFs — VT, GRID, QTUM — were bought on 2026-08-06 and are NOT on record yet.** Not a
+  fault: the Flex window ends yesterday (now written up in CLAUDE.md's *The Flex Query*), so the
+  statement downloaded that evening reads `to=2026-08-05` and contains none of them. A dry-run of it
+  through `ingest_flex_xml` on production returned exactly what the 06:00 Berlin job had already
+  written — 36 securities, 979 lots, 13 trades, 7 cash flows — i.e. a no-op. **They should appear by
+  themselves at the 00:00 or 06:00 Berlin slot on 08-07**; the check is `max(trade_date)` in `trades`,
+  which sat at 2026-07-29 before they landed.
+
+  Two things to look at once they do, in this order:
+
+  - **Prices need no mapping and should just work.** All three are US listings, and every US listing on
+    this account (18 of them) resolves through tier 2's empty suffix to the bare Yahoo ticker with no
+    `ticker_mappings` row at all — the SOXQ shape, where `_get_yahoo_ticker_variations()` yields a
+    single candidate so the bare-symbol auto-save that poisoned SBI is never reached. If any of the
+    three shows `market_price: null` after the next 08:00, *then* check the mapping.
+  - **`app/etf_mappings.py` has no entry for any of them**, so `get_etf_allocation` returns `None` and
+    `allocation_service` falls through to yfinance `.info`, which carries no sector or country for a
+    fund — three ETFs' worth of the book lands in the unattributed buckets on the Allocation tab.
+    Fixing it means hand-written geographic splits, which is why SOXQ's entry is still filed under
+    *Wants Simon's judgement* rather than treated as data. VT is a total-world fund, so its split is
+    the one worth getting from the fund's own country weights rather than estimating.
 
 - **The deploy guard now covers all nine slots, installed 2026-08-04.** `/root/auto-deploy.sh` is
   byte-identical to `ops/auto-deploy.sh` (verified by sha256), so the copy `test_deploy_guard_hours.py`
@@ -852,6 +876,12 @@ detail; this exists so the next session knows what just moved without reading it
 confirmed) and gets deleted once nothing in it is outstanding: these lines are permanent, so don't
 "tidy up" the overlap by deleting the wrong one.
 
+- **2026-08-06** — asked to ingest a statement carrying that day's VT/GRID/QTUM buys and a fresh
+  deposit; the statement could not contain them. Generated 18:27 Berlin, it reads `to=2026-08-05` with
+  every open-position row stamped `reportDate=20260805`, because the rolling period is the 30 days
+  ending on the last *completed* day. A production dry-run confirmed it was a byte-for-byte no-op
+  against what the 06:00 job had already ingested, so nothing was written. Recorded in CLAUDE.md so
+  the next "I bought today" does not become a hunt for a broken sync.
 - **2026-08-05 (later still)** — the Activity ledger listed every dividend twice: the yfinance estimate
   under its ex-date and the IBKR actual under its pay date, because `ActivityService._dividends` was the
   one reader not applying `_splice_by_era`. 31 duplicate rows, dividend income overstated 72%, and
@@ -877,10 +907,3 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
   `open_date` — so under CHF the inference measured EUR/CHF, not flow, and beta could never have
   rendered. One line in `portfolioKpis.ts`; the backend's two conversion rules are recorded in *Worth
   doing next* rather than fixed.
-- **2026-08-04** — the Performance tab reports the portfolio's dividend rate. The premise that Yahoo
-  already supplies per-security yields was wrong (no dividend field exists in the backend at all), but
-  `growth.next_12m_eur` and the per-security market values were already in one service call, so the
-  whole feature was a division nothing performed. A weighted average of per-security yields *is*
-  Σincome/Σvalue, so nothing is weighted by hand. Three defects were caught in review after the code
-  was written: a hoisted DB call that would have turned "yields omitted" into a 500, a reachable
-  `0.00%` that meant "the only payer is unpriced", and a loading gate that hid four working metrics.

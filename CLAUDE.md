@@ -264,6 +264,18 @@ Prior tax years need a one-off period change (e.g. 2025), then set back. Ingesti
 (upserts keyed on `ib_key`), so re-syncing is safe — which is also the recovery if a bounded window
 ever *does* miss something: download a wider statement from Client Portal and ingest it offline.
 
+**The rolling window ends *yesterday*, so today's activity cannot be ingested today.** A statement
+generated 2026-08-06 18:27 Berlin came back `from=2026-07-07 to=2026-08-05`, with the OpenPositions
+snapshot stamped `reportDate=20260805` on all 979 lots — "Last 30 Calendar Days" means the 30 days
+ending on the last *completed* statement day, not the 30 up to now. So a same-day buy is absent from
+every section at once: no trade row, no lot, and no deposit for the cash that funded it. This is the
+expected answer to "I bought today, update the data" — **nothing needs forcing and nothing is
+broken**; the next 00:00 or 06:00 Berlin `ibkr_only_sync_job` picks it up once IBKR's overnight
+processing rolls the window forward. Downloading a fresh statement in the evening does not help,
+because it is the period definition and not the generation time that excludes the day. Only a
+**custom date range** ending today can reach it, which is a portal edit and has to be set back
+afterwards — worth it for a prior-year backfill, not for waiting one night.
+
 ### Offline ingest — the escape hatch from a locked token
 
 The Flex **Web Service** and the **download button** in Client Portal serve the same statement over
