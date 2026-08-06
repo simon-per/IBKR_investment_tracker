@@ -201,6 +201,15 @@ reading a screen and disbelieving a number, which is the lens of last resort. No
 second: its docstring said it matched "the same test the two dividend readers use", singular. A comment
 claiming alignment with one rule is evidence worth checking for the others.
 
+**A correct copy is still a copy, and that is the sharpest form of the rule.** The ledger's inline
+era-splice comparison agreed with the helper exactly — for two days, until the helper learned to drop
+the boundary duplicate and the ledger did not. Its inline `_net_eur` and `_is_income` equivalents
+agreed to the digit too, and were replaced for the same reason rather than because they were wrong.
+So the test to write is **"is there a copy at all"**, not "do the copies agree": agreement is what a
+copy looks like right up to the moment it stops being one.
+`tests/test_era_splice_boundary.py` enforces both — no service may read dividend rows without
+reaching `_splice_by_era`, and none may decide the net-vs-gross fallback locally.
+
 **When you find one, extract rather than sync the copies** — that is what `ttm_growth.py`,
 `peg_ratio.py` and `safe_numbers.py` are — and write the test against the **family** ("every service
 resolving a ticker agrees with the price path") rather than the instance, so the next service to roll
@@ -1801,7 +1810,7 @@ raiser for that whole module, so an accidental network reach fails loudly; `/api
 is excluded because it lazy-fetches Yahoo on a cache miss, and POST routes are excluded because they
 start real syncs. **Add a case here when an endpoint's response shape changes.**
 
-Tests (790 backend + 399 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
+Tests (791 backend + 399 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
 calls). Take the number the suite actually prints as your baseline, not this line — it has been stale
 by 200+ on both halves before:
 ```bash

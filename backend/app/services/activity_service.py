@@ -382,12 +382,16 @@ class ActivityService:
         symbols = await self._symbols_by_id()
         out = []
         for p in payments:
-            gross = p.gross_amount_eur or Decimal("0")
-            # Rows predating the withholding-fields migration carry a NULL net; gross is
-            # the honest stand-in, matching DividendService._net_eur.
-            net = p.net_amount_eur if p.net_amount_eur is not None else gross
-            if not (gross > 0 or (net or 0) > 0):
+            # The shared helpers, not local equivalents of them. These were inline
+            # copies that happened to agree to the digit — which is exactly what the
+            # inline era-splice copy did, right up until the rule it copied changed and
+            # this ledger silently stopped matching every other reader. `_net_eur`'s own
+            # docstring says every consumer must use it; a consumer that reimplements it
+            # correctly is still one that will not follow it.
+            if not DividendService._is_income(p):
                 continue
+            gross = p.gross_amount_eur or Decimal("0")
+            net = DividendService._net_eur(p)
 
             when = p.pay_date or p.ex_date
             withholding = p.withholding_tax_eur or Decimal("0")

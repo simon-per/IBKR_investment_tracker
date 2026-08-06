@@ -183,3 +183,37 @@ def test_every_reader_of_dividend_rows_goes_through_the_shared_splice():
         "pay-date — so a reader that skips the splice double-counts every dividend in "
         "the IBKR era."
     )
+
+
+def test_no_reader_reimplements_the_net_or_income_rules():
+    """
+    The same requirement for the other two dividend rules, checked the same way.
+
+    `_net_eur` falls back to gross for rows predating the withholding-fields migration
+    (its docstring says "every consumer must"), and `_is_income` excludes the zero rows
+    yfinance's full history produces. `ActivityService` had inline equivalents of both.
+    They agreed to the digit — which is precisely what its inline era-splice copy did,
+    right up until the rule changed underneath it.
+
+    So the test is not "do the copies agree" (they did) but "is there a copy at all".
+    """
+    services = pathlib.Path(__file__).resolve().parents[1] / "app" / "services"
+    # The tell of a local reimplementation: reading the nullable net column directly
+    # and choosing a fallback, or testing both money columns for positivity.
+    suspicious = (
+        "net_amount_eur is not None",
+        "net_amount_eur if",
+    )
+    offenders = []
+    for path in sorted(services.glob("*.py")):
+        if path.name == "dividend_service.py":
+            continue  # the definition lives here
+        source = path.read_text(encoding="utf-8")
+        for marker in suspicious:
+            if marker in source:
+                offenders.append(f"{path.name} ({marker!r})")
+    assert not offenders, (
+        f"{offenders} decide the net-vs-gross fallback locally instead of calling "
+        "DividendService._net_eur. A correct copy is still a copy — it stops being "
+        "correct the moment the rule moves."
+    )

@@ -629,6 +629,22 @@ The largest finding of the loop, and it sits on the project's most important rul
   `test_era_splice_boundary.py` now **fails any service that reads dividend rows without reaching
   the helper**, which is the guard that would have caught this class both times.
 
+### Thread 15 — the other two rule-copies in the same file
+
+- **`ActivityService` also reimplemented `_net_eur` and `_is_income`.** Both agreed with the helpers
+  to the digit, which is why an earlier pass of this loop looked at them and moved on. That judgement
+  was wrong for the reason Thread 14 demonstrated on a two-day-old copy: **agreement is what a copy
+  looks like right until the rule moves.** `_net_eur`'s own docstring says "every consumer must" use
+  it. Both now call the helpers, and the structural guard covers all three rules — no service may read
+  dividend rows without reaching `_splice_by_era`, and none may decide the net-vs-gross fallback
+  locally.
+
+**Verified and not drifted** (checked rather than assumed, since CLAUDE.md asserts it):
+`lib/dividendGrowth.ts` still matches `DividendService._pct` and the annual-row loop on all four
+copied rules — adjacency, the zero-base refusal, 1-decimal rounding, and `yoy_vs_partial` reading the
+*previous* row's flag only when adjacent. It remains the one duplicate that has survived, because both
+ends write their reasoning down.
+
 **Expect after deploy:** 2026 dividend income drops ~5.80 CHF across the Dividends tab, the
 Performance card, the tax report and the ledger. That is the correction, not data loss.
 
