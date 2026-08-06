@@ -527,7 +527,7 @@ class DividendService:
                 or (p.net_amount_eur or Decimal("0")) > 0)
 
     @staticmethod
-    def _splice_by_era(payments: List) -> tuple:
+    def _splice_by_era(payments: List, *, boundary: Optional[date] = None) -> tuple:
         """
         Honest mix of the two sources: yfinance estimates strictly BEFORE the first
         IBKR payment date, authoritative IBKR rows from there on.
@@ -538,11 +538,24 @@ class DividendService:
         while keeping estimates inside the IBKR era would double-count the same
         dividend from both sources. Returns (kept_payments, ibkr_from) where
         ibkr_from is None when no IBKR rows exist.
+
+        ``boundary`` overrides the derived era start, for the one caller that windows
+        before splicing (``ActivityService._dividends``). It must also widen its fetch
+        by ``EX_TO_PAY_MAX_LAG_DAYS`` on both sides, because the duplicate match below
+        needs the IBKR row that pairs with a windowed estimate — which can fall outside
+        the window even when the estimate does not.
         """
         ibkr_rows = [p for p in payments if p.source == "ibkr"]
-        if not ibkr_rows:
-            return list(payments), None
-        boundary = min((p.pay_date or p.ex_date) for p in ibkr_rows)
+        if boundary is None:
+            # Derived from the rows given, which is right for every reader that splices
+            # the FULL history. A caller that windows first must pass the whole-table
+            # boundary instead (`DividendRepository.earliest_ibkr_payment_date`), or a
+            # window opening after the era began would treat its own earliest IBKR row
+            # as the era start and resurrect superseded estimates.
+            if not ibkr_rows:
+                return list(payments), None
+            boundary = min((p.pay_date or p.ex_date) for p in ibkr_rows)
+
         kept = [
             p for p in payments
             if p.source == "ibkr" or (p.pay_date or p.ex_date) < boundary

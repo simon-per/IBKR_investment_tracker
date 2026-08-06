@@ -24,7 +24,7 @@ import csv
 import io
 import logging
 from dataclasses import dataclass, asdict
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import Dict, List, Optional, Sequence
 
@@ -38,6 +38,7 @@ from app.repositories.corporate_action_repository import CorporateActionReposito
 from app.repositories.dividend_repository import DividendRepository
 from app.repositories.trade_repository import TradeRepository
 from app.services.currency_service import CurrencyService
+from app.services.dividend_service import DividendService, EX_TO_PAY_MAX_LAG_DAYS
 
 logger = logging.getLogger(__name__)
 
@@ -348,24 +349,39 @@ class ActivityService:
         test — while missing the other.
 
         The boundary must come from the whole table, which is why the repository has an
-        accessor for it: this method windows first, and `_splice_by_era` derives the
-        boundary from whatever rows it is given, so splicing the window would let a
+        accessor for it: `_splice_by_era` derives the boundary from whatever rows it is
+        given, and this method windows first, so splicing the window alone would let a
         window opening after the era start resurrect superseded estimates. Pre-boundary
         estimates are still kept and still badged — dropping those is the mirror-image
         bug, and it once erased every pre-IBKR month from the dividend card.
+
+        **This calls the shared helper rather than reimplementing its rule.** It used to
+        inline the boundary comparison, which was correct until the helper gained its
+        boundary-duplicate match on 2026-08-05 — at which point the ledger silently kept
+        showing the pair every other reader had stopped showing. A copy of a rule stays
+        correct only until the rule changes, which is this codebase's oldest lesson and
+        was worth relearning on a two-day-old copy.
+
+        The fetch is widened by `EX_TO_PAY_MAX_LAG_DAYS` on both sides and narrowed back
+        afterwards, because the IBKR row that pairs with a windowed estimate can fall
+        outside the window even when the estimate does not: asking for 1-15 February
+        would otherwise show an estimate whose IBKR twin lands on the 18th.
         """
         repo = DividendRepository(self.db)
-        payments = await repo.get_between(start, end)
+        lag = timedelta(days=EX_TO_PAY_MAX_LAG_DAYS)
+        widened = await repo.get_between(start - lag, end + lag)
         ibkr_from = await repo.earliest_ibkr_payment_date()
+        kept, _ = DividendService._splice_by_era(widened, boundary=ibkr_from)
+
+        # Back to the window the caller asked for, now that the duplicates are gone.
+        payments = [
+            p for p in kept
+            if start <= (p.pay_date or p.ex_date) <= end
+        ]
+
         symbols = await self._symbols_by_id()
         out = []
         for p in payments:
-            if (
-                ibkr_from is not None
-                and p.source != "ibkr"
-                and (p.pay_date or p.ex_date) >= ibkr_from
-            ):
-                continue
             gross = p.gross_amount_eur or Decimal("0")
             # Rows predating the withholding-fields migration carry a NULL net; gross is
             # the honest stand-in, matching DividendService._net_eur.

@@ -708,3 +708,111 @@ async def test_the_repository_boundary_agrees_with_the_splice_helper(db):
     _, from_helper = DividendService._splice_by_era(await repo.get_computed_dividends())
 
     assert from_repo == from_helper == IBKR_ERA_START - timedelta(days=7)
+
+
+# ── The ledger follows the splice, including the parts added after it ──────────
+
+async def _seed_boundary_pair(session: AsyncSession) -> None:
+    """
+    The production shape: ASML's dividend recorded twice, an estimate under its
+    ex-date and the IBKR actual under its pay-date nine days later, with the IBKR
+    row being the first of the era.
+    """
+    session.add(AppSetting(key="base_currency", value="EUR"))
+    session.add(Security(
+        id=1, isin="NL0010273215", symbol="ASML", description="ASML Holding",
+        currency="EUR", conid=9001, asset_category="STK", exchange="AEB",
+    ))
+    # The same dividend, seen twice.
+    session.add(DividendPayment(
+        security_id=1, ex_date=date(2026, 2, 9), pay_date=date(2026, 2, 9), currency="EUR",
+        shares_held=Decimal("10"), gross_amount_eur=Decimal("14.60"),
+        withholding_tax_eur=Decimal("0"), net_amount_eur=Decimal("14.60"),
+        source="yfinance_estimate",
+    ))
+    session.add(DividendPayment(
+        # IBKR rows carry the PAY date in ex_date too — the column holds an ex-date
+        # for yfinance rows and the pay date for IBKR ones (see CLAUDE.md on the
+        # (security_id, source, ex_date) identity).
+        security_id=1, ex_date=date(2026, 2, 18), pay_date=date(2026, 2, 18), currency="EUR",
+        shares_held=Decimal("10"), gross_amount_eur=Decimal("12.00"),
+        withholding_tax_eur=Decimal("1.80"), net_amount_eur=Decimal("10.20"),
+        source="ibkr",
+    ))
+    # Genuine earlier income, well outside the lag window — must survive.
+    session.add(DividendPayment(
+        security_id=1, ex_date=date(2025, 11, 5), pay_date=date(2025, 11, 5), currency="EUR",
+        shares_held=Decimal("10"), gross_amount_eur=Decimal("9.00"),
+        withholding_tax_eur=Decimal("0"), net_amount_eur=Decimal("9.00"),
+        source="yfinance_estimate",
+    ))
+    await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_the_ledger_drops_the_boundary_duplicate_like_every_other_reader(db):
+    await _seed_boundary_pair(db)
+
+    result = await ActivityService(db).get_activity(
+        start_date=date(2026, 1, 1), end_date=date(2026, 3, 31), kinds=[DIVIDEND],
+    )
+    dates = sorted(r["date"] for r in result["items"])
+
+    assert dates == ["2026-02-18"], (
+        "the ledger still shows the estimate its IBKR twin supersedes — it reimplemented "
+        "the boundary rule instead of calling the shared helper, so it did not inherit "
+        "the duplicate match"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_window_that_excludes_the_ibkr_twin_still_drops_the_estimate(db):
+    """
+    The reason the fetch is widened. Asking for 1-15 February contains the estimate
+    but not the IBKR row it duplicates, so a naive implementation has nothing to match
+    against and shows the superseded estimate as income.
+    """
+    await _seed_boundary_pair(db)
+
+    result = await ActivityService(db).get_activity(
+        start_date=date(2026, 2, 1), end_date=date(2026, 2, 15), kinds=[DIVIDEND],
+    )
+
+    assert result["items"] == [], (
+        "a narrow window resurrected the duplicate because its IBKR twin fell outside it"
+    )
+
+
+@pytest.mark.asyncio
+async def test_genuine_pre_era_income_is_still_listed(db):
+    """The mirror-image bug: dropping real pre-IBKR months once blanked the card."""
+    await _seed_boundary_pair(db)
+
+    result = await ActivityService(db).get_activity(
+        start_date=date(2025, 1, 1), end_date=date(2026, 3, 31), kinds=[DIVIDEND],
+    )
+    dates = sorted(r["date"] for r in result["items"])
+
+    assert dates == ["2025-11-05", "2026-02-18"]
+    estimate = next(r for r in result["items"] if r["date"] == "2025-11-05")
+    assert estimate["subtype"] == "yfinance_estimate", "the badge must survive the splice"
+
+
+@pytest.mark.asyncio
+async def test_the_ledger_total_matches_the_breakdown_after_the_dedup(db):
+    """
+    The anti-divergence check, re-run against the corrected rule. Two readers of one
+    table that nothing compares is how the 72% overstatement got there, and comparing
+    them is also what would have caught the boundary pair — had both been wrong in the
+    same direction, which they now are not.
+    """
+    from app.services.dividend_service import DividendService
+
+    await _seed_boundary_pair(db)
+    span = dict(start_date=date(2025, 1, 1), end_date=date(2026, 12, 31))
+
+    ledger = await ActivityService(db).get_activity(kinds=[DIVIDEND], **span)
+    ledger_total = sum(r["amount_base"] for r in ledger["items"])
+
+    breakdown = await DividendService(db).get_dividend_breakdown(year=None, include_forecast=False)
+    assert ledger_total == pytest.approx(float(breakdown["total_net_eur"]), abs=0.01)

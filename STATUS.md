@@ -614,6 +614,21 @@ The largest finding of the loop, and it sits on the project's most important rul
   duplicate, and understating taxable income is the worse failure.
   The account's one genuine pre-boundary estimate (MA, 40 days before the boundary) is preserved.
 
+### Thread 14 — the fix from Thread 13 did not reach the ledger
+
+- **`ActivityService._dividends` reimplemented the boundary rule inline**, for a good reason: it
+  windows before splicing and so needs the whole-table boundary. That copy was correct the day it
+  was written (Thread 13's predecessor) and silently wrong two days later, the moment the shared
+  helper gained its duplicate match — every other reader stopped showing the ASML pair and the
+  ledger kept showing it. **A copy of a rule stays correct only until the rule changes**, which is
+  this codebase's oldest lesson, relearned here on a two-day-old copy of my own.
+  `_splice_by_era` now takes an explicit `boundary`, so the windowing caller is a real caller
+  instead of a copy, and the ledger widens its fetch by `EX_TO_PAY_MAX_LAG_DAYS` on both sides and
+  narrows back afterwards — the IBKR row that pairs with a windowed estimate can fall outside the
+  window even when the estimate does not, so asking for 1–15 February would otherwise resurrect it.
+  `test_era_splice_boundary.py` now **fails any service that reads dividend rows without reaching
+  the helper**, which is the guard that would have caught this class both times.
+
 **Expect after deploy:** 2026 dividend income drops ~5.80 CHF across the Dividends tab, the
 Performance card, the tax report and the ledger. That is the correction, not data loss.
 

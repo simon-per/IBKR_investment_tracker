@@ -22,6 +22,7 @@ The match is per security, nearest-first, one-to-one and bounded by
 amounts are exactly what you cannot rely on.
 """
 
+import pathlib
 from datetime import date, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -146,3 +147,39 @@ def test_a_history_with_no_ibkr_rows_is_untouched():
     kept, boundary = DividendService._splice_by_era(payments)
     assert boundary is None
     assert len(kept) == 2
+
+
+# ── The family rule ───────────────────────────────────────────────────────────
+
+def test_every_reader_of_dividend_rows_goes_through_the_shared_splice():
+    """
+    The guard that would have caught this class twice.
+
+    `ActivityService._dividends` reimplemented the boundary comparison inline — for a
+    good reason, since it windows before splicing and needs the whole-table boundary.
+    That copy was correct on the day it was written and silently wrong two days later,
+    when the helper gained its boundary-duplicate match: every other reader stopped
+    showing the pair and the ledger kept showing it.
+
+    A copy of a rule stays correct only until the rule changes. So the requirement is
+    structural: a module that pulls dividend rows out of the repository must also reach
+    the one place that decides which of them count. `_splice_by_era` now takes an
+    explicit `boundary` precisely so the windowing caller can comply.
+    """
+    services = pathlib.Path(__file__).resolve().parents[1] / "app" / "services"
+    readers = ("get_between", "get_computed_dividends")
+    offenders = []
+    for path in sorted(services.glob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        if "DividendRepository" not in source:
+            continue
+        if not any(r in source for r in readers):
+            continue
+        if "_splice_by_era" not in source:
+            offenders.append(path.name)
+    assert not offenders, (
+        f"{offenders} read dividend rows without going through _splice_by_era. "
+        "The same payment is stored twice — yfinance under its ex-date, IBKR under its "
+        "pay-date — so a reader that skips the splice double-counts every dividend in "
+        "the IBKR era."
+    )

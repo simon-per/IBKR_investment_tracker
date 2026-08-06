@@ -1475,6 +1475,16 @@ Five rules, each of which would be a bug the other way:
   XIRR and the tax report all splice — which is exactly why it survived: the only wrong surface was the
   one that merely displays.
 
+  **And it calls `_splice_by_era` rather than reimplementing its rule**, which it did
+  not until 2026-08-05. The inline copy was correct the day it was written and silently
+  wrong two days later, when the helper gained its boundary-duplicate match: every other
+  reader stopped showing the pair and the ledger kept showing it. `_splice_by_era` takes
+  an explicit `boundary` so the windowing caller can comply, and the fetch widens by
+  `EX_TO_PAY_MAX_LAG_DAYS` on both sides — the IBKR row that pairs with a windowed
+  estimate can fall outside the window even when the estimate does not, so asking for
+  1–15 February would otherwise resurrect the duplicate. `test_era_splice_boundary.py`
+  fails any service that reads dividend rows without reaching the helper.
+
   **The boundary must come from the whole table, not the window.** `_splice_by_era` derives
   `min(ibkr_dates)` from the rows handed to it, which is right for readers that splice the full history
   and wrong here, because the ledger windows *first*: fed a slice, a window opening after the era began
@@ -1791,7 +1801,7 @@ raiser for that whole module, so an accidental network reach fails loudly; `/api
 is excluded because it lazy-fetches Yahoo on a cache miss, and POST routes are excluded because they
 start real syncs. **Add a case here when an endpoint's response shape changes.**
 
-Tests (785 backend + 399 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
+Tests (790 backend + 399 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
 calls). Take the number the suite actually prints as your baseline, not this line — it has been stale
 by 200+ on both halves before:
 ```bash
