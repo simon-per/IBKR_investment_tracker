@@ -645,6 +645,26 @@ copied rules — adjacency, the zero-base refusal, 1-decimal rounding, and `yoy_
 *previous* row's flag only when adjacent. It remains the one duplicate that has survived, because both
 ends write their reasoning down.
 
+### Thread 16 — a stand-in that claimed a maximum rather than a zero
+
+- **`_compute_rsi` returned 100 for a series that never moved.** `avg_loss == 0` was treated as one
+  case when it is two: gains with no losses is a real, maximal RSI, while *nothing moving* leaves RSI
+  undefined. Returning 100 claims the strongest overbought reading the scale has.
+  The cost is concrete, because `_compute_buy_score` reads it: `rsi = 100` scores **0 of 10** on
+  technical timing while `rsi = None` scores a neutral **5**. The fabricated value was ten points
+  worse than admitting the metric could not be measured — and the neutral branch already existed,
+  which makes this a substitution rather than a missing case.
+  Reachable on a halted or delisted listing, a fixed-NAV fund or a very illiquid one, and the
+  watchlist is where arbitrary tickers get added. Every previous instance of this lens found a zero
+  standing in for unknown; this one is a **maximum**, so grepping for a suspicious `0` would not have
+  turned it up.
+  Seven tests, including a guard-on-the-guard: if the `rsi is None` branch ever stopped being the
+  midpoint, refusing would stop being better than guessing and the fix would go inert.
+
+**Verified correct on the same path:** `pct_from_52w_high` and `pct_from_ma200` only compute when
+their divisor is present and positive, so an absent one falls through to its own neutral branch. RSI
+was the only indicator substituting a confident extreme.
+
 **Expect after deploy:** 2026 dividend income drops ~5.80 CHF across the Dividends tab, the
 Performance card, the tax report and the ledger. That is the correction, not data loss.
 

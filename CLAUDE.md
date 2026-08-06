@@ -1586,6 +1586,16 @@ from one dominant one.
   Both absences are the same condition, so the footnote says *No priced positions* rather than leaving
   a bare "Concentration risk" under a dash.
 
+  **The same lens caught `_compute_rsi` on the backend, where the stand-in was a *maximum*, not a
+  zero.** `avg_loss == 0` returned `100.0`, conflating "an unbroken advance" with "nothing moved at
+  all" — RSI is undefined on a flat series, and 100 is the strongest overbought reading the scale
+  has. `_compute_buy_score` then scored it **0 of 10** on technical timing, while its own `rsi is
+  None` branch scores an unknown at a neutral **5**: the fabricated value was ten points worse than
+  admitting the metric was unmeasurable, and the honest branch already existed. Reachable on a
+  halted, delisted or fixed-NAV listing, which the watchlist is far more exposed to than the
+  portfolio. Every earlier instance of this lens found a zero, so grepping for a suspicious `0`
+  would not have found this one.
+
   **The lens worth reusing:** when a metric can be unknown, ask what its *stand-in value would claim*.
   A `0` volatility looks broken and gets noticed; a `0` Sharpe and a `0%` concentration both look like
   answers, and the concentration one looks like a *good* answer. Severity tracks plausibility, not
@@ -1810,7 +1820,7 @@ raiser for that whole module, so an accidental network reach fails loudly; `/api
 is excluded because it lazy-fetches Yahoo on a cache miss, and POST routes are excluded because they
 start real syncs. **Add a case here when an endpoint's response shape changes.**
 
-Tests (791 backend + 399 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
+Tests (798 backend + 399 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
 calls). Take the number the suite actually prints as your baseline, not this line — it has been stale
 by 200+ on both halves before:
 ```bash

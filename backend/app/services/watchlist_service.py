@@ -59,6 +59,22 @@ class WatchlistService:
             avg_loss = (avg_loss * (period - 1) + losses[i]) / period
 
         if avg_loss == 0:
+            # No down days — but which of two very different things that is depends on
+            # whether anything moved at all.
+            #
+            # Gains with no losses is a real, maximal RSI: an unbroken advance. Nothing
+            # moving is not. RSI is undefined on a flat series, and returning 100 there
+            # claims the strongest overbought reading the scale has —
+            # `_compute_buy_score` scores it **0 of 10** on technical timing, while its
+            # own `rsi is None` branch scores an unknown at a neutral **5**. So the
+            # fabricated value is a full ten points worse than admitting we cannot
+            # measure it, which is the wrong direction for a stand-in to err in.
+            #
+            # Reachable on a halted or delisted listing, a fixed-NAV fund or a very
+            # illiquid one — and the watchlist is where arbitrary tickers get added, so
+            # it is far more exposed to those than the portfolio is.
+            if avg_gain == 0:
+                return None
             return 100.0
 
         rs = avg_gain / avg_loss
