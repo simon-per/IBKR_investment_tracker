@@ -1428,6 +1428,21 @@ positions were not held. Unit tests could not see it because the shape needs a s
 `e2e/errors.mjs` covers it now. Any new panel here takes `isError` and treats absent data as a
 stated failure.
 
+**The two KPI rows this module feeds did not follow it until 2026-08-05**, which is the variant worth
+naming: `PerformanceMetricsCards` and `RiskMetricsCards` returned `null` whenever `metrics` was null,
+and Dashboard's memos return null when their query fails — so a backend outage did not render an error
+state on those rows, it rendered *nothing*, and twelve metrics were simply absent from the page. A row
+that disappears is worse than one that fails visibly: a stated failure invites a retry, while a missing
+row reads as a feature that was never built. `PortfolioSummaryCards`, in the same directory, had the
+correct branch all along. The `null` return survives for the genuine no-data-yet case — an empty
+portfolio is not a failure and must not claim to be one — so the two states are now distinct props
+rather than one absent value.
+
+**And `e2e/errors.mjs` shows how it hid.** Its count of panels reporting the failure went **8 → 10**
+when these were fixed: the two surfaces it existed to cover had never been in its own tally, under an
+assertion (`hits >= 4`) loose enough not to notice. A floor that far below the real count cannot fail,
+which is the same "passes vacuously" shape as the Sharpe clamp test. It is `>= 10` now.
+
 ### Risk metrics (`portfolioKpis.ts`)
 
 Sharpe, Calmar and top-5 weight predate the rest. Volatility, Sortino, beta/correlation, drawdown
@@ -1682,7 +1697,7 @@ raiser for that whole module, so an accidental network reach fails loudly; `/api
 is excluded because it lazy-fetches Yahoo on a cache miss, and POST routes are excluded because they
 start real syncs. **Add a case here when an endpoint's response shape changes.**
 
-Tests (747 backend + 370 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
+Tests (747 backend + 376 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
 calls). Take the number the suite actually prints as your baseline, not this line — it has been stale
 by 200+ on both halves before:
 ```bash

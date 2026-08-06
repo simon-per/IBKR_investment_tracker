@@ -537,6 +537,7 @@ export function Dashboard() {
             <PerformanceMetricsCards
               metrics={kpiMetrics}
               isLoading={chartLoading || positionsLoading || xirrLoading}
+              isError={chartError || positionsError}
             />
 
             {/* Risk Metrics — the denominators the row above divides by, plus the two
@@ -548,6 +549,7 @@ export function Dashboard() {
               dividend={dividendBreakdown?.forward_yield}
               dividendError={dividendBreakdownError}
               isLoading={chartLoading || positionsLoading}
+              isError={chartError || positionsError}
             />
 
             {/* Portfolio Value Chart */}

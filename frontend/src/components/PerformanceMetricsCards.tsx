@@ -1,4 +1,5 @@
 import { TrendingUp, TrendingDown, Activity, Target, Shield, PieChart } from 'lucide-react'
+import { Card, CardContent } from '@/components/ui/card'
 import { KpiCard, KpiCardSkeleton } from '@/components/ui/KpiCard'
 
 interface PerformanceMetricsCardsProps {
@@ -26,14 +27,36 @@ interface PerformanceMetricsCardsProps {
     effectiveHoldings: number | null
   } | null
   isLoading?: boolean
+  /**
+   * The queries behind these cards failed. Rendering nothing would make an outage
+   * look like a feature that does not exist — the rule `RebalanceCard` and
+   * `CurrencyExposureCard` already follow, and which this row did not.
+   */
+  isError?: boolean
 }
 
-export function PerformanceMetricsCards({ metrics, isLoading }: PerformanceMetricsCardsProps) {
+export function PerformanceMetricsCards({
+  metrics, isLoading, isError,
+}: PerformanceMetricsCardsProps) {
   if (isLoading) {
     return (
       <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 lg:grid-cols-6">
         <KpiCardSkeleton count={6} />
       </div>
+    )
+  }
+
+  if (isError) {
+    // Same shape and reasoning as PortfolioSummaryCards: a backend error is
+    // indistinguishable from an empty portfolio otherwise, and a row that simply
+    // disappears reads as "this was never here" rather than "this failed".
+    return (
+      <Card>
+        <CardContent className="py-8 text-center text-muted-foreground">
+          Couldn't load the performance metrics — the backend didn't respond. Annual return, drawdown, Sharpe, win rate, Calmar and concentration are
+          unavailable. It retries automatically.
+        </CardContent>
+      </Card>
     )
   }
 

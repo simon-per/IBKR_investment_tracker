@@ -94,3 +94,16 @@ describe('PerformanceMetricsCards', () => {
     expect(container.querySelectorAll('.animate-pulse')).toHaveLength(6)
   })
 })
+
+describe('a backend failure is stated, not silent', () => {
+  it('says the backend did not respond instead of rendering nothing', () => {
+    const { container } = render(<PerformanceMetricsCards metrics={null} isError />)
+    expect(container.firstChild).not.toBeNull()
+    expect(screen.getByText(/backend didn't respond/)).toBeTruthy()
+  })
+
+  it('still renders nothing when there is simply no data yet', () => {
+    const { container } = render(<PerformanceMetricsCards metrics={null} />)
+    expect(container.firstChild).toBeNull()
+  })
+})

@@ -1,4 +1,5 @@
 import { Activity, Coins, Gauge, PiggyBank, Scale, TrendingDown } from 'lucide-react'
+import { Card, CardContent } from '@/components/ui/card'
 import { KpiCard, KpiCardSkeleton } from '@/components/ui/KpiCard'
 import { useFormatCurrency } from '@/lib/CurrencyContext'
 import type { DividendForwardYield } from '@/lib/api'
@@ -42,6 +43,12 @@ interface RiskMetricsCardsProps {
   /** Its query failed. Absent data must be a stated failure, not a confident dash. */
   dividendError?: boolean
   isLoading?: boolean
+  /**
+   * The queries behind these cards failed. Rendering nothing would make an outage
+   * look like a feature that does not exist — the rule `RebalanceCard` and
+   * `CurrencyExposureCard` already follow, and which this row did not.
+   */
+  isError?: boolean
 }
 
 /**
@@ -61,7 +68,7 @@ function shortDate(iso: string): string {
 }
 
 export function RiskMetricsCards({
-  metrics, dividend, dividendError, isLoading,
+  metrics, dividend, dividendError, isLoading, isError,
 }: RiskMetricsCardsProps) {
   const formatCurrency = useFormatCurrency()
 
@@ -70,6 +77,20 @@ export function RiskMetricsCards({
       <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 lg:grid-cols-6">
         <KpiCardSkeleton count={6} />
       </div>
+    )
+  }
+
+  if (isError) {
+    // Same shape and reasoning as PortfolioSummaryCards: a backend error is
+    // indistinguishable from an empty portfolio otherwise, and a row that simply
+    // disappears reads as "this was never here" rather than "this failed".
+    return (
+      <Card>
+        <CardContent className="py-8 text-center text-muted-foreground">
+          Couldn't load the risk metrics — the backend didn't respond. Volatility, Sortino, beta, drawdown and the dividend rates are
+          unavailable. It retries automatically.
+        </CardContent>
+      </Card>
     )
   }
 

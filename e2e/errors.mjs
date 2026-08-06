@@ -41,7 +41,12 @@ for (const name of ['Monthly Returns', 'Monthly Deployment', 'Dividend Income', 
 
 const opened = await page.getByRole('tabpanel').innerText()
 const hits = (opened.match(/didn't respond/g) || []).length
-log(hits >= 4, `${hits} panels report the backend failure explicitly`)
+// 10 as of 2026-08-05, when the two KPI rows stopped returning null on an error and
+// started saying so — they were 2 of the surfaces this count was meant to cover and
+// silently were not. A floor rather than an equality so adding a panel is free; lowering
+// it should be a deliberate edit, because that is what a surface losing its error state
+// looks like.
+log(hits >= 10, `${hits} panels report the backend failure explicitly`)
 log(!/Not enough data to compute/.test(opened), 'Monthly Returns does not claim "not enough data"')
 log(!/No contribution history yet/.test(opened), 'Monthly Deployment does not claim "no history"')
 log(!/No dividend data available/.test(opened), 'Dividend Income does not claim "no dividends"')

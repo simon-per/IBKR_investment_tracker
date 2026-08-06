@@ -1,8 +1,12 @@
 # Working state
 
-**Last updated: 2026-08-06.** Newest first: three ETFs bought on 08-06 are pending IBKR's next
-statement (see *Watching* — the Flex window ends yesterday, so a same-day download cannot carry them);
-the loop audit's eight fixes (see *Held locally*); the Activity ledger no longer lists every
+**Last updated: 2026-08-05 (loop audit).** **Fixes are committed and NOT pushed — count them with
+`git log --oneline origin/main..main`**, never from a number written here; this line said "eight"
+while thirteen were held, which is the staleness CLAUDE.md warns about in exactly these words. See
+*Held locally* below; they are batched deliberately and none is wrong on current data. Everything
+else listed here is deployed. Newest first: a backend outage no longer deletes the twelve
+Performance-tab metrics from the page instead of reporting that it failed; the Activity ledger no
+longer lists every
 dividend twice (it was the one reader missing the era splice, overstating dividend income 72%); yield on
 cost is a Positions column; the permanent 27-attribute sync banner is gone; yield on cost no longer
 falls when you add to a holding; Beta shows a value for the first time (β 1.03 / r 0.74 vs S&P 500 — it
@@ -343,10 +347,12 @@ already missing) is fixed — adding a case that reads a separately-fetched map 
 
 Backend 723 → 726, frontend 343 → 352.
 
-## HELD LOCALLY, NOT PUSHED — eight fixes from a /loop audit, 2026-08-05
+## HELD LOCALLY, NOT PUSHED — fixes from a /loop audit, 2026-08-05
 
-`git log --oneline origin/main..main`. All eight are committed, tested and mutation-verified; **none is
-wrong on current data**, which is why they were batched rather than shipped one at a time — `deploy.sh`
+`git log --oneline origin/main..main` — **read the count from there, not from this heading**, which
+said "eight" for five commits past the point it was true. Each is committed, tested and
+mutation-verified; **none is wrong on current data**, which is why they were batched rather than
+shipped one at a time — `deploy.sh`
 does a full `down` + `build --no-cache`, so a push costs ~90s of downtime and a 10-minute loop pushing
 each pass would have taken the dashboard down ~9 minutes an hour.
 
@@ -411,6 +417,21 @@ that way understates. `find_stale_priced_securities` guarded only the current sn
   guard** rather than tripping it, since the normalised code matches the security's own. Latent — this
   account holds no GBP security and its one London line is a USD ETF — but three LSE codes already map
   to `.L`.
+
+### Thread 5 — a failure rendered as an absence
+
+- `bc3cbae` **twelve metrics vanished on a backend error instead of saying so.**
+  `PerformanceMetricsCards` and `RiskMetricsCards` returned `null` whenever `metrics` was null, and
+  Dashboard's memos return null when their query fails — so an outage did not produce an error state
+  on those two rows, it produced **nothing**, and the twelve metrics were simply not on the page. A
+  row that disappears is worse than one that fails visibly: a stated failure invites a retry, a
+  missing row reads as a feature that was never built. `PortfolioSummaryCards`, in the same folder,
+  had the correct branch all along.
+  **`e2e/errors.mjs` is the proof and also shows how it hid:** its count of panels reporting the
+  failure went **8 → 10**, so the two surfaces it existed to cover had never been in its own tally —
+  under `hits >= 4`, a floor far enough below the real count that it could not fail. Now `>= 10`.
+  The `null` return survives for the genuine no-data-yet case, pinned by its own test, or the fix
+  would turn every empty portfolio into a reported outage.
 
 **After they deploy, check:** the chart and hero row show no yellow notice (nothing is unpriced today);
 `summary.unpriced_holdings == 0` and equals the last timeline point's; Sharpe and Top 5 Weight still show

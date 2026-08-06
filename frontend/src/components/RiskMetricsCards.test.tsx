@@ -178,3 +178,33 @@ describe('the dividend rate cards', () => {
     expect(screen.getByText('No projected dividends')).toBeTruthy()
   })
 })
+
+describe('a backend failure is stated, not silent', () => {
+  /**
+   * The rule `RebalanceCard` and `CurrencyExposureCard` already followed and this row did
+   * not: returning null on an error makes an outage look like a feature that was never
+   * there. `e2e/errors.mjs` asserts every surface says so with the backend stopped, and
+   * this row was not among them.
+   */
+  it('says the backend did not respond instead of rendering nothing', () => {
+    const { container } = render(<RiskMetricsCards metrics={null} isError />)
+    expect(container.firstChild).not.toBeNull()
+    expect(screen.getByText(/backend didn't respond/)).toBeTruthy()
+  })
+
+  it('names what is unavailable rather than failing generically', () => {
+    render(<RiskMetricsCards metrics={null} isError />)
+    expect(screen.getByText(/Volatility, Sortino, beta, drawdown/)).toBeTruthy()
+  })
+
+  it('still renders nothing when there is simply no data yet', () => {
+    // An empty portfolio is not a failure, and must not claim one.
+    const { container } = render(<RiskMetricsCards metrics={null} />)
+    expect(container.firstChild).toBeNull()
+  })
+
+  it('prefers the error state over the loading skeleton it replaces', () => {
+    const { container } = render(<RiskMetricsCards metrics={null} isError />)
+    expect(container.querySelectorAll('.animate-pulse')).toHaveLength(0)
+  })
+})
