@@ -14,6 +14,7 @@ from sqlalchemy import select
 from app.repositories.analyst_rating_repository import AnalystRatingRepository
 from app.models.security import Security
 from app.models.analyst_rating import AnalystRating
+from app.services.yahoo_rate_limit import is_rate_limit
 
 logger = logging.getLogger(__name__)
 
@@ -91,9 +92,16 @@ class AnalystRatingService:
     Caches ratings in database and refreshes twice weekly (every 3-4 days).
     """
 
+
+    # Latched the first time Yahoo answers with a rate limit, mirroring
+    # `MarketDataService.rate_limited`. On the class as well as the instance so a
+    # service built through `__new__` in a test can still read it.
+    rate_limited = False
+
     def __init__(self, db: AsyncSession):
         self.db = db
         self.rating_repo = AnalystRatingRepository(db)
+        self.rate_limited = False
 
     async def _get_yahoo_ticker(self, security: Security) -> str:
         """
@@ -190,8 +198,24 @@ class AnalystRatingService:
         ratings_updated = 0
         errors = 0
 
-        for i, security in enumerate(securities, 1):
-            logger.info(f"[{i}/{len(securities)}] Processing {security.symbol} ({security.description[:50]}...)")
+        pending_ids = [s.id for s in securities]
+
+        for i, security_id in enumerate(pending_ids, 1):
+            # Reloaded by id each iteration rather than held across the loop.
+            # `db.rollback()` in the handler below expires EVERY object in the session,
+            # so the next iteration's `security.symbol` was a lazy refresh — and in async
+            # SQLAlchemy an expired-attribute load outside an await raises
+            # MissingGreenlet. That line sits outside the try, so one failed security
+            # did not cost one security: it crashed the whole pass, uncaught. `db.get`
+            # is awaited and serves the identity map on the happy path, so this costs
+            # nothing when nothing has failed.
+            security = await self.db.get(Security, security_id)
+            if security is None:
+                continue
+            logger.info(
+                f"[{i}/{len(pending_ids)}] Processing {security.symbol} "
+                f"({(security.description or '')[:50]}...)"
+            )
 
             try:
                 rating_data = await self.fetch_rating_for_security(security)
@@ -211,9 +235,23 @@ class AnalystRatingService:
                     await asyncio.sleep(delay)
 
             except Exception as e:
-                logger.error(f"Error processing {security.symbol}: {e}")
+                # Before the rollback -- it expires the ORM attributes, and a lazy
+                # refresh inside an except handler raises MissingGreenlet.
+                symbol = security.symbol
                 errors += 1
                 await self.db.rollback()
+                # Rule 1: stop on a rate limit rather than working through the rest of
+                # the list against an IP that has already refused us. `sync_stale_ratings`
+                # selects on staleness, so whatever this pass never reached is still
+                # stale and the next run picks it up.
+                if is_rate_limit(e):
+                    self.rate_limited = True
+                    logger.warning(
+                        f"Yahoo rate limit at {symbol} "
+                        f"({i}/{len(pending_ids)}); abandoning the rest of this pass"
+                    )
+                    break
+                logger.error(f"Error processing {symbol}: {e}")
                 continue
 
         logger.info(
@@ -221,12 +259,19 @@ class AnalystRatingService:
             f"processed={len(securities)}, updated={ratings_updated}, errors={errors}"
         )
 
-        return {
+        result = {
             'securities_processed': len(securities),
             'ratings_updated': ratings_updated,
             'errors': errors,
+            'rate_limited': self.rate_limited,
             'message': f'Successfully synced {ratings_updated}/{len(securities)} analyst ratings'
         }
+        if self.rate_limited:
+            result['warnings'] = [
+                'Yahoo Finance rate limit reached; the rest of this pass was abandoned. '
+                'Do not retry manually — the next scheduled run resumes where it stopped.'
+            ]
+        return result
 
     async def get_stale_ratings(self, days_old: int = 3) -> List[AnalystRating]:
         """

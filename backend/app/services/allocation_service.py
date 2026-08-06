@@ -12,6 +12,7 @@ from sqlalchemy import select
 import yfinance as yf
 
 from app.models.security import Security
+from app.services.yahoo_rate_limit import is_rate_limit
 from app.etf_mappings import get_etf_allocation, is_known_etf
 
 logger = logging.getLogger(__name__)
@@ -30,8 +31,14 @@ ALLOCATION_STALE_DAYS = 7
 class AllocationService:
     """Service for managing allocation data (sector, country, etc.)"""
 
+    # Latched the first time Yahoo answers with a rate limit, mirroring
+    # `MarketDataService.rate_limited`. On the class as well as the instance so a
+    # service built through `__new__` in a test can still read it.
+    rate_limited = False
+
     def __init__(self, db: AsyncSession):
         self.db = db
+        self.rate_limited = False
 
     async def _get_yahoo_ticker(self, security: Security) -> Optional[str]:
         """
@@ -164,6 +171,23 @@ class AllocationService:
 
             result = await self.fetch_allocation_for_security(security)
 
+            # Rule 1: stop on a rate limit. This loop needs the break more than the
+            # others, because its failure path stamps `allocation_last_updated` to bound
+            # retries against securities Yahoo genuinely has no `.info` for. That is
+            # right for a real "no data" answer and badly wrong for a 429: one rate limit
+            # would mark every remaining security as attempted and suppress its sector
+            # and country for the full staleness window. So the check runs BEFORE the
+            # stamp, and a rate-limited security keeps its old timestamp and is retried.
+            if not result['success'] and is_rate_limit(result.get('error')):
+                self.rate_limited = True
+                logger.warning(
+                    f"Yahoo rate limit at {security.symbol} "
+                    f"({i}/{len(securities_to_update)}); abandoning the rest of this pass "
+                    f"without stamping the remaining securities"
+                )
+                error_count += 1
+                break
+
             if result['success']:
                 # Update security with allocation data
                 security.asset_type = result['asset_type']
@@ -203,6 +227,7 @@ class AllocationService:
             'securities_processed': len(securities_to_update),
             'securities_updated': updated_count,
             'errors': error_count,
+            'rate_limited': self.rate_limited,
             'message': f'Updated {updated_count} securities'
         }
 

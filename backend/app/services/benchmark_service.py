@@ -20,6 +20,7 @@ from app.models.security import Security
 from app.models.benchmark_price import BenchmarkPrice
 from app.models.exchange_rate import ExchangeRate
 from app.models.benchmark_timeline_cache import BenchmarkTimelineCache
+from app.services.yahoo_rate_limit import is_rate_limit
 from app.single_flight import SYNC_PIPELINE, SyncBusy, single_flight
 
 logger = logging.getLogger(__name__)
@@ -128,8 +129,14 @@ BENCHMARKS = {
 
 
 class BenchmarkService:
+    # Latched the first time Yahoo answers with a rate limit, mirroring
+    # `MarketDataService.rate_limited`. On the class as well as the instance so a
+    # service built through `__new__` in a test can still read it.
+    rate_limited = False
+
     def __init__(self, db: AsyncSession):
         self.db = db
+        self.rate_limited = False
 
     # ── Price fetching / caching ───────────────────────────────────────
 
@@ -215,7 +222,20 @@ class BenchmarkService:
             logger.info(f"Benchmark {ticker}: pipeline busy ({e}); serving cached prices")
             return 0
         except Exception as e:
-            logger.error(f"Failed to fetch benchmark {ticker}: {e}")
+            # Rule 1: a rate limit is latched here rather than only in the scheduler's
+            # warm-up loop, because this method is also reachable from a public GET on
+            # any cache miss — a chart load that 429s must not go on to tile FX for the
+            # same range. The per-target `UPSTREAM_RETRY_COOLDOWN_SECONDS` memo bounds
+            # re-asking for the *same* benchmark; this bounds the pass across different
+            # ones, which is the axis it cannot see.
+            if is_rate_limit(e):
+                self.rate_limited = True
+                logger.warning(
+                    f"Yahoo rate limit fetching benchmark {ticker}; "
+                    f"serving what is cached and leaving the rest of this range missing"
+                )
+            else:
+                logger.error(f"Failed to fetch benchmark {ticker}: {e}")
             try:
                 await self.db.rollback()
             except Exception:

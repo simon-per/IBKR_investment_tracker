@@ -24,6 +24,7 @@ from app.services.sync_helper import ingest_flex_statement
 from app.repositories.security_repository import SecurityRepository
 from app.repositories.sync_run_repository import SyncRunRepository, utc_iso
 from app.services.benchmark_service import BenchmarkService, BENCHMARKS
+from app.services.yahoo_rate_limit import is_rate_limit
 from app.models.benchmark_price import BenchmarkPrice
 from app.models.dividend_payment import DividendPayment
 from app.models.market_price import MarketPrice
@@ -662,6 +663,18 @@ class SchedulerService:
                             logger.info(f"Synced {count} benchmark prices for {ticker}")
                         synced += 1
                     except Exception as e:
+                        # Rule 1: stop on a rate limit rather than working through the
+                        # remaining benchmarks against an IP that has already refused
+                        # us. This loop runs them back to back with only a 1-2s gap, so
+                        # it is the fastest of the Yahoo loops at burning through a
+                        # limit. A benchmark this pass skipped keeps its cached prices
+                        # and the next slot refreshes it.
+                        if is_rate_limit(e):
+                            logger.warning(
+                                f"Yahoo rate limit on benchmark {ticker}; "
+                                f"abandoning the rest of the warm-up"
+                            )
+                            break
                         logger.error(f"Failed to sync benchmark {ticker}: {e}")
 
                 await db.commit()

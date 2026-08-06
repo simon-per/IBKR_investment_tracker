@@ -12,6 +12,7 @@ from app.repositories.watchlist_repository import WatchlistRepository
 from app.services.peg_ratio import peg_from_growth
 from app.services.safe_numbers import safe_float, safe_int
 from app.services.ttm_growth import ttm_growth_from_quarterly
+from app.services.yahoo_rate_limit import is_rate_limit
 
 logger = logging.getLogger(__name__)
 
@@ -21,9 +22,15 @@ class WatchlistService:
 
     CACHE_TTL_HOURS = 1
 
+    # Latched the first time Yahoo answers with a rate limit, mirroring
+    # `MarketDataService.rate_limited`. On the class as well as the instance so a
+    # service built through `__new__` in a test can still read it.
+    rate_limited = False
+
     def __init__(self, db: AsyncSession):
         self.db = db
         self.repo = WatchlistRepository(db)
+        self.rate_limited = False
 
     # Shared so the two endpoints cannot disagree in the fifth decimal place —
     # `_safe_float` had already drifted between these services. See
@@ -323,17 +330,36 @@ class WatchlistService:
             result = await self.sync_item(item.yahoo_ticker, force=force)
             if "error" in result:
                 errors += 1
+                # `sync_item` catches its own fetch failure and returns the message
+                # rather than raising, so the rate limit arrives here as a string --
+                # which is why `is_rate_limit` takes an object and not an exception.
+                # Rule 1: stop the pass. An item this run never reached keeps its old
+                # `last_synced`, so the next run treats it as stale and picks it up.
+                if is_rate_limit(result.get("error")):
+                    self.rate_limited = True
+                    logger.warning(
+                        f"Yahoo rate limit at {item.yahoo_ticker} "
+                        f"({i}/{len(items)}); abandoning the rest of this pass"
+                    )
+                    break
             else:
                 synced += 1
 
             if i < len(items):
                 await asyncio.sleep(random.uniform(2.0, 4.0))
 
-        return {
+        out = {
             "synced": synced,
             "errors": errors,
+            "rate_limited": self.rate_limited,
             "message": f"Synced {synced}/{len(items)} watchlist items",
         }
+        if self.rate_limited:
+            out["warnings"] = [
+                'Yahoo Finance rate limit reached; the rest of this pass was abandoned. '
+                'Do not retry manually — the next scheduled run resumes where it stopped.'
+            ]
+        return out
 
     async def get_all_items(self) -> List:
         return await self.repo.get_all()

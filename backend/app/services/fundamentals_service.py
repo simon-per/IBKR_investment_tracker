@@ -13,6 +13,7 @@ from app.services.peg_ratio import peg_from_growth
 from app.services.safe_numbers import safe_float, safe_int
 from app.services.ttm_growth import ttm_growth_from_quarterly
 from app.models.security import Security
+from app.services.yahoo_rate_limit import is_rate_limit
 
 logger = logging.getLogger(__name__)
 
@@ -20,9 +21,18 @@ logger = logging.getLogger(__name__)
 class FundamentalsService:
     """Service for fetching and caching fundamental metrics and earnings data."""
 
+    # Latched the first time Yahoo answers with a rate limit, mirroring
+    # `MarketDataService.rate_limited`. Declared on the class as well as assigned per
+    # instance for the same reason it is there: a service built through `__new__` in a
+    # test would otherwise raise on a read of a never-initialised attribute, turning a
+    # safety net into a crash in the one place it gets exercised.
+    rate_limited = False
+
     def __init__(self, db: AsyncSession):
         self.db = db
         self.repo = FundamentalsRepository(db)
+        # Per-run state: a pass builds its own service, so this never leaks forward.
+        self.rate_limited = False
 
     async def _get_yahoo_ticker(self, security: Security, market_service=None) -> str:
         if market_service is None:
@@ -223,8 +233,21 @@ class FundamentalsService:
         from app.services.market_data_service import MarketDataService
         market_service = MarketDataService(self.db)
 
-        for i, security in enumerate(needs_update, 1):
-            logger.info(f"[{i}/{len(needs_update)}] Processing {security.symbol}")
+        pending_ids = [s.id for s in needs_update]
+
+        for i, security_id in enumerate(pending_ids, 1):
+            # Reloaded by id each iteration rather than held across the loop.
+            # `db.rollback()` in the handler below expires EVERY object in the session,
+            # so the next iteration's `security.symbol` was a lazy refresh — and in async
+            # SQLAlchemy an expired-attribute load outside an await raises
+            # MissingGreenlet. That line sits outside the try, so one failed security
+            # did not cost one security: it crashed the whole pass, uncaught. `db.get`
+            # is awaited and serves the identity map on the happy path, so this costs
+            # nothing when nothing has failed.
+            security = await self.db.get(Security, security_id)
+            if security is None:
+                continue
+            logger.info(f"[{i}/{len(pending_ids)}] Processing {security.symbol}")
 
             try:
                 # Resolve ticker once
@@ -258,24 +281,57 @@ class FundamentalsService:
                     await asyncio.sleep(delay)
 
             except Exception as e:
-                logger.error(f"Error processing {security.symbol}: {e}")
+                # Read the symbol BEFORE the rollback: rollback expires every ORM
+                # attribute, so touching `security.symbol` afterwards triggers a lazy
+                # refresh that raises MissingGreenlet from inside this handler --
+                # turning a handled rate limit into an unhandled crash.
+                symbol = security.symbol
                 errors += 1
                 await self.db.rollback()
+                # Rule 1: a rate limit means stop, not slow down. This is the most
+                # expensive of the four Yahoo loops — roughly five endpoints per
+                # security — so continuing past a 429 spent the rest of the pass asking
+                # an IP that had already refused us, once every one to three seconds.
+                # Same fix `MarketDataService.sync_securities` took on 2026-08-04; this
+                # loop, the ratings loop and the watchlist loop kept the older shape.
+                #
+                # What was written stays written and the next run resumes on its own:
+                # `sync_stale_fundamentals` selects on staleness, so the securities this
+                # pass never reached are simply still stale.
+                if is_rate_limit(e):
+                    self.rate_limited = True
+                    logger.warning(
+                        f"Yahoo rate limit at {symbol} "
+                        f"({i}/{len(pending_ids)}); abandoning the rest of this pass"
+                    )
+                    break
+                logger.error(f"Error processing {symbol}: {e}")
                 continue
 
         logger.info(
             f"Fundamentals Sync Complete: "
             f"processed={len(needs_update)}, metrics={metrics_updated}, "
-            f"earnings={earnings_updated}, errors={errors}"
+            f"earnings={earnings_updated}, errors={errors}, "
+            f"rate_limited={self.rate_limited}"
         )
 
-        return {
+        result = {
             'securities_processed': len(needs_update),
             'metrics_updated': metrics_updated,
             'earnings_updated': earnings_updated,
             'errors': errors,
+            'rate_limited': self.rate_limited,
             'message': f'Synced {metrics_updated}/{len(needs_update)} fundamentals, {earnings_updated} earnings events',
         }
+        if self.rate_limited:
+            # Surfaced the same way the market-data pass surfaces it, so the UI's
+            # warning banner shows why a sync stopped early instead of the run merely
+            # looking incomplete.
+            result['warnings'] = [
+                'Yahoo Finance rate limit reached; the rest of this pass was abandoned. '
+                'Do not retry manually — the next scheduled run resumes where it stopped.'
+            ]
+        return result
 
     async def sync_stale_fundamentals(self) -> Dict:
         """

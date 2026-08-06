@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.repositories.market_price_repository import MarketPriceRepository
 from app.models.security import Security
+from app.services.yahoo_rate_limit import is_rate_limit
 
 logger = logging.getLogger(__name__)
 
@@ -452,12 +453,13 @@ class MarketDataService:
             return prices, False
 
         except Exception as e:
-            error_msg = str(e).lower()
-
-            # Detect rate limiting errors
-            # Yahoo returns various errors when rate limited: 404, 429, connection errors
-            if any(keyword in error_msg for keyword in ['429', 'too many requests', 'rate limit', 'blocked']):
-                logger.warning(f"Rate limit detected for {ticker}: {error_msg}")
+            # Shared with the fundamentals, ratings and watchlist loops
+            # (`yahoo_rate_limit.is_rate_limit`) so all four agree on what a rate limit
+            # is. It stays deliberately narrow: this same verdict decides whether to
+            # keep trying ticker *variations* below, so a broader match would abort
+            # auto-discovery for every ticker Yahoo simply does not know.
+            if is_rate_limit(e):
+                logger.warning(f"Rate limit detected for {ticker}: {e}")
                 return [], True  # Rate limited - stop trying variations
 
             # For other errors (invalid ticker, etc.), continue trying variations
