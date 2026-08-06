@@ -553,6 +553,28 @@ The largest finding of the loop, and it sits on the project's most important rul
   converted correctly. `WARM_CURRENCIES` keeps TWD fresh and pre-ownership history is
   skipped, which is what has kept it out of reach.
 
+### Thread 11 — the completeness gap on the one chart that names each security
+
+- **Performance attribution counted an unvaluable holding at zero.** `get_eur_value` returned `0.0`
+  when the price *or* the FX rate was missing, and `value_change = end_mv - start_mv`, so a still-held
+  position whose feed went stale read as **`-start_value`** — the same shape the disposal term fixed
+  for sales, reached by the other route and never covered. An unvaluable *start* fabricates a gain the
+  same size.
+  This is the worst surface for it: one bar per security, so the fabricated number is the largest bar
+  on the chart under the security's own name — not buried in a total. It also inflated every other
+  security's `weight_percent` (the denominator was missing the zeroed holding's value) and shifted
+  `contribution_percent` through a moved `total_pnl`.
+  Unvaluable securities are now excluded from both sides and reported as `unpriced_holdings`, the same
+  name and signal as the timeline and the summary. A lot held at *neither* endpoint never reaches the
+  helper, so a fully-sold position keeps its legitimate zero — that is what makes exclusion safe.
+  **The notice had to move out of the collapsible.** The card is collapsed by default and its
+  collapsed summary shows `total_pnl_eur`, the figure the notice qualifies; a caveat you must expand a
+  card to see is as good as absent.
+  Also: `PerformanceAttributionResponse` had to declare the field or the `response_model` would have
+  filtered it off the wire — the trap `test_dividend_summary_contract.py` exists for.
+  The smoke fixture's unpriced TSMC makes the new assertion the **non-zero** case rather than one that
+  would pass on any book.
+
 **After they deploy, check:** the chart and hero row show no yellow notice (nothing is unpriced today);
 `summary.unpriced_holdings == 0` and equals the last timeline point's; Sharpe and Top 5 Weight still show
 numbers on a normal range and dashes on MTD early in a month; and `days_held_in_ttm` is unchanged for all

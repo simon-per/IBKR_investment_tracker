@@ -349,6 +349,22 @@ def test_the_shapes_that_broke_production_serialize(client):
     assert aapl["disposal_proceeds_eur"] > 0
     assert aapl["pnl_contribution_eur"] > -100
 
+    # Attribution's completeness signal must survive its response_model. The model is a
+    # FILTER, so an undeclared key is dropped silently -- and this fixture has an
+    # unpriced holding (TSMC), which is exactly the case the field exists to report. A
+    # zero here would mean the whole book was attributed when it was not.
+    assert "unpriced_holdings" in attr, (
+        "PerformanceAttributionResponse dropped unpriced_holdings from the wire"
+    )
+    assert isinstance(attr["unpriced_holdings"], int)
+    # TSMC is the fixture's unpriced holding, so this must be the non-zero case rather
+    # than an assertion that would pass on any book. Asserting only `>= 0` here is the
+    # same vacuous shape as the Sharpe clamp test that asserted `abs(0) <= 10`.
+    assert attr["unpriced_holdings"] >= 1
+    # Excluded and reported are alternatives, never both: a security left out for being
+    # unpriced must not also appear as a contributor with a fabricated -start_value.
+    assert "TSMC" not in {r["symbol"] for r in attr["attributions"]}
+
     # The tax report's honesty fields survive the HTTP layer. holdings_snapshot_total
     # is nullable now — a failed snapshot is a missing wealth-tax base, not a zero
     # one — so the route must not coerce None to 0.0 or drop the flag.

@@ -66,6 +66,27 @@ export function PerformanceAttribution({ data, isLoading, isError }: Performance
         description={summaryText}
         contentId="performance-attribution-content"
       />
+      {/* Securities the backend could not value at an endpoint are excluded rather than
+          counted at zero — a zero end value renders as a bar of -(the whole position),
+          which on a per-security chart is the most legible place in the app to publish
+          a fabricated loss. Excluding them is right; showing fewer bars under a total
+          labelled as the portfolio's without saying so is not.
+
+          OUTSIDE the `open &&` block deliberately. This card is collapsed by default,
+          and the collapsed summary shows `total_pnl_eur` — the very figure the notice
+          qualifies. A caveat you have to expand a card to reach is as good as absent,
+          which is the same rule that put the dividend basis in a footnote rather than a
+          tooltip. */}
+      {(data?.unpriced_holdings ?? 0) > 0 && (
+        <p
+          role="alert"
+          className="mx-6 mb-3 rounded-md bg-yellow-50 px-3 py-2 text-xs text-yellow-800 dark:bg-yellow-950/40 dark:text-yellow-300"
+        >
+          {data!.unpriced_holdings} holding{data!.unpriced_holdings === 1 ? '' : 's'} could not be
+          priced for this period and {data!.unpriced_holdings === 1 ? 'is' : 'are'} left out, so the
+          total covers less than the whole portfolio. That is missing price data, not a loss.
+        </p>
+      )}
       {open && (
         <CardContent id="performance-attribution-content">
           {isLoading ? (

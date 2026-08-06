@@ -1144,6 +1144,7 @@ class PortfolioService:
                 "start_date": start_date.isoformat(),
                 "end_date": end_date.isoformat(),
                 "total_pnl_eur": 0.0,
+                "unpriced_holdings": 0,
                 "attributions": []
             }
 
@@ -1160,6 +1161,7 @@ class PortfolioService:
                 "start_date": start_date.isoformat(),
                 "end_date": end_date.isoformat(),
                 "total_pnl_eur": 0.0,
+                "unpriced_holdings": 0,
                 "attributions": []
             }
 
@@ -1170,6 +1172,12 @@ class PortfolioService:
         # Group tax lots by security
         security_map: Dict[int, Dict] = {}
         securities_by_id: Dict[int, Security] = {}
+
+        # Securities held at an endpoint that could not be valued there. A SET of ids
+        # rather than a counter, for the same reason `_calculate_daily_value` uses one:
+        # this walks tax LOTS, so incrementing would report 110 for a holding split
+        # across 110 lots.
+        unpriced_securities: set = set()
 
         for taxlot, security in taxlots_with_securities:
             if security.id not in security_map:
@@ -1183,17 +1191,30 @@ class PortfolioService:
             sid = security.id
             entry = security_map[sid]
 
-            # Get FX rate helper — uses actual price currency, not security currency
-            def get_eur_value(qty, price, sec, target_date):
+            # Get FX rate helper — uses actual price currency, not security currency.
+            #
+            # Returns None, never 0.0, when the holding cannot be valued. A zero is not
+            # a small error on this endpoint: `value_change = end_mv - start_mv`, so an
+            # unvaluable END makes a still-held position read as `-start_value` — the
+            # exact shape the disposal term was added to fix for sales, arriving by the
+            # other route and never covered. An unvaluable START is the mirror image and
+            # fabricates a gain. Either then renders as the largest bar on a
+            # per-security chart, which is the most legible place in the app to publish
+            # a wrong number.
+            #
+            # Two distinct causes, which is why `price is None` alone is not the test:
+            # no cached price, or a price whose currency has no FX rate. `rebalance.ts`
+            # learned the same asymmetry the same way.
+            def get_eur_value(qty, price, sec, target_date) -> Optional[Decimal]:
                 if price is None:
-                    return Decimal("0.0")
+                    return None
                 val = qty * price
                 price_currency = price_currency_cache.get(sec.id, sec.currency)
                 if price_currency != "EUR":
                     rate = self._get_exchange_rate_with_fallback(
                         price_currency, target_date, exchange_rate_cache
                     )
-                    return val * rate if rate else Decimal("0.0")
+                    return val * rate if rate else None
                 return val
 
             # Tax lot contributes to start value if opened on or before effective_start
@@ -1201,14 +1222,26 @@ class PortfolioService:
             if taxlot.open_date <= effective_start:
                 if not (taxlot.close_date and taxlot.close_date <= effective_start):
                     price = self._get_market_price_with_fallback(sid, effective_start, price_cache)
-                    entry["start_market_value"] += get_eur_value(taxlot.quantity, price, security, effective_start)
+                    value = get_eur_value(taxlot.quantity, price, security, effective_start)
+                    if value is None:
+                        unpriced_securities.add(sid)
+                    else:
+                        entry["start_market_value"] += value
 
             # Tax lot contributes to end value if opened on or before effective_end
             # AND still held at effective_end (exclude-on-close)
+            #
+            # A lot held at NEITHER date never reaches `get_eur_value`, so a fully-sold
+            # position keeps its legitimate zero end value and is never confused with
+            # one that simply could not be priced.
             if taxlot.open_date <= effective_end:
                 if not (taxlot.close_date and taxlot.close_date <= effective_end):
                     price = self._get_market_price_with_fallback(sid, effective_end, price_cache)
-                    entry["end_market_value"] += get_eur_value(taxlot.quantity, price, security, effective_end)
+                    value = get_eur_value(taxlot.quantity, price, security, effective_end)
+                    if value is None:
+                        unpriced_securities.add(sid)
+                    else:
+                        entry["end_market_value"] += value
 
             # New investment: opened during (effective_start, effective_end] (base, at open_date)
             if effective_start < taxlot.open_date <= effective_end:
@@ -1225,14 +1258,20 @@ class PortfolioService:
                 disposals_by_sec.get(r["security_id"], Decimal("0")) + r["proceeds"]
             )
 
+        # Excluded from BOTH sides, exactly as the forward yield excludes an unpriced
+        # holding: leaving one in contributes a fabricated `-start_value` to total P&L
+        # and takes a 0% weight, which also inflates every other security's weight
+        # against a denominator its own value is missing from.
+        priced = {sid: e for sid, e in security_map.items() if sid not in unpriced_securities}
+
         # Calculate totals — market values converted to base at their effective date
         total_end_mv = sum(
             float(base_fx.convert(v["end_market_value"], effective_end))
-            for v in security_map.values()
+            for v in priced.values()
         )
         attributions = []
 
-        for sid, entry in security_map.items():
+        for sid, entry in priced.items():
             sec = securities_by_id[sid]
             start_mv = float(base_fx.convert(entry["start_market_value"], effective_start))
             end_mv = float(base_fx.convert(entry["end_market_value"], effective_end))
@@ -1271,6 +1310,10 @@ class PortfolioService:
             "start_date": effective_start.isoformat(),
             "end_date": effective_end.isoformat(),
             "total_pnl_eur": round(total_pnl, 2),
+            # > 0 means securities were left out because they could not be valued at an
+            # endpoint, so total_pnl_eur covers less than the whole book. Same signal
+            # and same name as the timeline's and the summary's.
+            "unpriced_holdings": len(unpriced_securities),
             "attributions": attributions
         }
 

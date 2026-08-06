@@ -215,6 +215,17 @@ export interface PerformanceAttributionResponse {
   start_date: string;
   end_date: string;
   total_pnl_eur: number;
+  /**
+   * Securities left out because they could not be valued at an endpoint — no cached
+   * price, or a price whose currency has no FX rate. Above 0 means `total_pnl_eur` and
+   * every bar's `contribution_percent` cover less than the whole book.
+   *
+   * Optional because the field only exists from 2026-08-05: absent means complete, the
+   * same choice the timeline's `unpriced_holdings` and `externalFlow` both make.
+   * Reading `undefined` as incomplete would badge every chart served by an older
+   * backend.
+   */
+  unpriced_holdings?: number;
   attributions: SecurityAttribution[];
 }
 

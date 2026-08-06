@@ -148,6 +148,14 @@ class PerformanceAttributionResponse(BaseModel):
     start_date: str
     end_date: str
     total_pnl_eur: float
+    # Securities left out because they could not be valued at an endpoint. Above 0
+    # means total_pnl_eur covers less than the whole book.
+    #
+    # Declared here because a response_model is a FILTER: the service can return this
+    # key all it likes, and an undeclared field is dropped from the wire silently --
+    # the trap `test_dividend_summary_contract.py` exists for. Defaulted so the two
+    # early-return paths stay valid.
+    unpriced_holdings: int = 0
     attributions: List[SecurityAttribution]
 
     class Config:

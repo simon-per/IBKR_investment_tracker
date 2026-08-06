@@ -1275,6 +1275,24 @@ tax *lots* while the swept one walks *securities*, so it counts a **set of ids**
 report 110 for a holding split across 110 lots and break that equivalence. The field is declared on
 `PortfolioValuePoint`, without which the `response_model` would have dropped it silently.
 
+**`/api/portfolio/attribution` carries the field too, and it was the worst place it was
+missing.** `get_eur_value` returned `0.0` when either the price or the FX rate was absent, so a
+still-held position whose feed went stale read as **`-start_value`** — the exact shape the disposal
+term was added to fix for *sales*, arriving by the other route and never covered. The mirror case (an
+unvaluable start) fabricates a gain of the same size. This endpoint renders one bar per security, so
+the fabricated figure is not buried in an aggregate: it is the largest bar on the chart, under the
+security's own name. Two knock-ons made it worse — `weight_percent` divides by a `total_end_mv` the
+zeroed holding is missing from, inflating every *other* security's weight, and `contribution_percent`
+divides by a `total_pnl` the phantom loss moved.
+
+Unvaluable securities are now **excluded from both sides** and counted, as the forward yield already
+did. What makes exclusion safe is that a lot held at *neither* endpoint never reaches the valuation
+helper, so a fully-sold position keeps its legitimate zero and is never confused with an unpriced one.
+The notice sits **outside** the collapsible body: this card is collapsed by default and its collapsed
+summary shows `total_pnl_eur`, the very figure the notice qualifies — a caveat you must expand a card
+to reach is as good as absent, the same rule that put the dividend basis in a footnote rather than a
+tooltip.
+
 **The client acts on it in three places, and the metric ones matter more than the chart.** A pair spanning
 a complete day and an incomplete one manufactures a move that never happened — 64,944 then 0 is **−100%
 in a single day** — and `dailyReturnSeries` feeds *everything*: max drawdown, current drawdown,
@@ -1740,7 +1758,7 @@ raiser for that whole module, so an accidental network reach fails loudly; `/api
 is excluded because it lazy-fetches Yahoo on a cache miss, and POST routes are excluded because they
 start real syncs. **Add a case here when an endpoint's response shape changes.**
 
-Tests (769 backend + 394 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
+Tests (773 backend + 399 frontend as of 2026-08-05, all offline — no IBKR, Yahoo or FX-provider
 calls). Take the number the suite actually prints as your baseline, not this line — it has been stale
 by 200+ on both halves before:
 ```bash
