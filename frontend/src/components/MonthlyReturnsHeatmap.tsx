@@ -32,8 +32,12 @@ function cellTitle(label: string, m: MonthReturn, curSym: string): string {
   return [
     `${label}: ${sign}${m.returnPercent.toFixed(2)}% (${money(m.startValue)} → ${money(m.endValue)})`,
     ...(m.newInvestment > 0 ? [`+${money(m.newInvestment)} invested`] : []),
-    // Names which days were dropped and why, rather than leaving a bare dagger.
-    ...(m.partial ? ['† measured over part of the period — the edge days could not be fully valued'] : []),
+    // Names the days it actually covers, not just that some were dropped: the label is
+    // the thing that is wrong on a trimmed figure, so "part of the period" alone leaves
+    // the reader no way to tell a lost day from a lost half-year.
+    ...(m.measured
+      ? [`† measured ${m.measured.from} → ${m.measured.to}; the edge days could not be fully valued`]
+      : []),
   ].join(' · ')
 }
 
@@ -137,6 +141,7 @@ export function MonthlyReturnsHeatmap({ data, isLoading, isError }: MonthlyRetur
           <span className={m.returnPercent >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}>
             {m.returnPercent >= 0 ? '+' : ''}{m.returnPercent.toFixed(1)}%
           </span>
+          {m.partial && <span aria-hidden="true">†</span>}
         </span>
       )
     }
@@ -147,6 +152,21 @@ export function MonthlyReturnsHeatmap({ data, isLoading, isError }: MonthlyRetur
           <span className={topRow.ytd.returnPercent >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}>
             {topRow.ytd.returnPercent >= 0 ? '+' : ''}{topRow.ytd.returnPercent.toFixed(1)}%
           </span>
+          {topRow.ytd.partial && <span aria-hidden="true">†</span>}
+        </span>
+      )
+    }
+    // The card is COLLAPSED by default, so this line is the only thing most readers see —
+    // and it carried the figure with no marker at all while the table below badged it. A
+    // trimmed "YTD" measuring six weeks of a year is exactly the plausible-looking number
+    // this codebase keeps being bitten by, so the caveat has to survive the collapse. The
+    // legend is spelled out inline rather than left to the dagger, because the footnote
+    // explaining it lives inside the body that is not rendered yet.
+    const summaryPartial = topRow.ytd?.partial || (lastMonthIdx >= 0 && topRow.months[lastMonthIdx]!.partial)
+    if (summaryPartial) {
+      parts.push(
+        <span key="note" className="text-muted-foreground">
+          {' · '}<span aria-hidden="true">† </span>part of the period only
         </span>
       )
     }
@@ -243,8 +263,9 @@ export function MonthlyReturnsHeatmap({ data, isLoading, isError }: MonthlyRetur
           {hasPartial && (
             <p className="mt-2 text-xs text-muted-foreground">
               † Measured over part of the period: some days could not be fully valued, so they
-              are excluded rather than counted at zero. A stalled market-data sync is the usual
-              cause.
+              are excluded rather than counted at zero — hover a cell for the days it does
+              cover, which can be much shorter than the column it sits in. A stalled
+              market-data sync is the usual cause.
             </p>
           )}
         </CardContent>

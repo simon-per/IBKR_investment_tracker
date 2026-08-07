@@ -100,6 +100,9 @@ describe('days the backend could not fully value', () => {
     expect(r?.returnPercent).toBeCloseTo(0, 6)
     expect(r?.endValue).toBe(1000)
     expect(r?.partial).toBe(true)
+    // The days it does cover, so a caller can say how much was dropped rather than only
+    // that something was: the trimmed figure keeps the label of the whole period.
+    expect(r?.measured).toEqual({ from: '2026-03-01', to: '2026-03-30' })
   })
 
   it('does not read a stalled feed at period start as a gain', () => {
@@ -111,6 +114,18 @@ describe('days the backend could not fully value', () => {
     expect(r?.returnPercent).toBeCloseTo(0, 6)
     expect(r?.startValue).toBe(1000)
     expect(r?.partial).toBe(true)
+    expect(r?.measured).toEqual({ from: '2026-03-02', to: '2026-03-31' })
+  })
+
+  it('sets the measured window exactly when it sets partial', () => {
+    // They are written in one spread so they cannot separate — a `partial` with no window
+    // would put the reader back to a bare dagger.
+    const complete = computeModifiedDietzReturn([
+      point('2026-03-01', 1000, 900, 0),
+      point('2026-03-31', 1050, 900, 0),
+    ])
+    expect(complete?.partial).toBeUndefined()
+    expect(complete?.measured).toBeUndefined()
   })
 
   it('never manufactures the -100% a fully unpriced tail produces', () => {

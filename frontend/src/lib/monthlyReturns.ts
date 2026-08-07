@@ -12,6 +12,13 @@ export interface MonthReturn {
    * over the whole period its label names.
    */
   partial?: boolean
+  /**
+   * The days the figure actually covers, set in the same breath as `partial` so the
+   * two cannot separate. Without it the label is the only thing naming a period, and
+   * the label is the thing that is wrong: a trimmed "YTD" read +3.1% over six weeks
+   * of a year, badged with a dagger that said "part of the period" and not which part.
+   */
+  measured?: { from: string; to: string }
 }
 
 /**
@@ -75,6 +82,8 @@ export function computeModifiedDietzReturn(points: PortfolioValuePoint[]): Month
     startValue: startMV,
     endValue: endMV,
     newInvestment: netCashFlow,
-    ...(partial ? { partial: true } : {}),
+    ...(partial
+      ? { partial: true, measured: { from: window[0].date, to: window[window.length - 1].date } }
+      : {}),
   }
 }
