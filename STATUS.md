@@ -1,10 +1,15 @@
 # Working state
 
-**Last updated: 2026-08-06 (evening).** **The /loop audit's batch is pushed and deployed** — the
-section below still titled *HELD LOCALLY* is history now, not a to-do; `git log --oneline
-origin/main..main` is the only trustworthy count and it is the reason that heading is not a number.
+**Last updated: 2026-08-07 (morning).** Today: the 08-06 purchases landed at the 06:00 Berlin slot
+and are priced (see *Watching*); IBKR turns out to generate this statement **once per ET calendar
+day**, which explains years of `1001`s better than the market-hours reading did; and `full_sync`'s
+730-day market-data pass no longer sits behind its IBKR half, which had silently stopped it running
+since 08-03. `git log --oneline origin/main..main` is the only trustworthy count of what is
+unpushed, and it is the reason that phrase is not a number.
+
+Before that, the /loop audit's batch was pushed and deployed.
 Newest first: VT, GRID and QTUM are mapped in the ETF look-through table ahead of the statement that
-will create them (bought 08-06, **not on record yet** — see *Watching*); a backend outage no longer
+created them; a backend outage no longer
 deletes the twelve
 Performance-tab metrics from the page instead of reporting that it failed; the Activity ledger no
 longer lists every
@@ -62,52 +67,34 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 
 ## Watching
 
-- **Three new ETFs — VT, GRID, QTUM — were bought on 2026-08-06 and are NOT on record yet.** Not a
-  fault: the Flex window ends yesterday (now written up in CLAUDE.md's *The Flex Query*), so the
-  statement downloaded that evening reads `to=2026-08-05` and contains none of them. A dry-run of it
-  through `ingest_flex_xml` on production returned exactly what the 06:00 Berlin job had already
-  written — a no-op. **Re-confirmed from the file itself on 08-06 evening**, because "the dry-run
-  changed nothing" is a weaker claim than it sounds (a dry-run reports rows *parsed*, not rows *new*):
-  the file's newest rows are `tradeDate=20260803..05`, and **every one of them is an FX pair**
-  (`KRW.CHF`, `USD.CHF`, `USD.TWD`) — `CASH` rows the parser correctly discards. Its last *stock* trade
-  is 07-29, which is exactly what production already holds, and all seven of its deposits are on record
-  too. So the file is a genuine no-op rather than an apparent one.
+- **The three new ETFs landed on 2026-08-07 at the 06:00 Berlin slot, exactly as predicted.** VT 10 @
+  160.50, GRID 10 @ 190, QTUM 3 @ 149.85 and 1 more META @ 589.12, all dated 2026-08-06. Production
+  went 36 → **39 positions**, 979 → **983 open lots**, 40 → **43 securities**, `max(trade_date)`
+  2026-07-29 → **2026-08-06**. `unpriced_holdings` read **3** in the gap before pricing, with the
+  yellow notice above the KPI cards — the completeness signal from the 08-06 batch working on its
+  first real occasion. The look-through mappings and the asset-type fix shipped ahead of the
+  statement all held; nothing needed doing when it arrived.
 
-  **They should appear by themselves at the 00:00 or 06:00 Berlin slot on 08-07** — **06:00 is the one
-  to count on.** 00:00 Berlin is 18:00 ET, only two hours after the US close, which may be too early
-  for IBKR to have finalised 08-06 into a statement; 06:00 (00:00 ET) has the whole overnight run
-  behind it. The check is `max(trade_date)` in `trades`, confirmed sitting at **2026-07-29** on
-  production tonight. A **1 META share** bought the same day is in the same position — META itself is
-  long held, so only its lot count and cost basis move.
+  Two things worth keeping from how it got there, both now in CLAUDE.md:
 
-  **Expect a gap between 06:00 and 08:00 where the three are held but unpriced**, and expect the app to
-  *say so* rather than quietly understate: the IBKR-only slots deliberately touch no Yahoo, so prices
-  arrive with the 08:00 `full_sync`. In between, `unpriced_holdings` should read **3** and a yellow
-  notice should sit above the KPI cards. That is the completeness signal from this batch working, not a
-  fault — it read **0** tonight with everything priced.
+  - **`whenGenerated` is US Eastern, and the window rolls at midnight ET.** A statement downloaded
+    at **05:40 Berlin on 08-07** still read `to=20260805`, because that is 23:40 the previous day in
+    New York — it looked like today's file and was yesterday's. The 06:00 Berlin job twenty minutes
+    later (00:00 ET) got the missing day. **Check `toDate` in the header before ingesting a manual
+    download**; the generation time tells you nothing.
+  - That file was ingested anyway, at the owner's request, and was a clean no-op: 979 lots synced,
+    **0 closed, 0 skipped**. Worth knowing it was only safe *because* production still lacked the
+    three — an 08-05 snapshot ingested **after** they exist would drive them through
+    `reconcile_taxlots`' heuristic branch and close them dated 2026-08-05.
 
-  Both follow-ups are now **done ahead of the statement**, so nothing should need doing when it lands:
-
-  - **Prices need no mapping, and this is now verified rather than predicted.** All three were probed
-    directly on 2026-08-06 with the user's explicit permission (rule 1): the bare tickers `VT`, `GRID`
-    and `QTUM` all resolve, all report **USD**, on NYSEArca / NasdaqGM / NasdaqGM, with a full five-day
-    daily history. That is the SOXQ shape — tier 2's empty suffix yields a single candidate, so the
-    bare-symbol auto-save that poisoned SBI is never reached. If any shows `market_price: null` after
-    the next 08:00, *then* check the mapping.
-  - **`app/etf_mappings.py` now has all three.** Sector blocks are Yahoo's own measured
-    `funds_data.sector_weightings`, dated 08-06. Geographic blocks are hand-derived, because Yahoo
-    exposes **no country or region weights for a fund at all** — so each entry records how much of the
-    fund its top ten actually covers, which is what separates GRID (**59.6%**, a real measurement) from
-    QTUM (**14.9%**, an estimate that says so). VT is pinned equal to VWCE and test-enforced that way:
-    they track the same FTSE global index family, so the two drifting apart in this table would be the
-    codebase's dominant failure mode in miniature.
-  - **And mapping them exposed a third thing, now fixed:** the asset-type chart would still have drawn
-    all three as **Stock**. It read `securities.asset_type`, whose `"Stock"` column default
-    `sync_helper` never overwrites and which only the unscheduled `POST /api/allocation/sync` fills —
-    while the sector and geography charts beside it decide the same question from `is_known_etf(symbol)`
-    live. One holding, a Stock in one chart and an ETF distributed across eleven sectors a few pixels
-    below. The look-through table now wins for mapped funds; an unmapped security still reads its own
-    column, so a manual allocation sync is never discarded. Mutation-verified.
+- **The Flex Query period is `Last N Calendar Days` with N=3, down from 30 since 2026-08-06.** The
+  owner's call, reaffirmed after the trade-off was put to them, so it is settled rather than open —
+  but it changes the failure math and the write-up in CLAUDE.md's *The Flex Query* is the one to
+  read. Short version: a statement generated on *D* covers *D−3 … D−1*, the account gets about one
+  successful IBKR sync a day, so the margin is **two consecutive failed days** rather than ~90. Only
+  the `<Trades>` rows are at risk — OpenPositions is period-independent, so holdings still arrive.
+  **`find_stale_ibkr_sync` (7 days) is too slow to be the alarm for this**; watch `max(trade_date)`
+  against the calendar instead.
 
 - **The deploy guard now covers all nine slots, installed 2026-08-04.** `/root/auto-deploy.sh` is
   byte-identical to `ops/auto-deploy.sh` (verified by sha256), so the copy `test_deploy_guard_hours.py`
@@ -149,8 +136,59 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
   `DIVIDENDS PREDATE MAPPING` flag (which would mean the rows came from an older ticker) rather than
   assuming either way.
 - **`market_prices` gaps heal only at 08:00.** The 7-day jobs restore current value after a split
-  purge; the full history comes back at the next 730-day `full_sync`. There are six 7-day jobs now,
-  so current value returns within ~2h rather than by the evening.
+  purge; the full history comes back at the next 730-day `full_sync` — which, as of 2026-08-07, now
+  actually runs daily. See the section below for why it had not.
+
+## Shipped 2026-08-07 — IBKR generates one statement a day, and it was quietly starving the deep price pass
+
+**HELD LOCALLY — committed, not pushed.** Backend 814 → 818.
+
+Asked "why does the full sync fail, is there an issue with IBKR and Yahoo?" The answer to the second
+half is **no** — 32 of 32 `market_data_only` runs succeeded, 40 of 40 securities every time, and not
+one rate-limit event in the whole recorded history. The answer to the first half was not the one in
+CLAUDE.md.
+
+**IBKR generates this statement about once per ET calendar day, and refuses every later attempt with
+`Code=1001`.** Six days of six, with all three slots inside the safe overnight window:
+
+| ET day | 00:00 ET (06:00 Berlin) | 02:00 ET (08:00 Berlin) | 18:00 ET (00:00 Berlin) |
+|---|---|---|---|
+| 08-01 | **success** | error | error |
+| 08-02 | error | **success** | error |
+| 08-03 | error | **success** | error |
+| 08-04 → 08-06 | **success** | error | error |
+
+Always the earliest attempt that works; everything after it refused. The only two-success ET day in
+the entire history is 07-31, the day the query definition was edited.
+
+**This subsumes the mid-session theory rather than refuting it, and that is the interesting part.**
+The 07-31 evidence (08:00 at 4/5, 13:00 at 0/6, 20:00 at 1/8) fits *both* readings equally well,
+because the mid-session slots were also the later ones — one dataset, two theories, no way to tell
+them apart. What discriminates is 08-01 onward, where every slot is overnight and still only one
+succeeds. The hour rule stands; it is just no longer the binding constraint. **Adding IBKR slots
+does not add freshness, it adds failed generations** — which is exactly what `Code=1025` counts.
+
+**The fix: `full_sync` no longer gates its market-data half on its IBKR half.** That gate turned the
+730-day pass into the rarest job in the schedule: 06:00 takes the day's one generation, so 08:00
+fails, so the deep backfill had not run since **2026-08-03**. Two independent providers were wired
+together for no reason — Flex refusing a statement says nothing about Yahoo, and the securities
+needing prices are the ones already in the database.
+
+**What made it invisible is the part worth carrying forward.** The six 7-day slots run
+unconditionally and keep *current* value fresh, so no screen looked wrong — only the two-year
+history quietly stopped extending, and nothing reports the age of a backfill. It was legible solely
+as `market_result: null` buried in `details` on runs already flagged `error` for an unrelated
+reason. And a skipped step emits no warnings, so `find_stale_priced_securities` could not fire on
+those mornings either: an unpriced holding was structurally undiscoverable on exactly the days IBKR
+had refused.
+
+`status` still reports the **IBKR** verdict, so a green Yahoo half cannot paper over a refused
+statement. Four tests pin it from every side — prices on failure, still reports the failure, still
+prices *after* IBKR rather than before, and market warnings now survive a failed IBKR half.
+
+**Verified on production the same morning** (owner's explicit permission for the Yahoo call): a
+manual 730-day pass covered **43 of 43 securities, 1,615 prices, no rate limiting**, and the three
+new ETFs each pulled a full two-year history. `unpriced_holdings` 3 → **0**.
 
 ## Shipped 2026-08-04 (later) — the chart was reserving a fifth of itself for nothing
 
@@ -327,9 +365,11 @@ container (`sync_helper.py:176` copies `flex_notes` → `flex_schema_notes`) and
 `tests/test_manual_xml_ingest.py`, which goes through the same `parse_flex_xml` +
 `ingest_flex_statement` pair the scheduled job does.
 
-**Still worth an eyeball on the next successful IBKR sync** (00:00 Berlin): the header should show no
-warning, and `/api/scheduler/history` should carry `details.flex_schema_notes`. That confirms the real
-statement's drift is the drift we modelled, which is the one thing a constructed document cannot.
+**Confirmed against a real statement on 2026-08-07** — the one thing the constructed document could
+not settle. An `ibkr_manual_xml` ingest of a genuine Client Portal download returned `flex_warnings`
+**empty** and filed all **26** unmodelled attributes (`figi`, `serialNumber`, `subCategory`,
+`Trade.rtn`, `initialInvestment`, …) into `details.flex_schema_notes` as one compact line. The
+account's real drift is the drift we modelled, and the permanent banner is gone.
 
 Note `/api/scheduler/history` names the field **`type`**, not `sync_type` — reading the wrong key
 makes every run look untyped, which briefly looked like a second bug and was not one.
@@ -1249,6 +1289,15 @@ detail; this exists so the next session knows what just moved without reading it
 confirmed) and gets deleted once nothing in it is outstanding: these lines are permanent, so don't
 "tidy up" the overlap by deleting the wrong one.
 
+- **2026-08-07 (morning)** — asked to ingest a statement carrying the 08-06 VT/GRID/QTUM/META buys.
+  It could not: downloaded 05:40 Berlin, it still read `to=20260805`, because `whenGenerated` is **US
+  Eastern** and 05:40 Berlin is 23:40 the previous day in New York. The window rolls at midnight ET,
+  so the 06:00 Berlin job twenty minutes later got the day for free. Ingested the file anyway as
+  asked — a clean no-op, and only safe because production still lacked the three. Then the question
+  "why does full sync fail" turned up the real finding: **IBKR generates one statement per ET day**,
+  the 06:00 slot takes it, and 08:00's market-data half was gated on 08:00's IBKR half — so the
+  730-day pass had not run since 08-03 with nothing on any screen to say so. The lens: when a step is
+  *skipped* rather than failed, it reports nothing at all, so its own warnings go missing too.
 - **2026-08-06 (evening)** — pushed the sixteen-thread audit batch (25 commits, rebased over one remote
   docs commit, conflicting only in this file's header) and prepared for three ETFs that do not exist
   yet. The request was to backfill VT/GRID/QTUM prices *first* and ingest the statement after; the
@@ -1277,9 +1326,3 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
   nothing computed was affected — the only wrong surface was the one that merely displays. Its docstring
   claimed alignment with "the same test the two dividend readers use", singular: it had copied one of
   their two rules, which is why it read as deliberate. Also added yield on cost to the Positions table.
-- **2026-08-05 (later)** — two reported issues, neither where it looked. The 27-attribute sync warning
-  was the sanitizer working correctly but reporting harmlessly-dropped fields as warnings on every
-  sync, which is how a banner stops being read; drops are now classified by whether the ingest reads
-  the field, and the coverage guard caught a real omission in the map on its first run. And yield on
-  cost divided received income by current cost, so *adding* to a holding dragged it down — live on
-  nine of fifteen rows, and disagreeing with the Performance card that shipped forward-over-cost.
