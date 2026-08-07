@@ -507,6 +507,27 @@ PRICE_RESTATING_ACTIONS = {
     "CONTRACTCONSOLIDATION", "CONTRACTSPLIT",
 }
 
+# Corporate actions that bring a position into EXISTENCE rather than restating one that
+# was already held. Read by `PortfolioService._load_position_start_dates`, which is where
+# the consequences are documented.
+#
+# IBKR reports a received spinoff line against the parent's tax lots: the child inherits
+# the parent's `openDateTime` (the holding period carries over) and a slice of its cost
+# basis. So the lot claims months of ownership before the instrument was listed, and
+# every valuation in that gap counts a held security it cannot price — indistinguishable
+# from a stalled feed.
+#
+# Deliberately far narrower than SPLIT_LIKE_ACTIONS, in both directions. A forward split
+# also adds shares, but to a security already held, so flooring on one would drop a
+# long-held position out of every valuation before it. MERGER and ISSUECHANGE are left
+# out for the mirror reason: either can be recorded against the position being *replaced*
+# rather than the one received, and the row does not say which side it is. Being absent
+# here only leaves the existing warning in place; being wrongly present deletes a holding
+# from its own history.
+POSITION_CREATING_ACTIONS = {
+    "SPINOFF", "CONTRACTSPINOFF",
+}
+
 
 async def reconcile_taxlots(
     taxlot_repo: TaxLotRepository,

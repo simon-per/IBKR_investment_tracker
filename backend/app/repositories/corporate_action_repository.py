@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Iterable, List, Optional
 from datetime import date
 from sqlalchemy import select, and_, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -58,6 +58,24 @@ class CorporateActionRepository:
             stmt = stmt.where(CorporateAction.action_date > start)
         stmt = stmt.order_by(CorporateAction.action_date.asc())
         result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def get_by_types(self, action_types: Iterable[str]) -> List[CorporateAction]:
+        """
+        Every action whose ``action_type`` is in ``action_types``, oldest first.
+
+        The taxonomy stays with the caller (``sync_helper``'s action sets) rather than
+        being spelled out here, so a repository method cannot drift behind the set it was
+        written for.
+        """
+        types = [t for t in action_types if t]
+        if not types:
+            return []
+        result = await self.session.execute(
+            select(CorporateAction)
+            .where(CorporateAction.action_type.in_(types))
+            .order_by(CorporateAction.action_date.asc())
+        )
         return list(result.scalars().all())
 
     async def get_between(self, start: date, end: date) -> List[CorporateAction]:

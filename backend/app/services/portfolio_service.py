@@ -19,6 +19,8 @@ from app.services.market_data_service import MarketDataService
 from app.services.currency_service import CurrencyService
 from app.repositories.app_settings_repository import AppSettingsRepository
 from app.repositories.cash_flow_repository import CashFlowRepository
+from app.repositories.corporate_action_repository import CorporateActionRepository
+from app.services.sync_helper import POSITION_CREATING_ACTIONS
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +159,75 @@ class PortfolioService:
 
         return BaseFx(base_currency, cache)
 
+    async def _load_position_start_dates(self) -> Dict[int, date]:
+        """
+        For each security whose position began *later* than its own tax lots claim, the
+        date it actually began. Empty for every security that has always been itself.
+
+        A spinoff's received line arrives against the parent's tax lots — the child
+        inherits the parent's `open_date`, because the holding period carries over, plus
+        the slice of cost basis IBKR reallocates to it. So the lot asserts ownership from
+        a date when the instrument had no listing and no price, and every valuation in
+        between counts it as a held security that cannot be valued. That is the exact
+        shape of a stalled price feed, which is what made it expensive: MBGL, received
+        from SPGI on 2026-06-30 against lots dated 2025-11-06 and 2025-12-29, reported
+        `unpriced_holdings = 1` for seven and a half months, and `isMeasurable` on the
+        client dropped every one of those days — six months of the monthly-returns table
+        blank, November 2025 measured over three days, and a "YTD" covering six weeks.
+
+        **Excluding the child before the action date is the arithmetic, not a workaround
+        for the missing prices.** The parent's own close still carried the spun-off
+        business on those days (we fetch `auto_adjust=False`, and Yahoo does not rebase
+        raw `Close` for a spinoff — the same reason `PRICE_RESTATING_ACTIONS` excludes
+        one), so valuing the child beside it would double-count. Its **cost stays where
+        the lot puts it** for the mirror reason: IBKR reduced the parent's basis by
+        exactly what the child received, so the pair sums to the original outlay on the
+        original date. Deferring the cost too would understate the cost line before the
+        spinoff and book a phantom purchase on the day of it.
+
+        Two guards, both erring towards *not* flooring, because not flooring merely leaves
+        the warning in place while flooring wrongly deletes a real holding from its own
+        history:
+
+        - **`quantity > 0`.** A parent-side spinoff row carries no quantity change, and
+          flooring the parent at the action date is the catastrophic direction — SPGI
+          would vanish from every valuation before 2026-06-30.
+        - **The action must account for the whole position.** A spinoff distributing more
+          of something already held must not floor the shares held before it.
+
+        A spinoff whose `<CorporateActions>` row was never ingested (it fell outside the
+        rolling Flex window) simply keeps the old, loud behaviour. That is the right
+        default: the floor is driven by recorded fact, and no record means no licence to
+        drop a holding quietly.
+        """
+        actions = await CorporateActionRepository(self.db).get_by_types(
+            POSITION_CREATING_ACTIONS
+        )
+        starts: Dict[int, date] = {}
+        for action in actions:
+            if action.security_id is None or not action.quantity or action.quantity <= 0:
+                continue
+            held = (await self.db.execute(
+                select(func.sum(TaxLot.quantity)).where(
+                    and_(
+                        TaxLot.security_id == action.security_id,
+                        TaxLot.open_date <= action.action_date,
+                        or_(
+                            TaxLot.close_date.is_(None),
+                            TaxLot.close_date > action.action_date,
+                        ),
+                    )
+                )
+            )).scalar() or Decimal("0")
+            if held > action.quantity:
+                continue
+            previous = starts.get(action.security_id)
+            if previous is None or action.action_date < previous:
+                starts[action.security_id] = action.action_date
+        if starts:
+            logger.info(f"Position start dates from corporate actions: {starts}")
+        return starts
+
     async def get_portfolio_value_over_time(
         self,
         start_date: date,
@@ -205,6 +276,7 @@ class PortfolioService:
             start_date, end_date, taxlots_with_securities, price_cache,
             exchange_rate_cache, price_currency_cache, base_fx,
             disposals_by_day=disposals_by_day,
+            position_start=await self._load_position_start_dates(),
         )
         for row in portfolio_timeline:
             row["base_currency"] = base_fx.base_currency
@@ -220,6 +292,7 @@ class PortfolioService:
         price_currency_cache: Optional[Dict],
         base_fx: BaseFx,
         disposals_by_day: Optional[Dict[date, Decimal]] = None,
+        position_start: Optional[Dict[int, date]] = None,
     ) -> List[Dict]:
         """
         The full timeline in one sweep — numerically identical to calling
@@ -243,6 +316,7 @@ class PortfolioService:
         events.sort(key=lambda e: e[0])
 
         disposals_by_day = disposals_by_day or {}
+        position_start = position_start or {}
         qty_by_sec: Dict[int, Decimal] = {}
         total_cost = Decimal("0")
         timeline: List[Dict] = []
@@ -281,6 +355,14 @@ class PortfolioService:
                 unpriced = 0
                 for sid, qty in qty_by_sec.items():
                     if qty <= 0:
+                        continue
+                    # A position that did not exist yet is neither valued nor counted as
+                    # unpriced: its worth was still inside the parent's close, and its
+                    # cost is already in `total_cost` above because the parent's basis was
+                    # reduced by it. See _load_position_start_dates — and keep this
+                    # identical to _calculate_daily_value.
+                    started = position_start.get(sid)
+                    if started is not None and d < started:
                         continue
                     price = self._get_market_price_with_fallback(sid, d, price_cache)
                     if not price:
@@ -376,7 +458,8 @@ class PortfolioService:
 
         daily_value = self._calculate_daily_value(
             today, taxlots_with_securities, price_cache, exchange_rate_cache,
-            price_currency_cache=price_currency_cache, base_fx=base_fx
+            price_currency_cache=price_currency_cache, base_fx=base_fx,
+            position_start=await self._load_position_start_dates(),
         )
 
         realized = await self.get_realized_totals(base_fx=base_fx)
@@ -729,11 +812,21 @@ class PortfolioService:
             securities, on_date, on_date, price_currency_cache=price_currency_cache
         )
 
+        position_start = await self._load_position_start_dates()
+
         by_security: Dict[int, Dict] = {}
         # Reset per run: this is the answer to "is the total below complete?", and a
         # stale value from a previous call would answer for the wrong date.
         skipped: set = set()
         for lot, security in lots:
+            # A spun-off line was not a holding before the action that created it, so it
+            # belongs in neither the Steuerwert nor the skipped list — its value sat in the
+            # parent's year-end close. Without this, a 31 December before the spinoff
+            # reported a *partial* wealth-tax base over a holding that did not exist.
+            started = position_start.get(security.id)
+            if started is not None and on_date < started:
+                continue
+
             price = self._get_market_price_with_fallback(security.id, on_date, price_cache)
             if price is None:
                 logger.warning(
@@ -1041,13 +1134,16 @@ class PortfolioService:
             effective_start_date = start_date
 
         # Get portfolio market values on effective start and end dates
+        position_start = await self._load_position_start_dates()
         start_value = self._calculate_daily_value(
             effective_start_date, taxlots_with_securities, price_cache, exchange_rate_cache,
-            price_currency_cache=price_currency_cache, base_fx=base_fx
+            price_currency_cache=price_currency_cache, base_fx=base_fx,
+            position_start=position_start,
         )
         end_value = self._calculate_daily_value(
             effective_end_date, taxlots_with_securities, price_cache, exchange_rate_cache,
-            price_currency_cache=price_currency_cache, base_fx=base_fx
+            price_currency_cache=price_currency_cache, base_fx=base_fx,
+            position_start=position_start,
         )
 
         start_mv = start_value["market_value_eur"]
@@ -1584,6 +1680,7 @@ class PortfolioService:
         exchange_rate_cache: Dict,
         price_currency_cache: Optional[Dict] = None,
         base_fx: Optional[BaseFx] = None,
+        position_start: Optional[Dict[int, date]] = None,
     ) -> Dict:
         """
         Calculate portfolio value for a specific date using cached data.
@@ -1594,6 +1691,7 @@ class PortfolioService:
         is a pass-through. Output keys keep the historical *_eur suffix.
         """
         base_fx = base_fx or BaseFx("EUR", {})
+        position_start = position_start or {}
         total_cost_basis = Decimal("0.0")      # in base currency
         total_market_value_eur = Decimal("0.0")  # in EUR, converted once at the end
         # Securities whose cost is counted but whose value could not be resolved, kept in
@@ -1619,6 +1717,16 @@ class PortfolioService:
 
             # Cost basis converts at the lot's open_date (stable, FX-independent line)
             total_cost_basis += base_fx.convert(taxlot.cost_basis_eur, taxlot.open_date)
+
+            # The cost above is counted while the value is not: a spun-off position's
+            # worth was still inside the parent's close before the action date, and the
+            # parent's basis was reduced by exactly this lot's cost. Placed after the cost
+            # line and before the price lookup so it is neither valued nor reported as an
+            # unpriced holding — kept identical to _calculate_timeline_swept, which the
+            # equivalence test pins.
+            started = position_start.get(security.id)
+            if started is not None and target_date < started:
+                continue
 
             # Get market price with forward-fill fallback
             market_price = self._get_market_price_with_fallback(

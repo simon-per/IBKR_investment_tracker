@@ -112,6 +112,48 @@ def test_swept_timeline_equals_the_per_day_loop(use_chf_base):
     assert any(row["cost_basis_eur"] != per_day[0]["cost_basis_eur"] for row in per_day)
 
 
+def test_the_two_walks_agree_when_a_position_starts_after_its_lots():
+    """
+    A spun-off line's lots predate its listing, so both walks skip it for *value* while
+    still counting its cost. That has to be the same skip in both, or the chart and every
+    point query (summary, XIRR, Steuerwert) disagree about the same day — and the whole
+    point of the floor is that the day stops being reported as partial.
+    """
+    lots, price_cache, fx_cache, currency_map, base_fx = _fixture()
+    svc = PortfolioService.__new__(PortfolioService)
+    # Security 1 is held and priced across the whole window, so a floor inside it bites
+    # visibly rather than coinciding with a lot boundary.
+    floor = {1: date(2026, 3, 20)}
+
+    def _per_day(position_start):
+        out, d = [], START
+        while d <= END:
+            if d.weekday() < 5:
+                out.append(svc._calculate_daily_value(
+                    d, lots, price_cache, fx_cache, price_currency_cache=currency_map,
+                    base_fx=base_fx, position_start=position_start,
+                ))
+            d += timedelta(days=1)
+        return out
+
+    swept = svc._calculate_timeline_swept(
+        START, END, lots, price_cache, fx_cache, currency_map, base_fx,
+        position_start=floor,
+    )
+    per_day = _per_day(floor)
+    valuation_keys = set(per_day[0])
+    assert [{k: v for k, v in r.items() if k in valuation_keys} for r in swept] == per_day
+
+    # And the floor actually changed something: before it, security 1 leaves market value
+    # while its cost stays — and the day is still not reported as unpriced.
+    unfloored = {r["date"]: r for r in _per_day(None)}
+    floored = {r["date"]: r for r in per_day}
+    assert floored["2026-03-19"]["market_value_eur"] < unfloored["2026-03-19"]["market_value_eur"]
+    assert floored["2026-03-19"]["cost_basis_eur"] == unfloored["2026-03-19"]["cost_basis_eur"]
+    assert floored["2026-03-19"]["unpriced_holdings"] == unfloored["2026-03-19"]["unpriced_holdings"]
+    assert floored["2026-03-20"] == unfloored["2026-03-20"]
+
+
 def test_external_flow_reports_purchases_at_cost_and_sales_at_proceeds():
     """
     A sale leaves the holdings at its market value, not at the cost it was

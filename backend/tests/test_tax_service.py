@@ -19,6 +19,7 @@ from app.models.trade import Trade
 from app.models.dividend_payment import DividendPayment
 from app.models.app_settings import AppSetting
 from app.models.market_price import MarketPrice
+from app.models.corporate_action import CorporateAction
 from app.repositories.trade_repository import TradeRepository
 from app.repositories.dividend_repository import DividendRepository
 from app.services.tax_service import TaxService
@@ -30,8 +31,11 @@ async def _make_session():
         poolclass=StaticPool,
         connect_args={"check_same_thread": False},
     )
+    # corporate_actions comes along because the holdings snapshot asks it when a position
+    # actually began (a spun-off line's lots predate its listing).
     tables = [Security.__table__, TaxLot.__table__, Trade.__table__,
-              DividendPayment.__table__, AppSetting.__table__, MarketPrice.__table__]
+              DividendPayment.__table__, AppSetting.__table__, MarketPrice.__table__,
+              CorporateAction.__table__]
     async with engine.begin() as conn:
         await conn.run_sync(lambda c: Base.metadata.create_all(c, tables=tables))
     session = AsyncSession(engine, expire_on_commit=False)
