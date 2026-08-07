@@ -141,7 +141,14 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 
 ## Shipped 2026-08-07 — IBKR generates one statement a day, and it was quietly starving the deep price pass
 
-**HELD LOCALLY — committed, not pushed.** Backend 814 → 818.
+**DEPLOYED** as `2c75004` at 06:32 Berlin; `/health` reports it healthy with the scheduler armed and
+the job store persistent, and the old gate is confirmed absent from the running container. Backend
+814 → 818.
+
+**What to check tomorrow morning**, since this change is only observable on a day IBKR refuses: the
+08:00 `full_sync` should record `market_result` as a real object rather than `null` even when its
+`ibkr_result` is an error, and `/api/scheduler/history` should show `status: error` alongside it —
+the IBKR verdict must not be masked by the Yahoo half succeeding.
 
 Asked "why does the full sync fail, is there an issue with IBKR and Yahoo?" The answer to the second
 half is **no** — 32 of 32 `market_data_only` runs succeeded, 40 of 40 securities every time, and not
