@@ -1,7 +1,10 @@
 # Working state
 
-**Last updated: 2026-08-07 (morning).** Today: the 08-06 purchases landed at the 06:00 Berlin slot
-and are priced (see *Watching*); IBKR turns out to generate this statement **once per ET calendar
+**Last updated: 2026-08-07 (afternoon).** Latest: the Monthly Returns table was blank from December
+2025 to May 2026 and its "YTD" covered six weeks, because **MBGL's tax lots predate the spinoff that
+created it** — one 0.2% holding made 166 days unvaluable. Fixed and committed, **not yet pushed**
+(see *Shipped 2026-08-07 (afternoon)*). Earlier today: the 08-06 purchases landed at the 06:00 Berlin
+slot and are priced (see *Watching*); IBKR turns out to generate this statement **once per ET calendar
 day**, which explains years of `1001`s better than the market-hours reading did; and `full_sync`'s
 730-day market-data pass no longer sits behind its IBKR half, which had silently stopped it running
 since 08-03. `git log --oneline origin/main..main` is the only trustworthy count of what is
@@ -37,11 +40,12 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 
 ## Picking this up cold — the 2026-08-07 handoff
 
-Everything below is in sync: local, `origin/main` and the VPS all at the same commit, deploy logged
-`SUCCESS` in `/root/auto-deploy.log`, `/health` green with the scheduler armed and the job store
-persistent. **`git log --oneline origin/main..main` is empty** — there is no held work.
+`origin/main` and the VPS are at the same commit, deploy logged `SUCCESS` in `/root/auto-deploy.log`,
+`/health` green with the scheduler armed and the job store persistent. **Local is ahead** — the
+spinoff fix from the afternoon is committed and unpushed; run `git log --oneline origin/main..main`
+and ship it (pushing is not blocked for an agent, see below).
 
-Four threads are genuinely open. In descending order of what they cost:
+Five threads are genuinely open. In descending order of what they cost:
 
 1. **The IBKR once-per-day limit is diagnosed but not acted on** → *Needs a human*, first entry.
    The largest open item. Two of three slots fail every day and each failure spends `Code=1025`
@@ -52,6 +56,8 @@ Four threads are genuinely open. In descending order of what they cost:
    CLAUDE.md's *The Flex Query* for the arithmetic.
 4. **Two credentials are knowingly unrotated** → *Needs a human*. One is an accepted risk and must
    not be re-litigated; the other is a real outstanding task.
+5. **The spinoff fix is committed and unpushed**, and once deployed the whole Monthly Returns table
+   changes visibly → *Shipped 2026-08-07 (afternoon)* has the before/after figures to check against.
 
 The durable half of today's findings is in **CLAUDE.md**, not here: the once-per-day rule and the
 `whenGenerated`-is-Eastern rule are both under *Sync schedule* / *The Flex Query*, and the reason
@@ -211,6 +217,50 @@ perishable about them.
 - **`market_prices` gaps heal only at 08:00.** The 7-day jobs restore current value after a split
   purge; the full history comes back at the next 730-day `full_sync` — which, as of 2026-08-07, now
   actually runs daily. See the section below for why it had not.
+
+## Shipped 2026-08-07 (afternoon) — a spinoff's tax lots predate the instrument, and it blanked half the returns table
+
+**COMMITTED, NOT PUSHED.** Reported as "the monthly returns are not right": December 2025 through May
+2026 blank, November 2025 daggered, and a collapsed summary reading `Aug: +1.5% · YTD: +3.1%`.
+
+The client's arithmetic was faithful — replaying it against the live endpoint reproduced the screenshot
+exactly, which is what pointed at the data. **`MBGL` (Mobility Global, spun out of `SPGI` 1-for-1 on
+2026-06-30) has tax lots dated 2025-11-06 and 2025-12-29**, because IBKR carries the parent's holding
+period over and reallocates 4.84% of its cost basis. Its Yahoo history starts 2026-06-26, at listing.
+So `unpriced_holdings` was **1 on 166 consecutive days**, and `isMeasurable` correctly dropped every
+one of them.
+
+**Nothing looked wrong anywhere else**, which is why it survived: the stub is 0.2% of the book, so no
+total moved. The only surface that showed it was the one figure that depends on *whole* days.
+
+The fix floors each security's valuation start at the corporate action that created it
+(`_load_position_start_dates`). The reasoning, the four load-bearing details and why the action set is
+much narrower than `SPLIT_LIKE_ACTIONS` are in CLAUDE.md under *A spun-off line is not held before the
+action that created it*. Also fixed: the collapsed card summary carried the figure with **no partial
+marker at all**, so the dagger and its footnote both lived inside the body almost nobody opens.
+
+**Verified by A/B against a snapshot of the production DB**, same data, floor off then on — every
+period that was already fully measured is byte-identical, so nothing else moved:
+
+| period | before | after |
+|---|---|---|
+| 2025-11 | −0.96%† (3 days) | −1.36% |
+| 2025-12 … 2026-05 | — (blank) | −0.10%, +2.32%, −5.50%, −3.64%, +14.41%, +7.46% |
+| 2026-06 | +3.86%† (5 days) | +3.96% |
+| **YTD 2025** | +30.77%† (to 5 Nov) | **+25.22%** |
+| **YTD 2026** | +3.50%† (6 weeks) | **+23.54%** |
+
+Days with `unpriced_holdings > 0`: **166 → 0.**
+
+**What to check once deployed:** the Monthly Returns card should show no `†` and no `–` inside the
+holding period, and `/api/portfolio/value-over-time?start_date=2024-05-28` should report
+`unpriced_holdings: 0` on every point. If a dagger returns, it is a *different* holding — hover the
+cell, which now names the days the figure covers. Backend 818 → 828, frontend 399 → 403.
+
+**Left deliberately alone:** `/api/portfolio/attribution` still excludes-and-counts MBGL for windows
+that start before the spinoff. A line that did not exist at the window start has no start value to
+attribute against, and doing it properly means combining parent and child — a larger change than this
+one. It shows as `unpriced_holdings: 1` on long windows there, and that is honest rather than wrong.
 
 ## Shipped 2026-08-07 — IBKR generates one statement a day, and it was quietly starving the deep price pass
 
@@ -850,10 +900,16 @@ twenty rows carrying it, since every holding is continuously held.
 - **Activity's Market Value delta and the chart's "Value change" are the same number**, shown twice
   on purpose: the card answers "how much did the portfolio move" at a glance, the chart header pairs
   it with Period Gain so the difference between the two is visible. Neither is a return.
-- **`/api/portfolio/activity` shows dividends net and estimates unqualified-but-badged.** A
-  `yfinance_estimate` row is a gross guess with no withholding and reads *Dividend · est.*; the era
-  splice that governs the Dividends tab does **not** apply here, because a ledger's job is to show
-  what is on record rather than to pick a source per period.
+- **`/api/portfolio/activity` shows dividends net, with estimates badged.** A `yfinance_estimate` row
+  is a gross guess with no withholding and reads *Dividend · est.* This entry used to say the era
+  splice deliberately does **not** apply to the ledger; that stopped being true on 2026-08-05, when
+  not splicing turned out to list every dividend twice and overstate income 72%. It splices like every
+  other reader now — pre-boundary estimates survive and stay badged.
+- **`/api/portfolio/attribution` excludes-and-counts a line that did not exist at the window start.**
+  A spun-off security has no start value to attribute against, so for a window opening before the
+  spinoff it is dropped from both sides and reported as `unpriced_holdings: 1` — visible on the ALL
+  range. Doing it properly means combining parent and child, which is a larger change than the
+  valuation floor shipped on 2026-08-07. The timeline, the summary and the Steuerwert all handle it.
 - **A price inside the session is an intraday value, not a close, and that is now normal.** Five of
   the seven market-data slots run mid-session, so the newest row is provisional until the market
   shuts; it is re-fetched at every slot for three days and settles on its own. Only a wrong value
@@ -1369,6 +1425,15 @@ detail; this exists so the next session knows what just moved without reading it
 confirmed) and gets deleted once nothing in it is outstanding: these lines are permanent, so don't
 "tidy up" the overlap by deleting the wrong one.
 
+- **2026-08-07 (afternoon)** — "the monthly returns are not right". Replaying the client's Dietz
+  arithmetic against the live endpoint reproduced the screenshot exactly, which ruled the frontend out
+  and pointed at the data: **MBGL's tax lots predate the spinoff that created it**, because IBKR carries
+  the parent's holding period and cost basis over, so 166 days counted a held security with no listing
+  yet. One 0.2% holding blanked six months of returns and turned "YTD" into six weeks (+3.1% against a
+  real +23.5%) while every total on every other screen stayed correct. Two lenses did it: **disbelieve a
+  number, then replay the computation on the real payload** — the wrongness was in a *flag*, not a
+  figure — and **a caveat inside a collapsed card is absent**, which is where the dagger and its
+  footnote both were.
 - **2026-08-07 (morning)** — asked to ingest a statement carrying the 08-06 VT/GRID/QTUM/META buys.
   It could not: downloaded 05:40 Berlin, it still read `to=20260805`, because `whenGenerated` is **US
   Eastern** and 05:40 Berlin is 23:40 the previous day in New York. The window rolls at midnight ET,
@@ -1400,9 +1465,3 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
   (severity tracks plausibility, not magnitude), and ask which code reads the same rows or publishes the
   same name without applying the same rules. Passes 9 and 11 found nothing, which is the shape of a
   swept codebase.
-- **2026-08-05 (later still)** — the Activity ledger listed every dividend twice: the yfinance estimate
-  under its ex-date and the IBKR actual under its pay date, because `ActivityService._dividends` was the
-  one reader not applying `_splice_by_era`. 31 duplicate rows, dividend income overstated 72%, and
-  nothing computed was affected — the only wrong surface was the one that merely displays. Its docstring
-  claimed alignment with "the same test the two dividend readers use", singular: it had copied one of
-  their two rules, which is why it read as deliberate. Also added yield on cost to the Positions table.

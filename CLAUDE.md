@@ -556,6 +556,58 @@ and the attribution endpoint are therefore `(start, end]` — a lot sold *on* th
 proceeds precisely because the end valuation no longer carries it. Change these together.
 Tests: `tests/test_close_date_boundary.py`.
 
+**A spun-off line is not held before the action that created it, even though its lots say it
+was.** IBKR reports received spinoff shares against the *parent's* tax lots — the child
+inherits the parent's `openDateTime`, because the holding period carries over, plus the slice
+of cost basis IBKR reallocates to it. So the lot asserts ownership from a date when the
+instrument had no listing and no price, and every valuation in that gap counted a held
+security it could not value. Read off production on 2026-08-07: **MBGL, spun out of SPGI
+1-for-1 on 2026-06-30 against lots dated 2025-11-06 and 2025-12-29**, made
+`unpriced_holdings = 1` on **166 consecutive days**, and the client correctly refused every
+one of them.
+
+The damage was entirely in what the flag *implies*, which is why it survived: the position is
+0.2% of the book, so no total looked wrong. What broke was the monthly-returns table —
+December 2025 through May 2026 blank, November 2025 measured over three days, and a **"YTD"
+of +3.1% that covered 26 June to 7 August**. The full-year figure is +23.5%.
+
+`PortfolioService._load_position_start_dates()` reads
+`sync_helper.POSITION_CREATING_ACTIONS` and floors the date each security counts as *valuable*
+at the action that created it. Four things about it are load-bearing:
+
+- **Excluding the child is the arithmetic, not a workaround for the missing prices.** We fetch
+  `auto_adjust=False` and Yahoo does not rebase raw `Close` for a spinoff (the same reason
+  `PRICE_RESTATING_ACTIONS` excludes one), so the parent's own close still carried the
+  spun-off business on those days. Valuing the child beside it double-counts — which it did,
+  for the four when-issued days between the first MBGL bar and the distribution.
+- **Its cost stays where the lot puts it.** IBKR reduced the parent's basis by exactly what
+  the child received (verified: 4.84% of each SPGI lot), so the pair sums to the original
+  outlay on the original date, and the day's `external_flow_eur` is the real purchase.
+  Deferring the cost too would understate the cost line before the spinoff and book a phantom
+  purchase on the day of it.
+- **The action set is far narrower than `SPLIT_LIKE_ACTIONS`, in both directions.** A forward
+  split also adds shares, but to a security already held, so flooring on one would drop a
+  long-held position out of every valuation before it. `MERGER`/`ISSUECHANGE` are left out
+  because either can be recorded against the position being *replaced* rather than the one
+  received, and the row does not say which side it is.
+- **Every ambiguity resolves to not flooring**, because not flooring only leaves the existing
+  warning in place while flooring wrongly deletes a holding from its own history. Hence
+  `quantity > 0` (a parent-side spinoff row carries no quantity change, and flooring *SPGI*
+  is the catastrophic direction) and the requirement that the action account for the whole
+  position at that date (a distribution of something already held must not floor the shares
+  held before it). A spinoff whose `<CorporateActions>` row was never ingested keeps the old,
+  loud behaviour — the floor is driven by recorded fact, and no record is no licence to drop
+  a holding quietly.
+
+It reaches `_calculate_timeline_swept`, `_calculate_daily_value` and
+`holdings_snapshot_as_of` — the last because a 31 December before the spinoff was serving a
+Steuerwert badged *partial* over a holding that did not exist. `/api/portfolio/attribution`
+deliberately still excludes-and-counts it: a line that did not exist at the window start has
+no start value to attribute against, and combining parent and child is a larger change than
+this. Tests: `tests/test_spinoff_position_start.py`, plus the floor case in
+`tests/test_timeline_equivalence.py` — the two walks must skip identically or the chart and
+every point query disagree about the same day.
+
 **Realized proceeds are inflows, not absences.** `calculate_xirr()` books each lot closed in the window
 as a `+proceeds` flow (plus net dividends, era-spliced) alongside the `−cost` of lots opened. Without
 that, selling A to buy B added a fresh outflow with no matching inflow, so every rotation crushed the
@@ -1420,6 +1472,16 @@ summary shows `total_pnl_eur`, the very figure the notice qualifies — a caveat
 to reach is as good as absent, the same rule that put the dividend basis in a footnote rather than a
 tooltip.
 
+**`MonthlyReturnsHeatmap` was the same shape and was fixed on 2026-08-07**, which is what makes this
+a rule rather than one card's detail. The table inside badged every trimmed figure `†` and explained
+the dagger in a footnote — both *inside* the collapsed body — while the collapsed summary rendered
+`Aug: +1.5% · YTD: +3.1%` with no marker at all. So the qualifier was present on the surface almost
+nobody opens and absent from the one everybody reads. The summary now carries the dagger **and spells
+the legend out inline** (`† part of the period only`), because the footnote that would explain it is
+not rendered yet; and `cellTitle` names the days the figure actually covers, since on a trimmed figure
+the wrong thing is the label, and "part of the period" alone cannot distinguish a lost day from a lost
+half-year.
+
 **The client acts on it in three places, and the metric ones matter more than the chart.** A pair spanning
 a complete day and an incomplete one manufactures a move that never happened — 64,944 then 0 is **−100%
 in a single day** — and `dailyReturnSeries` feeds *everything*: max drawdown, current drawdown,
@@ -2047,6 +2109,7 @@ Tests: `tests/test_currency_fallback.py`.
 | Yahoo 404/429 | **Stop.** Wait 30-60 min. Check `yfinance >= 1.1.0` |
 | A position is missing from the portfolio | Check `taxlots_skipped` + `warnings[]` on the sync run — usually a currency neither FX provider covers |
 | The value chart declines toward zero over recent days | The chart says so itself now — a yellow notice above it names the day and holding counts. It means `unpriced_holdings > 0`: holdings whose price fell outside the 14-day lookback are counted at cost but not at value, and past 15 days every one drops out and it reads −100%. The cause is a stalled market-data sync, not a loss. The risk metrics already exclude those days |
+| A Monthly Returns cell reads `–`, or a figure carries `†` | One holding could not be valued on those days, so the whole day is dropped rather than counted at a wrong value. Hover the cell: the tooltip names the days the figure *does* cover, which can be far shorter than its column. A spun-off line whose lots predate its listing is handled (see *A spun-off line is not held…*); anything else is a real gap — find the security in the market-data sync's `warnings[]` |
 | Market Value looks low and a yellow notice sits above the cards | `summary.unpriced_holdings > 0`: a holding could not be valued, so the total omits it while Cost Basis keeps its cost. Not a loss — find the security via the market-data sync's `warnings[]` and check its `ticker_mappings` row |
 | A position shows 0.00 / `market_price: null` | No cached price. The market-data sync's `warnings[]` now names it. Fix the `ticker_mappings` row, or fill it with `app/cli/import_prices.py` from IBKR bars |
 | A price looks like an intraday value, not a close | Expected inside the session, and it self-corrects: a weekday within `PROVISIONAL_PRICE_DAYS` (3) is re-fetched at every slot, so the settled close lands after the market shuts. Still wrong **after** 3 days is a real freeze. **Don't diagnose it from `created_at`** — see below |
