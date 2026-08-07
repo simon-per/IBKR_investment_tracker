@@ -35,7 +35,56 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 
 ---
 
+## Picking this up cold — the 2026-08-07 handoff
+
+Everything below is in sync: local, `origin/main` and the VPS all at the same commit, deploy logged
+`SUCCESS` in `/root/auto-deploy.log`, `/health` green with the scheduler armed and the job store
+persistent. **`git log --oneline origin/main..main` is empty** — there is no held work.
+
+Four threads are genuinely open. In descending order of what they cost:
+
+1. **The IBKR once-per-day limit is diagnosed but not acted on** → *Needs a human*, first entry.
+   The largest open item. Two of three slots fail every day and each failure spends `Code=1025`
+   budget. A decision is waiting, not a fix.
+2. **The `full_sync` decoupling is deployed but unobserved** → *Watching*, `full_sync` entry.
+   It only shows on a morning IBKR refuses, so 08:00 tomorrow is its first real test.
+3. **The Flex window is 3 days**, which is a two-day margin → *Watching*, Flex period entry, and
+   CLAUDE.md's *The Flex Query* for the arithmetic.
+4. **Two credentials are knowingly unrotated** → *Needs a human*. One is an accepted risk and must
+   not be re-litigated; the other is a real outstanding task.
+
+The durable half of today's findings is in **CLAUDE.md**, not here: the once-per-day rule and the
+`whenGenerated`-is-Eastern rule are both under *Sync schedule* / *The Flex Query*, and the reason
+`full_sync` must not gate market data on IBKR is beside them. This file carries only what is
+perishable about them.
+
 ## Needs a human
+
+- **Decide whether to retire the 00:00 Berlin IBKR slot.** *Diagnosed 2026-08-07, deliberately not
+  acted on — the owner chose the `full_sync` decoupling alone when both were offered.*
+
+  IBKR generates this statement about **once per ET calendar day** and refuses every later attempt
+  with `Code=1001`. Six days of six, always the earliest attempt that works. Evidence table and the
+  reasoning that separates it from the older mid-session theory are in CLAUDE.md under
+  *Sync schedule*.
+
+  The consequence is that **00:00 Berlin has never once succeeded** in the recorded window and
+  cannot, because 06:00 and 08:00 sit ahead of it in the same ET day. Every one of its failures is
+  a failed *generation*, which is precisely what `Code=1025` counts — so it is not merely useless
+  but negative, the identical argument that retired 13:00 and 20:00 on 2026-07-31.
+
+  Retiring it means editing `IBKR_ONLY_HOURS`, which `ALL_SYNC_HOURS` and three deploy-guard copies
+  read (`tests/test_deploy_guard_hours.py` holds the chain together, so the suite will tell you if
+  one is missed). **Not done unilaterally because it changes the sync schedule of a live system**,
+  and because one slot of redundancy against a 06:00 failure has some value — 06:00 did fail on
+  08-02 and 08-03, though 08:00 covered both.
+
+- **Two credentials are unrotated, and they are different things.**
+  - **`API_ADMIN_TOKEN`** was exposed into an agent transcript on 2026-08-07 (a `pgrep -af` printed
+    a curl command line carrying the header). **The owner was asked and chose to accept the risk.**
+    Recorded so it is not rediscovered and re-raised as new — *do not bring this up again unless
+    the owner does.*
+  - **The IBKR Flex token** is the genuinely outstanding one — see the entry below.
 
 - **Pushing is NOT blocked for an agent, despite what this file claimed until 2026-08-04.** The
   entry here said it was "refused by the permission classifier". It was tried, and it worked
@@ -67,6 +116,22 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 
 ## Watching
 
+- **`full_sync`'s market-data half is decoupled from its IBKR half and has not yet been observed
+  working.** Deployed 2026-08-07 06:32 Berlin. It is invisible on a morning IBKR *succeeds*, because
+  the old gate would have let it through anyway — so the first real evidence is **the next 08:00
+  Berlin run whose `ibkr_result` is an error**, which on current form is most of them.
+
+  What to look for in `/api/scheduler/history` (note the field is named `type`, not `sync_type`):
+
+  - `details.market_result` is a real object, **not `null`** — that was the whole bug
+  - top-level `status` is still `error`, so the Yahoo half succeeding does not mask a refused
+    statement and `find_stale_ibkr_sync` keeps counting correctly
+  - any `warnings[]` the market pass raises now actually appear; a *skipped* step emitted none, which
+    is why `find_stale_priced_securities` was silent on exactly the mornings IBKR refused
+
+  If `market_result` is `null` beside an error status, the deploy did not take — check `/health`'s
+  commit against `origin/main`. Background in the *Shipped 2026-08-07* section below.
+
 - **The three new ETFs landed on 2026-08-07 at the 06:00 Berlin slot, exactly as predicted.** VT 10 @
   160.50, GRID 10 @ 190, QTUM 3 @ 149.85 and 1 more META @ 589.12, all dated 2026-08-06. Production
   went 36 → **39 positions**, 979 → **983 open lots**, 40 → **43 securities**, `max(trade_date)`
@@ -74,6 +139,14 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
   yellow notice above the KPI cards — the completeness signal from the 08-06 batch working on its
   first real occasion. The look-through mappings and the asset-type fix shipped ahead of the
   statement all held; nothing needed doing when it arrived.
+
+  **The asset-type fix is confirmed on live data, which is worth more than the mutation test.** All
+  three carry `asset_type='Stock'` (the column default) with `sector` and `country` NULL, exactly the
+  state that used to draw a mapped fund as a Stock in one chart and an ETF in the other two — and all
+  three are now distributed as `is_etf_contribution` across sector *and* geography, with the
+  asset-type chart agreeing. All three breakdowns sum to 100% (two read 100.01, which is 2dp
+  rounding). **So no `POST /api/allocation/sync` is needed for them**; the columns stay NULL and that
+  is fine for a mapped fund.
 
   Two things worth keeping from how it got there, both now in CLAUDE.md:
 
