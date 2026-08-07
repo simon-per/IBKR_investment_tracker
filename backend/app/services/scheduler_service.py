@@ -753,7 +753,10 @@ class SchedulerService:
 
         Executes in sequence:
         1. IBKR data sync (securities and tax lots)
-        2. Market data sync (prices for all securities)
+        2. Market data sync (prices for all securities) — runs whether or not step 1
+           succeeded, because IBKR refusing a statement says nothing about Yahoo. The
+           ordering still matters on the days step 1 works: a security created there
+           must exist before this prices it.
         3. Dividend sync (Yahoo Finance ex-dates + EUR income)
         """
         return await self._gated_job("full_sync", self._full_sync_job_locked)
@@ -764,7 +767,6 @@ class SchedulerService:
         logger.info("=" * 80)
 
         started_at = utcnow()
-        market_result = None
 
         # Step 1: Sync IBKR data
         ibkr_result = await self.sync_ibkr_data()
@@ -775,13 +777,27 @@ class SchedulerService:
         fx_result = await self.sync_exchange_rates(days_back=30)
         logger.info(f"Exchange Rate Sync Result: {fx_result}")
 
-        # Step 3: Sync market data (only if IBKR sync was successful)
-        if ibkr_result.get("status") == "success":
-            logger.info("IBKR sync successful, proceeding to market data sync (730 days)...")
-            market_result = await self.sync_market_data(days_back=730)
-            logger.info(f"Market Data Sync Result: {market_result}")
-        else:
-            logger.error("IBKR sync failed, skipping market data sync")
+        # Step 3: Sync market data (always — Yahoo does not care that Flex refused).
+        #
+        # This used to be gated on `ibkr_result["status"] == "success"`, and that gate
+        # made the 730-day pass the rarest job in the schedule rather than a daily one.
+        # IBKR generates this statement roughly **once per ET calendar day**: read off
+        # sync_runs on 2026-08-07, every one of the six preceding days had exactly one
+        # success and refused every later attempt with Code=1001. The 06:00 Berlin
+        # ibkr_only job runs two hours before this one and usually wins that single
+        # generation, so this job's IBKR half usually fails — and took the deep price
+        # history down with it. Nothing surfaced that, because the six 7-day
+        # market_data_only slots keep *current* value fresh; only the two-year backfill
+        # lapsed, and it had not run since 2026-08-03.
+        #
+        # Decoupling costs one Yahoo request per security on the days it now runs where
+        # it previously skipped. The span narrowing in fetch_and_cache_prices means a
+        # 730-day window is not 730 days of download — it starts a few days before
+        # min(missing), so a security already backfilled re-requests almost nothing.
+        # A newly bought one pulls its whole history, which is the point.
+        logger.info("Syncing market data (730 days)...")
+        market_result = await self.sync_market_data(days_back=730)
+        logger.info(f"Market Data Sync Result: {market_result}")
 
         # Step 4: Sync dividends (always — yfinance-based, computes against existing tax lots)
         logger.info("Syncing dividends...")

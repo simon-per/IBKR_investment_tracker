@@ -121,6 +121,74 @@ async def test_ibkr_only_job_reports_failure_status(spy, monkeypatch):
     assert 'market_data' not in s.called  # still no Yahoo on the failure path
 
 
+# --- full_sync's market-data half is not hostage to its IBKR half --------------------
+#
+# IBKR generates this account's statement about once per ET calendar day. Measured on
+# 2026-08-07 over the six preceding days: exactly one success each, every later attempt
+# refused with Code=1001. The 06:00 Berlin ibkr_only job usually takes that one
+# generation, so full_sync's IBKR half usually fails at 08:00 — and while the market
+# data step was gated on it, the 730-day pass simply did not run. It had last run on
+# 2026-08-03. The six 7-day market_data_only slots hid it by keeping current value
+# fresh, so only the deep backfill lapsed and nothing reported that.
+
+
+@pytest.mark.asyncio
+async def test_full_sync_still_prices_when_the_ibkr_half_fails(spy, monkeypatch):
+    """The regression that mattered: a refused Flex statement says nothing about Yahoo."""
+    svc, s = spy
+    monkeypatch.setattr(svc, 'sync_ibkr_data',
+                        s.make('ibkr', {"status": "error", "message": "Code=1001"}))
+    monkeypatch.setattr(svc, '_record_run', lambda *a, **k: _noop())
+
+    await svc.full_sync_job()
+
+    assert 'market_data' in s.called, "the 730-day pass was skipped because IBKR refused"
+    assert svc.last_sync_result["market_result"] == {"status": "success"}
+
+
+@pytest.mark.asyncio
+async def test_full_sync_still_reports_the_ibkr_failure_it_no_longer_stops_for(spy, monkeypatch):
+    """Decoupling must not let a successful Yahoo half paper over a refused statement —
+    `status` is the IBKR verdict, which is what find_stale_ibkr_sync counts."""
+    svc, s = spy
+    monkeypatch.setattr(svc, 'sync_ibkr_data',
+                        s.make('ibkr', {"status": "error", "message": "Code=1001"}))
+    monkeypatch.setattr(svc, '_record_run', lambda *a, **k: _noop())
+
+    await svc.full_sync_job()
+
+    assert svc.last_sync_result["status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_full_sync_prices_after_ibkr_never_before(spy, monkeypatch):
+    """Order still carries weight on the days IBKR works: a security created by the
+    statement must exist before the market data step tries to price it."""
+    svc, s = spy
+    monkeypatch.setattr(svc, '_record_run', lambda *a, **k: _noop())
+
+    await svc.full_sync_job()
+
+    assert s.called.index('ibkr') < s.called.index('market_data')
+
+
+@pytest.mark.asyncio
+async def test_market_warnings_survive_a_failed_ibkr_half(spy, monkeypatch):
+    """A skipped step reports nothing, so an unpriced holding found on a morning IBKR
+    refused was structurally unreachable — the surface `warnings[]` exists for."""
+    svc, s = spy
+    monkeypatch.setattr(svc, 'sync_ibkr_data',
+                        s.make('ibkr', {"status": "error", "message": "Code=1001"}))
+    monkeypatch.setattr(svc, 'sync_market_data', s.make('market_data', {
+        "status": "success", "warnings": ["VT@ARCA: no cached price at all"],
+    }))
+    monkeypatch.setattr(svc, '_record_run', lambda *a, **k: _noop())
+
+    await svc.full_sync_job()
+
+    assert svc.last_sync_result["warnings"] == ["VT@ARCA: no cached price at all"]
+
+
 @pytest.mark.asyncio
 async def test_a_jobs_warnings_reach_the_top_of_its_result(spy, monkeypatch):
     """_record_run persists result["warnings"], and a job's own dict never had that key —
