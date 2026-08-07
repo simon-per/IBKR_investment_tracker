@@ -25,6 +25,13 @@ function round(value: number): string {
  * Money in per month, over all time / 12M / 6M / 3M, each trailing window shown as
  * a delta against the all-time average.
  *
+ * It is labelled **"Avg Monthly in"** rather than "Avg Monthly" because
+ * `MonthlyDeploymentCard`, on the same tab, renders `12M avg: …/mo` of capital
+ * *deployed*. Neither number was wrong and they agree wherever they measure the same
+ * thing — the strip's own `/deployed` suffix is byte-identical to the card's figure —
+ * but "an average per month" named two quantities over two windows, and the only thing
+ * distinguishing them lived in a `title` attribute.
+ *
  * Rendered inline inside the Portfolio Value Over Time card header, beside the period
  * metrics — two lines, no card of its own.
  *
@@ -85,7 +92,19 @@ export function ContributionsStrip({ data, isLoading, isError }: ContributionsSt
         title={labelTitle}
       >
         <PiggyBank className="h-3.5 w-3.5" />
-        <span className="font-medium">Avg Monthly</span>
+        {/* "in", because the figure beside it is money *in* and the card a few hundred
+            pixels below reads "12M avg: …/mo" of capital *deployed*. Both were right and
+            both were called an average per month, so the only thing separating them was a
+            tooltip. */}
+        <span className="font-medium">Avg Monthly in</span>
+        {/* The legend for the `/` suffix, rendered rather than left in `title`: a caveat
+            reachable only by hovering does not exist on a phone, and `CHF2026/2023` reads
+            like one broken number until you know it is two. Conditional on a suffix
+            actually being rendered below — under the 'deployed' method money in IS
+            deployment and no suffix is drawn, so a legend would describe nothing. */}
+        {data.windows.some(w => w.money_in_method !== 'deployed') && (
+          <span className="text-[10px] font-normal opacity-70">· in / deployed</span>
+        )}
       </div>
 
       {data.windows.map(w => {
