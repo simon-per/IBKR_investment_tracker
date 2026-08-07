@@ -1,9 +1,10 @@
 # Working state
 
-**Last updated: 2026-08-07 (afternoon).** Latest: the Monthly Returns table was blank from December
+**Last updated: 2026-08-07 (evening).** Latest: the Monthly Returns table was blank from December
 2025 to May 2026 and its "YTD" covered six weeks, because **MBGL's tax lots predate the spinoff that
-created it** — one 0.2% holding made 166 days unvaluable. Fixed and committed, **not yet pushed**
-(see *Shipped 2026-08-07 (afternoon)*). Earlier today: the 08-06 purchases landed at the 06:00 Berlin
+created it** — one 0.2% holding made 166 days unvaluable. Fixed and pushed; the deploy guard deferred
+it past the 20:00 Berlin slot. Also: the two "avg monthly" contributions figures were asked about and
+**reconcile exactly** — only their labels were ambiguous (see *Shipped 2026-08-07 (evening)*). Earlier today: the 08-06 purchases landed at the 06:00 Berlin
 slot and are priced (see *Watching*); IBKR turns out to generate this statement **once per ET calendar
 day**, which explains years of `1001`s better than the market-hours reading did; and `full_sync`'s
 730-day market-data pass no longer sits behind its IBKR half, which had silently stopped it running
@@ -40,10 +41,9 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 
 ## Picking this up cold — the 2026-08-07 handoff
 
-`origin/main` and the VPS are at the same commit, deploy logged `SUCCESS` in `/root/auto-deploy.log`,
-`/health` green with the scheduler armed and the job store persistent. **Local is ahead** — the
-spinoff fix from the afternoon is committed and unpushed; run `git log --oneline origin/main..main`
-and ship it (pushing is not blocked for an agent, see below).
+Local and `origin/main` match; **the VPS is one deploy behind** — the evening's push was deferred by
+the sync-slot guard and lands on the first cron tick clear of 20:00. Check `/health`'s commit against
+`git rev-parse origin/main` before assuming a symptom is unfixed.
 
 Five threads are genuinely open. In descending order of what they cost:
 
@@ -56,8 +56,9 @@ Five threads are genuinely open. In descending order of what they cost:
    CLAUDE.md's *The Flex Query* for the arithmetic.
 4. **Two credentials are knowingly unrotated** → *Needs a human*. One is an accepted risk and must
    not be re-litigated; the other is a real outstanding task.
-5. **The spinoff fix is committed and unpushed**, and once deployed the whole Monthly Returns table
-   changes visibly → *Shipped 2026-08-07 (afternoon)* has the before/after figures to check against.
+5. **The spinoff fix is pushed but not yet live** (guard deferred it past 20:00), and once deployed
+   the whole Monthly Returns table changes visibly → *Shipped 2026-08-07 (afternoon)* has the
+   before/after figures to check against.
 
 The durable half of today's findings is in **CLAUDE.md**, not here: the once-per-day rule and the
 `whenGenerated`-is-Eastern rule are both under *Sync schedule* / *The Flex Query*, and the reason
@@ -218,9 +219,32 @@ perishable about them.
   purge; the full history comes back at the next 730-day `full_sync` — which, as of 2026-08-07, now
   actually runs daily. See the section below for why it had not.
 
+## Shipped 2026-08-07 (evening) — two "avg monthly" figures that were never the same quantity
+
+**PUSHED.** Asked whether the contributions averages disagree. **They do not**, and that is worth
+recording so it is not re-investigated: the strip's `/deployed` suffix is byte-identical to the figure
+`MonthlyDeploymentCard` renders as *12M avg*, and `Σ monthly[].net_eur` holds against the cost basis to
+**0.03%** — the per-date FX residual on closed lots under a CHF base, exactly as CLAUDE.md's identity
+check predicts, not a dropped lot.
+
+What differed was **labelling**: the strip's headline is money *in* over **all time** (≈2,026) and the
+card's is capital *deployed* over **12 months** (≈2,836). Four different (window, metric) pairs, all
+called an average per month, with the only distinction in a `title` attribute. The strip now reads
+**"Avg Monthly in"** and the `/` suffix has a rendered legend — `CHF2026/2023` reads like one broken
+number until you know it is two.
+
+The 3M figure being ~2× the all-time one is real, not an artefact: 12,852 of the last six months'
+14,491 in deposits arrived in the last three.
+
+Overflow at 390px was reasoned rather than measured — the widened title is ~185px of muted text in an
+already-wrapping flex row, well inside the ~358px card interior and narrower than existing items — so
+`e2e/mobile.mjs` was **not** run for it. Worth one pass next time that suite runs against a local
+stack. Frontend 403 → 407.
+
 ## Shipped 2026-08-07 (afternoon) — a spinoff's tax lots predate the instrument, and it blanked half the returns table
 
-**COMMITTED, NOT PUSHED.** Reported as "the monthly returns are not right": December 2025 through May
+**PUSHED** as `2bace4d`; the deploy guard deferred it past the 20:00 Berlin slot, so it lands ~20:20.
+Reported as "the monthly returns are not right": December 2025 through May
 2026 blank, November 2025 daggered, and a collapsed summary reading `Aug: +1.5% · YTD: +3.1%`.
 
 The client's arithmetic was faithful — replaying it against the live endpoint reproduced the screenshot
