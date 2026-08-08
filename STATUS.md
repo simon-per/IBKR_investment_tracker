@@ -1,15 +1,19 @@
 # Working state
 
-**Last updated: 2026-08-07 (evening).** Latest: the Monthly Returns table was blank from December
-2025 to May 2026 and its "YTD" covered six weeks, because **MBGL's tax lots predate the spinoff that
-created it** — one 0.2% holding made 166 days unvaluable. Fixed and pushed; the deploy guard deferred
-it past the 20:00 Berlin slot. Also: the two "avg monthly" contributions figures were asked about and
-**reconcile exactly** — only their labels were ambiguous (see *Shipped 2026-08-07 (evening)*). Earlier today: the 08-06 purchases landed at the 06:00 Berlin
-slot and are priced (see *Watching*); IBKR turns out to generate this statement **once per ET calendar
-day**, which explains years of `1001`s better than the market-hours reading did; and `full_sync`'s
-730-day market-data pass no longer sits behind its IBKR half, which had silently stopped it running
-since 08-03. `git log --oneline origin/main..main` is the only trustworthy count of what is
-unpushed, and it is the reason that phrase is not a number.
+**Last updated: 2026-08-08.** Latest: **the Flex sync no longer asks IBKR for a statement it has
+already made today**, which is what "it always errors out" was. IBKR issues about one generation per
+US-Eastern day, so two of three slots plus every manual Sync press failed by construction — and each
+failure spent `Code=1025` lockout budget. The guard skips instead, and the **primary IBKR slot moved
+to 18:00 Berlin at the owner's request** (see *Shipped 2026-08-08*, including why that is against the
+evidence and what to watch). Yahoo repricing hours are untouched.
+
+Before that (2026-08-07): the Monthly Returns table was blank from December 2025 to May 2026 and its
+"YTD" covered six weeks, because **MBGL's tax lots predate the spinoff that created it** — one 0.2%
+holding made 166 days unvaluable. Also: the two "avg monthly" contributions figures were asked about
+and **reconcile exactly** — only their labels were ambiguous (see *Shipped 2026-08-07 (evening)*);
+and `full_sync`'s 730-day market-data pass no longer sits behind its IBKR half, which had silently
+stopped it running since 08-03. `git log --oneline origin/main..main` is the only trustworthy count
+of what is unpushed, and it is the reason that phrase is not a number.
 
 Before that, the /loop audit's batch was pushed and deployed.
 Newest first: VT, GRID and QTUM are mapped in the ETF look-through table ahead of the statement that
@@ -25,7 +29,7 @@ dividend rate (*Dividend Yield* and *Yield on Cost*, replacing *Effective Holdin
 the *Top 5 Weight* footnote); the breakdown endpoint has the contract test its eight nested models never
 had; market data reprices seven times a day; the chart's negative axis is clamped; the app's own INFO
 logging reaches the container log; the sixteen KPI cards are one component; and the deploy guard covers
-all nine slots.
+every slot.
 
 `CLAUDE.md` is the durable guide — architecture, invariants, and the rules that were each a bug
 first. **This file is the perishable half**: where the work actually stands, what is known-broken,
@@ -39,52 +43,28 @@ is user-switchable, and a pasted total goes stale silently — check the API or 
 
 ---
 
-## Picking this up cold — the 2026-08-07 handoff
+## Picking this up cold — the 2026-08-08 handoff
 
-Local and `origin/main` match; **the VPS is one deploy behind** — the evening's push was deferred by
-the sync-slot guard and lands on the first cron tick clear of 20:00. Check `/health`'s commit against
-`git rev-parse origin/main` before assuming a symptom is unfixed.
+Check `/health`'s commit against `git rev-parse origin/main` before assuming a symptom is unfixed.
 
-Five threads are genuinely open. In descending order of what they cost:
+Four threads are genuinely open. In descending order of what they cost:
 
-1. **The IBKR once-per-day limit is diagnosed but not acted on** → *Needs a human*, first entry.
-   The largest open item. Two of three slots fail every day and each failure spends `Code=1025`
-   budget. A decision is waiting, not a fix.
-2. **The `full_sync` decoupling is deployed but unobserved** → *Watching*, `full_sync` entry.
-   It only shows on a morning IBKR refuses, so 08:00 tomorrow is its first real test.
+1. **The 18:00 Berlin IBKR slot is unproven** → *Watching*, first entry. The schedule change
+   shipped today runs against the measured evidence, at the owner's explicit request. The first
+   18:00 Berlin run after deploy will *skip* (the old 06:00 slot spent that ET day), so the first
+   real test is the evening after. This is the item to watch.
+2. **The `full_sync` decoupling is deployed but still unobserved** → *Watching*, `full_sync` entry.
+   It only shows on a run where IBKR refuses, which the guard now makes rarer.
 3. **The Flex window is 3 days**, which is a two-day margin → *Watching*, Flex period entry, and
    CLAUDE.md's *The Flex Query* for the arithmetic.
 4. **Two credentials are knowingly unrotated** → *Needs a human*. One is an accepted risk and must
    not be re-litigated; the other is a real outstanding task.
-5. **The spinoff fix is pushed but not yet live** (guard deferred it past 20:00), and once deployed
-   the whole Monthly Returns table changes visibly → *Shipped 2026-08-07 (afternoon)* has the
-   before/after figures to check against.
 
-The durable half of today's findings is in **CLAUDE.md**, not here: the once-per-day rule and the
-`whenGenerated`-is-Eastern rule are both under *Sync schedule* / *The Flex Query*, and the reason
-`full_sync` must not gate market data on IBKR is beside them. This file carries only what is
-perishable about them.
+The durable half of these findings is in **CLAUDE.md**, not here: the once-per-day rule, the guard
+that now enforces it, the `whenGenerated`-is-Eastern rule and why 18:00 Berlin was chosen are all
+under *Sync schedule* / *The Flex Query*. This file carries only what is perishable about them.
 
 ## Needs a human
-
-- **Decide whether to retire the 00:00 Berlin IBKR slot.** *Diagnosed 2026-08-07, deliberately not
-  acted on — the owner chose the `full_sync` decoupling alone when both were offered.*
-
-  IBKR generates this statement about **once per ET calendar day** and refuses every later attempt
-  with `Code=1001`. Six days of six, always the earliest attempt that works. Evidence table and the
-  reasoning that separates it from the older mid-session theory are in CLAUDE.md under
-  *Sync schedule*.
-
-  The consequence is that **00:00 Berlin has never once succeeded** in the recorded window and
-  cannot, because 06:00 and 08:00 sit ahead of it in the same ET day. Every one of its failures is
-  a failed *generation*, which is precisely what `Code=1025` counts — so it is not merely useless
-  but negative, the identical argument that retired 13:00 and 20:00 on 2026-07-31.
-
-  Retiring it means editing `IBKR_ONLY_HOURS`, which `ALL_SYNC_HOURS` and three deploy-guard copies
-  read (`tests/test_deploy_guard_hours.py` holds the chain together, so the suite will tell you if
-  one is missed). **Not done unilaterally because it changes the sync schedule of a live system**,
-  and because one slot of redundancy against a 06:00 failure has some value — 06:00 did fail on
-  08-02 and 08-03, though 08:00 covered both.
 
 - **Two credentials are unrotated, and they are different things.**
   - **`API_ADMIN_TOKEN`** was exposed into an agent transcript on 2026-08-07 (a `pgrep -af` printed
@@ -123,8 +103,42 @@ perishable about them.
 
 ## Watching
 
+- **The IBKR primary slot is now 18:00 Berlin (12:00 ET) and that hour is unproven.** Shipped
+  2026-08-08 at the owner's explicit request, reaffirmed after the trade-off was put to them twice.
+  It runs against the measurements: 12:00 ET is mid-session, where 13:00 Berlin went 0-for-6 and
+  20:00 Berlin 1-for-8, and it captures no extra trades because the Flex window rolls at midnight
+  ET rather than at generation time. Recorded in CLAUDE.md beside `IBKR_ONLY_HOURS` so it reads as
+  a decision, not a drift.
+
+  **The transition is the confusing part, so expect it.** On the deploy day the old 06:00 Berlin
+  slot has already spent that ET day's generation, so the first 18:00 run will record
+  `skipped` / `already_generated_today`. That is the guard working. The **first real test is the
+  following evening**, and until then there can be up to ~36 h between generations — inside the
+  3-day window, but check `max(trade_date)` if anything looks stale.
+
+  What to look for in `/api/scheduler/history` (the field is named `type`, not `sync_type`):
+
+  - a daily `full_sync` at 18:00 Berlin with `ibkr_result.status == "success"`
+  - `ibkr_retry_1` at 00:00 Berlin recording `skipped` with `reason: "already_generated_today"` —
+    **not** `error`. An `error` there means 18:00 failed and the recovery attempt also did.
+  - `ibkr_retry_2` gone from the job list: `_prune_unknown_jobs` evicts it from the persistent
+    store on first boot. If it is still there, the deploy did not take.
+
+  **If generations start failing, the fix is to move `FULL_SYNC_HOUR` back to 6** — 06:00 Berlin is
+  00:00 ET, the instant the window rolls, and it succeeded 8/10 standalone. Recovery in the
+  meantime is a browser download through `app/cli/ingest_flex_xml.py`, which is idempotent and
+  spends no token budget.
+
+- **`find_flex_generation_gap` has never fired.** New on 2026-08-08: it warns after 2 ET days with
+  no successful IBKR sync, which is the actual margin under a 3-day Flex window — `find_stale_ibkr_sync`
+  at 7 days fires four days after the trades are gone. It runs from the market-data job, so it
+  surfaces while Flex is refusing. Given the unproven hour above, this is the alarm that matters;
+  if it appears in `warnings[]`, act rather than waiting.
+
 - **`full_sync`'s market-data half is decoupled from its IBKR half and has not yet been observed
-  working.** Deployed 2026-08-07 06:32 Berlin. It is invisible on a morning IBKR *succeeds*, because
+  working.** Deployed 2026-08-07 06:32 Berlin. Note the guard makes a *failed* IBKR half rarer,
+  so this may now be observed less often rather than more — a `skipped` half is not the case it
+  was written for. It is invisible on a morning IBKR *succeeds*, because
   the old gate would have let it through anyway — so the first real evidence is **the next 08:00
   Berlin run whose `ibkr_result` is an error**, which on current form is most of them.
 
@@ -176,7 +190,8 @@ perishable about them.
   **`find_stale_ibkr_sync` (7 days) is too slow to be the alarm for this**; watch `max(trade_date)`
   against the calendar instead.
 
-- **The deploy guard now covers all nine slots, installed 2026-08-04.** `/root/auto-deploy.sh` is
+- **The deploy guard covers every slot, installed 2026-08-04** (nine slots then, eight since the
+  2026-08-08 IBKR move — `tests/test_deploy_guard_hours.py` keeps the three copies in step). `/root/auto-deploy.sh` is
   byte-identical to `ops/auto-deploy.sh` (verified by sha256), so the copy `test_deploy_guard_hours.py`
   checks is the copy cron executes. Installed by **atomic rename** rather than `install -m 755`,
   which matters: `install` truncates the destination in place, and replacing a *running* bash script
@@ -218,6 +233,63 @@ perishable about them.
 - **`market_prices` gaps heal only at 08:00.** The 7-day jobs restore current value after a split
   purge; the full history comes back at the next 730-day `full_sync` — which, as of 2026-08-07, now
   actually runs daily. See the section below for why it had not.
+
+## Shipped 2026-08-08 — the Flex sync stopped asking for a statement IBKR had already made
+
+**Reported as "the flexquery always errors out".** It never was: the query succeeds every single
+day. What failed was everything we asked *after* the day's success — IBKR issues about one
+generation per US-Eastern calendar day and refuses the rest with `Code=1001` at the SendRequest
+step. Two of three scheduled slots plus every manual Sync press, daily, twelve days of twelve with
+no counterexample. Each refusal is a failed *generation*, which is exactly what the `Code=1025`
+token lockout counts, so the red rows were not merely cosmetic.
+
+**The guard** (`app/services/flex_generation.py`) answers "has today's generation been spent?" from
+`sync_runs`, in ET days. `sync_ibkr_data(force=False)` and `POST /api/sync/ibkr` both return
+`skipped` / `already_generated_today` without touching the network when it has. Expected effect:
+scheduled IBKR errors go from ~2/day to ~0, and the Sync button reports *Already up to date* with
+the next available time instead of a red failure.
+
+Two type sets, deliberately different, and getting either backwards is a real bug in the opposite
+direction: `FLEX_API_SYNC_TYPES` **excludes** `ibkr_manual_xml` (an offline browser ingest spends no
+generation — proven twice, 07-28 and 07-31, where an offline ingest was followed by a *successful*
+API generation the same ET day), while `IBKR_SYNC_TYPES` **includes** it (it genuinely refreshes the
+data, so it must quieten the staleness alarms).
+
+**The schedule moved at the owner's request**, reaffirmed after the trade-off was put to them twice:
+
+| | before | after |
+|---|---|---|
+| IBKR primary | 06:00 Berlin (00:00 ET) | **18:00 Berlin (12:00 ET)** |
+| IBKR recovery | 08:00 + 00:00 Berlin | 00:00 Berlin only, guarded |
+| Yahoo repricing | 8, 11, 13, 15, 18, 20, 22 | **unchanged** |
+| 730-day deep pass | 08:00 | 18:00, with IBKR |
+
+Yahoo coverage is byte-identical — only which job makes the 08:00 and 18:00 touches changed. The
+`full_sync` job moved rather than a new IBKR job being added at 18:00, because two jobs on one hour
+collide on `single_flight`; pairing them also keeps the property that a security the statement
+creates is priced by the same run.
+
+**The concern was stated and overruled, which is why it is written down rather than argued again:**
+18:00 Berlin captures no additional trades (the window ends yesterday *in US Eastern* and rolls at
+midnight ET, so 12:00 ET covers exactly what 00:00 ET does), it is mid-session where the historical
+rate is ~1/14, and it takes attempts from three per ET day to two against a 3-day window whose whole
+margin is two failed days. `test_every_ibkr_job_avoids_us_market_hours` became
+`test_ibkr_jobs_run_at_the_declared_hours` — an explicit allowlist with the reasoning attached, so
+drift is still caught but the exception is recorded rather than the rule silently dropped.
+
+**Because of that, `find_flex_generation_gap` shipped with it**: 2 ET days without a successful IBKR
+sync, run from the market-data job. `find_stale_ibkr_sync` at 7 days cannot see the failure it was
+written for once the period is 3 days — it fires four days after the trades have gone from every
+future statement.
+
+Also: `trigger_sync_now` was raising `SyncBusy` → 429 on any `skipped` status, which had only ever
+meant a pipeline collision; it now keys on `reason == "pipeline_busy"`, because a day with nothing
+left to sync is finished, not busy. And the header's sync panel became `SyncStatusMessage` — three
+outcomes now, and the middle one carries no counts, so the old unconditional
+`Securities: {securities_synced}` would have rendered "Securities: undefined" under a green tick.
+Extracting it is what made that branch testable at all.
+
+Backend 828 → 845, frontend 407 → 416.
 
 ## Shipped 2026-08-07 (evening) — two "avg monthly" figures that were never the same quantity
 
@@ -1449,6 +1521,16 @@ detail; this exists so the next session knows what just moved without reading it
 confirmed) and gets deleted once nothing in it is outstanding: these lines are permanent, so don't
 "tidy up" the overlap by deleting the wrong one.
 
+- **2026-08-08** — "fix the flexquery, it always errors out". It never errored: it succeeds once a
+  day, and every attempt *after* that success is refused. **IBKR issues about one Flex generation per
+  US-Eastern calendar day**, so two of three slots plus every manual Sync press failed by
+  construction — twelve days of production history, zero counterexamples — and each refusal spent
+  `Code=1025` lockout budget. The code now asks `sync_runs` before asking IBKR. The lens: **a symptom
+  described as constant failure was a schedule asking a question that could only be answered once.**
+  Also a decision worth remembering as a decision — the owner moved the primary slot to 18:00 Berlin
+  against the evidence (it captures no extra trades, because the window rolls at midnight ET, not at
+  generation time); it is recorded in the code beside the constant rather than argued again.
+
 - **2026-08-07 (afternoon)** — "the monthly returns are not right". Replaying the client's Dietz
   arithmetic against the live endpoint reproduced the screenshot exactly, which ruled the frontend out
   and pointed at the data: **MBGL's tax lots predate the spinoff that created it**, because IBKR carries
@@ -1481,11 +1563,3 @@ confirmed) and gets deleted once nothing in it is outstanding: these lines are p
   ending on the last *completed* day. A production dry-run confirmed it was a byte-for-byte no-op
   against what the 06:00 job had already ingested, so nothing was written. Recorded in CLAUDE.md so
   the next "I bought today" does not become a hunt for a broken sync.
-- **2026-08-05 (loop)** — a `/loop` audit over eleven passes: eight fixes, all held locally. Three were
-  a zero standing in for "unknown" (Sharpe, Top 5 Weight, `days_held_in_ttm`), four were an incomplete
-  sum presented as complete (timeline, the risk metrics it feeds, the headline total, the client's
-  unpriced guard), and one was a latent 100x pence-as-pounds error that *defeated* the currency guard
-  rather than tripping it. Two lenses did most of the work: ask what a stand-in value would **claim**
-  (severity tracks plausibility, not magnitude), and ask which code reads the same rows or publishes the
-  same name without applying the same rules. Passes 9 and 11 found nothing, which is the shape of a
-  swept codebase.

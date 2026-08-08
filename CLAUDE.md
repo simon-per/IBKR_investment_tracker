@@ -88,8 +88,8 @@ Code=1001 ...; attempt 1/4, re-requesting in 120s   ->   Code=1025 Too many fail
 ```
 
 So `1001` is in `_RETRIEVE_PENDING_CODES` but deliberately **not** in `_REQUEST_RETRYABLE_CODES` — it
-fails fast and the next scheduled job asks for a fresh statement. With five IBKR attempts a day, giving up
-costs hours of freshness; re-requesting costs a lockout of every sync. The codes still retryable at the
+fails fast and the next scheduled job asks for a fresh statement. Giving up costs hours of freshness;
+re-requesting costs a lockout of every sync. The codes still retryable at the
 request step (`1009`/`1018`/`1019`/`1021`) all mean "throttled or busy, no generation job was created".
 
 Genuine transport errors (`requests.RequestException`: DNS, reset, timeout) **are** retried — they never
@@ -302,14 +302,16 @@ before widening or narrowing it again:
   statement generated on *T+1*, *T+2* or *T+3*, and **unreachable from T+4 onward**.
 - The account gets about **one successful IBKR sync per day** (see the once-per-day rule under
   *Sync schedule*), so the margin is roughly **two consecutive failed days**, not the ~90 that 30
-  days bought. Two-day gaps have happened: 08-02 and 08-03 both failed at 06:00 Berlin.
+  days bought. Two-day gaps have happened: 08-02 and 08-03 both failed at the day's first attempt
+  and were recovered by the second.
 - Only the `<Trades>` / `<CashTransactions>` rows are at risk. **OpenPositions is
   period-independent**, so the lots and holdings still arrive whatever the window — what would be
   lost is the execution record the Activity ledger, XIRR's flow terms and realized P&L read.
 - Recovery is a browser download with a wider period ingested through `app/cli/ingest_flex_xml.py`,
   which is idempotent. That is the reason a short window is survivable at all, and
   `find_stale_ibkr_sync` (7 days) is **too slow to be the alarm for it** — at N=3 the data is gone
-  four days before that warning fires. Watch `max(trade_date)` against the calendar instead.
+  four days before that warning fires. `find_flex_generation_gap` (2 ET days) is the one that
+  fires in time; see *Sync schedule*.
 
 Prior tax years need a one-off period change (e.g. 2025), then set back. Ingestion is idempotent
 (upserts keyed on `ib_key`), so re-syncing is safe — which is also the recovery if a bounded window
@@ -1191,12 +1193,41 @@ read a small non-zero gap in the base currency as FX, not as a dropped lot. Test
 
 ## Sync schedule (Europe/Berlin)
 
-| Time | Job | Touches Yahoo? |
-|---|---|---|
-| 00:00 | `ibkr_only_sync_job` — IBKR + FX | no |
-| 06:00 | `ibkr_only_sync_job` — IBKR + FX | no |
-| 08:00 | `full_sync_job` — IBKR + FX + 730d market data + dividends | **yes** |
-| 11:00, 13:00, 15:00, 18:00, 20:00, 22:00 | `market_data_only_sync_job` (7d) | yes |
+| Time | ET | Job | Touches Yahoo? |
+|---|---|---|---|
+| 08:00, 11:00, 13:00, 15:00, 20:00, 22:00 | | `market_data_only_sync_job` (7d) | yes |
+| **18:00** | **12:00** | `full_sync_job` — IBKR + FX + 730d market data + dividends | **yes** |
+| 00:00 | 18:00 | `ibkr_only_sync_job` — IBKR + FX, **skips unless 18:00 failed** | no |
+
+**Yahoo is repriced at seven hours — 8, 11, 13, 15, 18, 20, 22 — and that set has not
+changed** since the 2026-08-04 widening. What moved on 2026-08-08 is only *which job* makes the
+08:00 and 18:00 touches: the 730-day pass travelled with IBKR to 18:00, and 08:00 became a plain
+7-day slot. Don't read the reshuffle as a change in pricing coverage.
+
+**Only one IBKR slot can succeed per ET day, so the second one now asks first.**
+`app/services/flex_generation.py` holds the rule: `last_generation_today()` reports whether a
+successful Flex sync already landed in the current **US-Eastern** calendar day, and
+`SchedulerService.sync_ibkr_data(force=False)` returns `status="skipped"`,
+`reason="already_generated_today"` without touching the network when it has. So 00:00 Berlin is a
+no-op on a normal day and a real recovery attempt on a day 18:00 failed — the case that saved the
+data on 2026-08-02 and 08-03, when the day's first attempt failed and a later one succeeded.
+
+Three details are load-bearing:
+
+- **`ibkr_manual_xml` does not count as a generation**, and that is measured rather than assumed:
+  the browser download and the Web Service are independent channels, so an offline ingest spends
+  nothing. Twice in this account's history an offline ingest was followed by a *successful* API
+  generation in the same ET day (07-28: 00:16 ET then 02:05 ET; 07-31: 00:07 ET then 02:07 ET).
+  Counting it would suppress the day's real attempt on exactly the days someone had just recovered
+  by hand. `FLEX_API_SYNC_TYPES` excludes it; `IBKR_SYNC_TYPES` — which answers the *different*
+  question "was the data refreshed?" — includes it, and is defined as an extension of it so the two
+  cannot drift into separate literals.
+- **A failure does not spend the day either.** The guard keys on a *successful* run, so a day full
+  of `1001`s leaves every later slot free to try.
+- **The job's status becomes `skipped`, not `success`**, so `find_stale_ibkr_sync` (which counts
+  successes) is untouched by it. `trigger_sync_now` had to be narrowed at the same time: it raised
+  `SyncBusy` → 429 on any `skipped` status, which had only ever meant a pipeline collision, so it
+  now keys on `reason == "pipeline_busy"`. A day with nothing left to sync is finished, not busy.
 
 **The hours live in one place** — `IBKR_ONLY_HOURS` / `FULL_SYNC_HOUR` / `MARKET_DATA_HOURS`, and
 `ALL_SYNC_HOURS` over them — because three other files carry a copy: `ops/auto-deploy.sh` defers a
@@ -1256,37 +1287,77 @@ were not merely weak but **negative**: every failure is a failed *generation*, a
 are exactly what `Code=1025` counts. Two jobs whose purpose was protecting freshness were spending
 lockout budget twice a day to recover nothing. They moved to 00:00 and 06:00 on 2026-07-31.
 
-Keep any future IBKR slot inside roughly **22:00–09:00 Berlin**; a midday one looks helpful and is
-not. `test_every_ibkr_job_avoids_us_market_hours` fails the suite if one drifts back.
+That argued for keeping every IBKR slot inside roughly **22:00–09:00 Berlin**, and it held until
+2026-08-08, when the account owner moved the primary slot to 18:00 Berlin (12:00 ET) — see
+*The 18:00 Berlin slot* below. `test_ibkr_jobs_run_at_the_declared_hours` now checks an explicit
+allowlist rather than that range, so an hour still cannot drift unnoticed; it simply records a
+deliberate exception instead of a rule the schedule no longer follows.
 
 **But the hour is the weaker constraint. IBKR generates this statement about once per ET
 calendar day, and every attempt after the day's success is refused with `Code=1001`.** Read
-off `sync_runs` on 2026-08-07, with all three slots sitting inside the safe overnight window:
+off `sync_runs` on 2026-08-08, with all three slots sitting inside the safe overnight window:
 
-| ET day | 00:00 ET (06:00 Berlin) | 02:00 ET (08:00 Berlin) | 18:00 ET (00:00 Berlin) |
-|---|---|---|---|
-| 08-01 | **success** | error | error |
-| 08-02 | error | **success** | error |
-| 08-03 | error | **success** | error |
-| 08-04 | **success** | error | error |
-| 08-05 | **success** | error | error |
-| 08-06 | **success** | error | error |
+| ET day | 00:00 ET (06:00 Berlin) | 02:00 ET (08:00 Berlin) | 12–13 ET (manual) | 18:00 ET (00:00 Berlin) |
+|---|---|---|---|---|
+| 08-01 | **success** | error | | error |
+| 08-02 | error | **success** | error | error |
+| 08-03 | error | **success** | error | error |
+| 08-04 | **success** | error | | error |
+| 08-05 | **success** | error | | error |
+| 08-06 | **success** | error | error | error |
+| 08-07 | **success** | error | | error |
+| 08-08 | **success** | error | | |
 
-Exactly one success per day, six days of six, always the earliest attempt that works and
+Exactly one success per day, twelve days of twelve, always the earliest attempt that works and
 everything after it refused. The one two-success ET day in the whole history is 07-31 — the
-day the query definition was edited, which appears to reset it.
+day the query definition was edited, which appears to reset it, and the reason both the guard
+and the manual endpoint keep a `force` escape hatch.
+
+Note the manual column: those are Sync-button presses, and they are why this read as "the Flex
+query always errors out" from the UI. **The code enforces the rule now** — see the guard under
+*Sync schedule* above.
 
 **This subsumes the mid-session reading rather than contradicting it, and that is the part
 worth understanding.** The 07-31 table above is equally well explained by "the later slots had
 already spent the day's generation": 08:00 went 4/5 while 13:00 and 20:00 — both *after* it —
 went 0/6 and 1/8. Two theories, one dataset, because the mid-session slots were also the
 later ones. What discriminates is 08-01 onward, where every slot is overnight and only one
-still succeeds. So the hour rule stays (a midday slot is bad for both reasons), but **adding
-IBKR slots does not add freshness** — it adds failed generations, which is exactly what
-`Code=1025` counts. The account has three slots and can use one.
+still succeeds. So the hour rule stays as evidence (a midday slot is bad for both reasons), but
+**adding IBKR slots does not add freshness** — it adds failed generations, which is exactly what
+`Code=1025` counts. The account has two slots and can use one.
 
-The concrete consequence is that **the 06:00 job usually starves the 08:00 `full_sync`**, which
-is why the latter's market-data half must not be gated on its IBKR half.
+The concrete consequence used to be that **the earliest job starves the later ones**, which is
+why `full_sync`'s market-data half must not be gated on its IBKR half. Since the guard, the later
+ones skip instead of failing, but the gating rule stands for its own reasons.
+
+### The 18:00 Berlin slot — chosen against the evidence, on purpose
+
+The primary IBKR slot moved from 06:00 to **18:00 Berlin (12:00 ET)** on 2026-08-08 at the account
+owner's request, reaffirmed after the trade-off was put to them twice. It is written down here
+because the schedule now contradicts the measurements above, and the next person to read a run of
+`1001`s must know this was a decision rather than a drift:
+
+- **It captures no additional trades.** The window ends yesterday *measured in US Eastern* and rolls
+  at midnight ET, not at generation time — so 12:00 ET and 00:00 ET on the same day both cover
+  D−3…D−1. Identical statement, ~12 hours later. Reaching *today's* trades needs a custom date range
+  set by hand in the portal, which is not a schedule change.
+- **12:00 ET is mid-session**, the band where the table above shows 13:00 Berlin 0-for-6 and 20:00
+  Berlin 1-for-8. It is unproven at this specific hour.
+- **Attempts drop from three per ET day to two**, both in the weaker band, against a 3-day window
+  whose entire margin is two consecutive failed days.
+
+What makes it survivable is that the guard reduces the cost of a doomed attempt to zero, and that
+`find_flex_generation_gap` (below) now alarms in time to act. **If generations start failing, moving
+the primary back to 06:00 Berlin — the instant the window rolls — is the fix.**
+
+**`find_flex_generation_gap` warns after `FLEX_GENERATION_GAP_WARN_DAYS` (2) ET days with no
+successful IBKR sync**, and it exists because `find_stale_ibkr_sync` at 7 days *cannot see the
+failure it was written for* once the query period is 3 days: trades fall out of the window after
+two missed days, four days before the 7-day alarm says a word. Warning at 7 about a 3-day window is
+warning after the loss. It counts in **ET days** rather than elapsed hours — a failure at 23:00 ET
+and one at 01:00 ET the next day are two missed generations two hours apart — and it runs from the
+**market-data** job for the same reason its sibling does: those slots succeed while Flex is
+refusing. Re-derive the 2 if the Flex Query period changes; it is N−1, not a preference.
 
 **`full_sync` runs its 730-day market-data pass whether or not IBKR succeeded, and gating it
 was a silent outage (fixed 2026-08-07).** `_full_sync_job_locked` used to wrap step 3 in
@@ -2103,7 +2174,9 @@ Tests: `tests/test_currency_fallback.py`.
 | A sync warns about dropped attributes | Only fields the ingest **reads** warn now, and that means data may really be affected — read the names. The ~27 harmless ones IBKR sends every time are in the run's `details` as `flex_schema_notes`, not the banner |
 | Yield on cost looks low after buying more, or after selling and rebuying | Fixed 2026-08-05. It is the *projected* annual rate over cost, so it tracks the shares held now. A rebuy at a higher price genuinely lowers it — more capital for the same income. If it still looks off, `forward_yield_pct ÷ yield_on_cost_pct` must equal market value ÷ cost for that row |
 | `Code=1025` | Token lockout, usually self-inflicted. **Wait**, don't retry. The schedule recovers it |
-| `Code=1001` | Not ready. Polled while retrieving; **fatal at the request step** — never re-request, a later job handles it |
+| `Code=1001` | Not ready. Polled while retrieving; **fatal at the request step** — never re-request, a later job handles it. Since 2026-08-08 the common cause of a *run* of these is gone: the guard skips a slot once the ET day's generation is spent, so a `1001` now means a genuine refusal |
+| The Sync button says *Already up to date* | Working as intended, and not an error. IBKR issues about one statement per US-Eastern day; today's has landed, so there is nothing to fetch. The panel says when the next one becomes available. *Sync anyway* is only worth pressing after editing the Flex Query in the portal — the one thing that resets the daily generation — because a forced refusal spends `Code=1025` budget |
+| A scheduled run reads `skipped` in the history | Two different causes, told apart by `reason`. `already_generated_today` is the 00:00 Berlin slot correctly doing nothing because 18:00 succeeded — the normal daily state. `pipeline_busy` is a `single_flight` collision, where the next slot recovers freshness |
 | Sync 200 but 0 trades | Flex Query section/period not covering them |
 | `dividend_source` stuck on `yfinance_estimate` | No `<CashTransactions>` ingested — check the section + Withholding Tax option |
 | Yahoo 404/429 | **Stop.** Wait 30-60 min. Check `yfinance >= 1.1.0` |
