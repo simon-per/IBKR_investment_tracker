@@ -38,6 +38,7 @@ const TaxTab = lazy(() => import('./TaxTab').then(m => ({ default: m.TaxTab })))
 const DividendsTab = lazy(() => import('./DividendsTab').then(m => ({ default: m.DividendsTab })))
 import { ThemeToggle } from './ThemeToggle'
 import { AdminKeyButton } from './AdminKeyButton'
+import { SyncStatusMessage } from './SyncStatusMessage'
 import { BenchmarkPicker, BENCHMARK_COLORS } from './BenchmarkPicker'
 import { useBaseCurrency, useCurrencySymbol } from '@/lib/CurrencyContext'
 import {
@@ -349,15 +350,19 @@ export function Dashboard() {
 
   // Sync mutation
   const syncMutation = useMutation({
-    mutationFn: () => api.syncIBKRData(),
-    onSuccess: () => {
+    mutationFn: (force: boolean = false) => api.syncIBKRData(force),
+    onSuccess: (data) => {
+      // A skipped sync fetched nothing, so there is nothing to invalidate — and
+      // refetching the whole portfolio to display "already up to date" would make the
+      // cheapest outcome the most expensive one.
+      if (data.status === 'skipped') return
       // Invalidate all queries to refresh data
       queryClient.invalidateQueries({ queryKey: ['portfolio'] })
     },
   })
 
   const handleSync = () => {
-    syncMutation.mutate()
+    syncMutation.mutate(false)
   }
 
   return (
@@ -477,31 +482,14 @@ export function Dashboard() {
             </div>
           </div>
 
-          {/* Sync status messages */}
-          {syncMutation.isSuccess && (
-            <div className="mt-4 p-4 bg-green-50 dark:bg-green-950 border border-green-200 dark:border-green-800 rounded-lg">
-              <p className="text-sm text-green-800 dark:text-green-200">
-                ✓ Sync successful! Securities: {syncMutation.data.securities_synced}, Tax Lots: {syncMutation.data.taxlots_synced}
-              </p>
-              {syncMutation.data.warnings && syncMutation.data.warnings.length > 0 && (
-                <div className="mt-2">
-                  {syncMutation.data.warnings.map((warning, i) => (
-                    <p key={i} className="text-sm text-yellow-800 dark:text-yellow-200">
-                      ⚠ {warning}
-                    </p>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          {syncMutation.isError && (
-            <div className="mt-4 p-4 bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 rounded-lg">
-              <p className="text-sm text-red-800 dark:text-red-200">
-                ✗ Sync failed: {syncMutation.error.message}
-              </p>
-            </div>
-          )}
+          {/* Sync status messages — see SyncStatusMessage for why the skip state is
+              neutral rather than red. */}
+          <SyncStatusMessage
+            data={syncMutation.isSuccess ? syncMutation.data : undefined}
+            error={syncMutation.isError ? syncMutation.error : null}
+            isPending={syncMutation.isPending}
+            onForce={() => syncMutation.mutate(true)}
+          />
         </div>
       </div>
 

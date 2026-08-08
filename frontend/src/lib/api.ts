@@ -252,8 +252,16 @@ export interface PortfolioAllocationResponse {
 
 export interface SyncResponse {
   message: string;
-  securities_synced: number;
-  taxlots_synced: number;
+  // 'skipped' means IBKR had already generated today's statement, so nothing was
+  // fetched and nothing is wrong — it issues about one per US-Eastern day. The counts
+  // are absent on that branch, which is why they are optional: rendering
+  // `Securities: {securities_synced}` unconditionally printed "undefined".
+  status?: 'success' | 'skipped';
+  reason?: string;
+  last_success_at?: string;
+  next_attempt_after?: string;
+  securities_synced?: number;
+  taxlots_synced?: number;
   warnings?: string[];
 }
 
@@ -862,8 +870,13 @@ class ApiClient {
   }
 
   // Sync endpoint
-  async syncIBKRData(): Promise<SyncResponse> {
-    return this.request<SyncResponse>('/api/sync/ibkr', {
+  //
+  // `force` re-asks IBKR for a statement it has already generated today. It normally
+  // cannot succeed and each refusal spends `Code=1025` lockout budget, so it exists
+  // only for the case that genuinely resets the daily generation: editing the Flex
+  // Query definition in the IBKR portal.
+  async syncIBKRData(force: boolean = false): Promise<SyncResponse> {
+    return this.request<SyncResponse>(`/api/sync/ibkr${force ? '?force=true' : ''}`, {
       method: 'POST',
     });
   }
