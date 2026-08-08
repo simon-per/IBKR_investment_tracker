@@ -3,13 +3,16 @@ Tests for the scheduler's job wiring.
 
 The load-bearing invariant here is a Yahoo Finance one: CLAUDE.md forbids calling
 Yahoo without explicit user permission (it rate-limits aggressively, and a full
-sync is 50-150+ requests over 730 days). The extra IBKR attempts at 00:00/06:00
-exist to recover from transient IBKR errors *without* dragging Yahoo along, so
-that separation must not quietly regress into calling the full sync.
+sync is 50-150+ requests over 730 days). The IBKR-only recovery attempt exists to
+recover from a transient IBKR error *without* dragging Yahoo along, so that
+separation must not quietly regress into calling the full sync.
 
-Their *hours* are load-bearing too: IBKR generates a YTD statement from finalised
-daily data, so `SendRequest` succeeds overnight and fails during US market hours.
-The retries used to sit at 13:00 and 20:00 Berlin and went 0-for-6 and 1-for-8.
+Its *hour* is load-bearing too, in two ways. IBKR generates a statement from
+finalised daily data, so `SendRequest` succeeds overnight and fails during US
+market hours — the retries sat at 13:00 and 20:00 Berlin once and went 0-for-6 and
+1-for-8. And IBKR issues only about one generation per ET calendar day, so a
+recovery slot is worth having only where it falls after the primary within the
+same ET day.
 
 Also covers the stale-price detector, which exists because a price that simply never
 arrives is otherwise silent: the position is valued at 0.00 and the portfolio total drops
@@ -473,6 +476,22 @@ def _trigger_hour(job) -> int:
     return int(str(job.trigger).split("hour='")[1].split("'")[0])
 
 
+def _declared_job_ids() -> set:
+    """
+    The job ids this build should register, derived from the hour constants.
+
+    Derived rather than listed, because the literal set was written out twice and both
+    copies had to be edited by hand when the IBKR slots went from two to one — which is
+    the same "one fact, two copies" shape the rest of this codebase keeps getting caught
+    by, in the file whose whole job is to notice schedule drift.
+    """
+    return {
+        'full_sync_job',
+        *(f'ibkr_retry_{i}' for i in range(1, len(IBKR_ONLY_HOURS) + 1)),
+        *(f'market_sync_{i}' for i in range(1, len(MARKET_DATA_HOURS) + 1)),
+    }
+
+
 @pytest.mark.asyncio
 async def test_scheduler_registers_every_declared_job(jobstore_url):
     # async so AsyncIOScheduler has a running loop to attach to (it only reports
@@ -482,14 +501,11 @@ async def test_scheduler_registers_every_declared_job(jobstore_url):
         svc.start()
         jobs = {job.id: job for job in svc.scheduler.get_jobs()}
 
-        assert set(jobs) == {
-            'full_sync_job', 'ibkr_retry_1', 'ibkr_retry_2',
-            *(f'market_sync_{i}' for i in range(1, len(MARKET_DATA_HOURS) + 1)),
-        }
+        assert set(jobs) == _declared_job_ids()
         # The IBKR jobs must not collide with a market-data job, or a Yahoo sync and
         # an IBKR sync run concurrently against the same DB.
-        assert _trigger_hour(jobs['ibkr_retry_1']) == IBKR_ONLY_HOURS[0]
-        assert _trigger_hour(jobs['ibkr_retry_2']) == IBKR_ONLY_HOURS[1]
+        for index, hour in enumerate(IBKR_ONLY_HOURS, start=1):
+            assert _trigger_hour(jobs[f'ibkr_retry_{index}']) == hour
         assert _trigger_hour(jobs['full_sync_job']) == FULL_SYNC_HOUR
         assert not set(IBKR_ONLY_HOURS) & set(MARKET_DATA_HOURS)
         assert FULL_SYNC_HOUR not in MARKET_DATA_HOURS
@@ -559,41 +575,91 @@ async def test_market_data_repriced_at_least_every_three_hours_intraday(jobstore
 
 
 # Every job that reaches IBKR. Market-data jobs are excluded: they touch Yahoo, not Flex.
-IBKR_JOB_IDS = ('full_sync_job', 'ibkr_retry_1', 'ibkr_retry_2')
+IBKR_JOB_IDS = ('full_sync_job', *(f'ibkr_retry_{i}' for i in range(1, len(IBKR_ONLY_HOURS) + 1)))
+
+# The Berlin hours an IBKR job is *allowed* to run at.
+#
+# This used to be the range 22:00-09:00, asserted as a rule, because IBKR builds this
+# statement from *finalised* daily data: `SendRequest` succeeds overnight and fails
+# during the US session, as `Code=1001` at the request step — the fatal-fast kind.
+# Measured on this account's own `sync_runs` (2026-07-31): overnight 8/9, afternoon and
+# evening 1/15, with 13:00 Berlin at 0-for-6 and 20:00 at 1-for-8.
+#
+# **18:00 is in this list against that evidence, by the account owner's explicit
+# decision** (2026-08-08, reaffirmed after the trade-off was put to them twice). It is
+# 12:00 ET, mid-session. It captures no additional trades — the Flex window ends
+# yesterday measured in US Eastern and rolls at midnight ET, so 12:00 ET covers exactly
+# what 00:00 ET does — and it is unproven at that hour. Recorded here rather than in a
+# commit message so the next person to read a run of `1001`s knows this was chosen, and
+# knows what moving it back to 06:00 Berlin would buy.
+IBKR_ALLOWED_HOURS = frozenset({0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 18, 22, 23})
 
 
 @pytest.mark.asyncio
-async def test_every_ibkr_job_avoids_us_market_hours(jobstore_url):
+async def test_ibkr_jobs_run_at_the_declared_hours(jobstore_url):
     """
-    IBKR builds a Year-to-Date statement from *finalised* daily data, so `SendRequest`
-    succeeds overnight and fails during the US session — as `Code=1001` at the request
-    step, the fatal-fast kind.
+    An IBKR slot may not drift to an hour nobody chose.
 
-    Measured on this account's own `sync_runs` (2026-07-31): overnight 8/9, afternoon and
-    evening 1/15, with 13:00 at 0-for-6 and 20:00 at 1-for-8. Those slots were not merely
-    weak but negative — a failed generation is exactly what `Code=1025` counts, so the two
-    jobs meant to protect freshness were spending lockout budget twice a day for nothing.
+    The check this replaced asserted a *rule* (overnight only) that the schedule no
+    longer follows, so it had to become an allowlist — but an allowlist is still the
+    thing that matters here: what has actually hurt this account is a slot moving
+    without anyone re-deriving whether it can succeed there. Every failed attempt is a
+    failed statement *generation*, which is precisely what the `Code=1025` token lockout
+    counts, so a badly placed slot is not merely useless but actively harmful.
 
-    A midday slot looks helpful and is not. This fails the suite if one drifts back.
+    See IBKR_ALLOWED_HOURS for why 18:00 is on the list despite the measurements.
     """
     svc = SchedulerService()
     try:
         svc.start()
         jobs = {job.id: job for job in svc.scheduler.get_jobs()}
 
-        offenders = {}
-        for jid in IBKR_JOB_IDS:
-            hour = int(str(jobs[jid].trigger).split("hour='")[1].split("'")[0])
-            if not (hour <= 9 or hour >= 22):
-                offenders[jid] = hour
+        offenders = {
+            jid: _trigger_hour(jobs[jid])
+            for jid in IBKR_JOB_IDS
+            if _trigger_hour(jobs[jid]) not in IBKR_ALLOWED_HOURS
+        }
 
         assert not offenders, (
-            f"IBKR job(s) scheduled inside US market hours: {offenders}. "
-            f"Statement generation reliably fails there and each failure spends "
-            f"Code=1025 lockout budget. Keep IBKR slots within 22:00-09:00 Berlin."
+            f"IBKR job(s) at an unvetted hour: {offenders}. Statement generation fails "
+            f"reliably inside the US session and each failure spends Code=1025 lockout "
+            f"budget. Add the hour to IBKR_ALLOWED_HOURS only with a reason."
         )
     finally:
         svc.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_only_one_ibkr_slot_can_win_a_given_et_day(jobstore_url):
+    """
+    IBKR issues about one statement generation per ET calendar day, so a second slot is
+    only ever a *recovery* attempt — it earns its place by falling in the same ET day as
+    the primary, after it, and before midnight ET rolls the window.
+
+    A slot placed outside that span is not redundancy, it is a second doomed generation
+    the day after. 18:00 Berlin is 12:00 ET and 00:00 Berlin is 18:00 ET *of the same ET
+    day*, which is the property this pins — six Berlin hours later, still six hours
+    before the ET day ends.
+
+    An empty IBKR_ONLY_HOURS passes vacuously, which is correct: dropping the recovery
+    slot entirely is a legitimate choice, just a thinner one.
+    """
+    # Berlin is UTC+1/+2 and New York UTC-5/-4, so the gap is six hours for all but the
+    # ~3 weeks a year the two DST changeovers are out of step, when it is five. Both are
+    # checked rather than assuming the common case, because a slot ordering that only
+    # holds for 49 weeks of the year is exactly the kind of thing nobody would catch in
+    # the other three.
+    for offset in (5, 6):
+        primary_et = (FULL_SYNC_HOUR - offset) % 24
+
+        for hour in IBKR_ONLY_HOURS:
+            recovery_et = (hour - offset) % 24
+            assert primary_et < recovery_et, (
+                f"at a {offset}h Berlin-to-ET offset the {hour:02d}:00 Berlin recovery "
+                f"slot is {recovery_et}:00 ET, which is *before* the {primary_et}:00 ET "
+                f"primary — so it would take the day's one generation and the primary "
+                f"would skip behind it"
+            )
 
 
 @pytest.mark.asyncio
@@ -669,10 +735,7 @@ async def test_a_job_this_build_no_longer_registers_is_removed_from_the_store(jo
         second.shutdown()
 
     assert 'ibkr_sync_midday' not in ids, "a retired job kept firing from the store"
-    assert ids == {
-        'full_sync_job', 'ibkr_retry_1', 'ibkr_retry_2',
-        *(f'market_sync_{i}' for i in range(1, len(MARKET_DATA_HOURS) + 1)),
-    }
+    assert ids == _declared_job_ids()
 
 
 @pytest.mark.asyncio

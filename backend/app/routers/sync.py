@@ -12,12 +12,13 @@ from app.clock import utcnow
 
 from app.database import get_db
 from app.redact import redact_secrets
+from app.services.flex_generation import generation_already_spent, next_generation_opens_at
 from app.services.ibkr_service import IBKRService
 from app.single_flight import SYNC_PIPELINE, SyncBusy, single_flight
 from app.services.sync_helper import ingest_flex_statement
 from app.repositories.security_repository import SecurityRepository
 from app.repositories.taxlot_repository import TaxLotRepository
-from app.repositories.sync_run_repository import SyncRunRepository
+from app.repositories.sync_run_repository import SyncRunRepository, utc_iso
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ router = APIRouter()
 
 
 @router.post("/ibkr", response_model=Dict)
-async def sync_ibkr_data(db: AsyncSession = Depends(get_db)):
+async def sync_ibkr_data(force: bool = False, db: AsyncSession = Depends(get_db)):
     """
     Sync securities and tax lots from IBKR Flex Query.
 
@@ -36,10 +37,42 @@ async def sync_ibkr_data(db: AsyncSession = Depends(get_db)):
     4. Converts cost basis to EUR
     5. Stores everything in the database
 
+    Answers **200 with `status="skipped"`** — not an error — when IBKR has already
+    generated today's statement. It issues roughly one per US-Eastern calendar day and
+    refuses the rest with `Code=1001` at the SendRequest step, so the old behaviour was
+    to spend a *failed generation* (what `Code=1025` counts) in order to show the user a
+    red banner. Nothing is fetched and nothing is lost: the day's statement is already
+    ingested.
+
+    `force=true` overrides it, for the one case the recorded history shows really does
+    allow a second generation in a day — editing the query definition in the IBKR
+    portal. It costs lockout budget if the assumption is wrong, which is why it is not
+    the default.
+
     Returns:
         Summary of synced data including counts
     """
     started_at = utcnow()
+
+    # Checked *before* the pipeline gate, deliberately. Entering the gate bumps the
+    # shared last-start clock every other route's cooldown reads, so a button press that
+    # does no work must not 429 a real sync behind it.
+    if not force:
+        spent = await generation_already_spent(db)
+        if spent is not None:
+            next_at = next_generation_opens_at()
+            return {
+                "status": "skipped",
+                "reason": "already_generated_today",
+                "message": (
+                    "IBKR has already generated today's statement, so there is nothing "
+                    "new to fetch. It issues one per US-Eastern day; the next becomes "
+                    "available at the time below."
+                ),
+                "last_success_at": utc_iso(spent),
+                "next_attempt_after": utc_iso(next_at),
+            }
+
     try:
         # Shared pipeline gate + cooldown: this route is public and one Flex
         # round is several requests against a 10/min token budget.

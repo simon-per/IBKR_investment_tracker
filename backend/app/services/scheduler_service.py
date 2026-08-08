@@ -18,6 +18,12 @@ from app.config import settings
 from app.database import AsyncSessionLocal
 from app.single_flight import SYNC_PIPELINE, SyncBusy, single_flight
 from app.services.ibkr_service import IBKRService, FLEX_RETRY_DELAYS_PATIENT
+from app.services.flex_generation import (
+    IBKR_SYNC_TYPES,
+    et_date,
+    generation_already_spent,
+    next_generation_opens_at,
+)
 from app.services.market_data_service import MarketDataService
 from app.services.currency_service import CurrencyService
 from app.services.sync_helper import ingest_flex_statement
@@ -87,15 +93,43 @@ STALE_PRICE_DAYS = 5
 # With a 30-day window, an outage longer than the window loses those trades permanently
 # and silently — the rows simply never appear in any future statement.
 #
-# Seven days against three IBKR attempts a day (00:00/06:00/08:00) means ~21 consecutive
-# failures before it fires, so it cannot cry wolf over a `1025` lockout (~14h) or a bad
-# night. It leaves ~23 days of margin under a 30-day window to fix the cause or fall back
-# to the offline XML path.
+# Seven days against two IBKR attempts a day (18:00 and 00:00 Berlin) means ~14
+# consecutive failures before it fires, so it cannot cry wolf over a `1025` lockout
+# (~14h) or a bad night.
+#
+# **Seven days is far too slow to be the alarm for a 3-day Flex window**, and that is
+# not a flaw in this constant but the reason `find_flex_generation_gap` exists beside
+# it: trades fall out of a `Last 3 Calendar Days` statement after two consecutive
+# missed days, four days before this one says a word. This stays as the backstop for a
+# genuinely broken token; the two-day one is the alarm that protects the data.
 IBKR_SYNC_STALE_DAYS = 7
 
-# Sync types that actually reach IBKR. Market-data and manual-CLI runs must not count:
-# a green market-data job says nothing about whether Flex is answering.
-IBKR_SYNC_TYPES = ('ibkr', 'ibkr_sync', 'full_sync', 'ibkr_manual_xml')
+# ET days without a successful IBKR sync before `find_flex_generation_gap` warns.
+#
+# Two, because that is the actual margin. The Flex Query period is `Last N Calendar
+# Days` with N=3, so a statement generated on day D covers D-3..D-1 and a trade on day
+# T is reachable from T+1, T+2 or T+3 and **gone from T+4**. One generation is
+# available per ET day, so two consecutive missed days leaves exactly one day of slack
+# to notice and recover by hand.
+#
+# It fires one day earlier than strictly necessary on purpose: the recovery is manual
+# (a browser download through `app/cli/ingest_flex_xml.py`) and needs a human awake.
+# The cost of a day's false alarm is one warning line; the cost of being a day late is
+# trades that no future statement contains. **Re-derive this if the Flex Query period
+# changes** — it is N-1, not a preference.
+FLEX_GENERATION_GAP_WARN_DAYS = 2
+
+# `IBKR_SYNC_TYPES` — the sync types that actually reach IBKR — now comes from
+# `app/services/flex_generation.py` (imported at the top of this module, and still
+# importable from here for the callers that already do).
+#
+# It lives there because there are two overlapping sets and keeping them apart matters.
+# `IBKR_SYNC_TYPES` answers *"was the data refreshed?"*, so it **includes** the offline
+# `ibkr_manual_xml` path — ingesting a browser download genuinely updates the portfolio.
+# `FLEX_API_SYNC_TYPES` answers *"was today's one statement generation spent?"*, and
+# **excludes** it, because that download arrives over an independent channel and costs
+# no generation. Same table, two questions; declaring the tuples separately in two
+# modules is how this codebase's duplicated logic has always drifted.
 
 # How late a missed run may still be honoured.
 #
@@ -126,11 +160,40 @@ MISFIRE_GRACE_SECONDS = 30 * 60
 # Whole hours only, and that is a constraint rather than a preference: the guard
 # reasons in hours, so a half-hour slot could not be expressed on its side and
 # would run unprotected.
-IBKR_ONLY_HOURS = (0, 6)
-FULL_SYNC_HOUR = 8
-# 08:00 is absent here because the full sync already reprices then; these are the
+#
+# ── Why IBKR sits at 18:00 Berlin, against the evidence ───────────────────────
+#
+# The account owner asked for the single daily Flex generation to be aimed at 18:00
+# Berlin (12:00 ET), and reaffirmed it after the trade-off was put to them twice. It
+# is written down here because the code now contradicts what the measurements argue
+# for, and a later reader must not "fix" it back without knowing that:
+#
+# - **It captures no additional trades.** The Flex window ends yesterday *measured in
+#   US Eastern* and rolls at midnight ET, not at generation time — so 12:00 ET and
+#   00:00 ET on the same day both cover D-3..D-1. It is the same statement, ~12 hours
+#   later. Reaching *today's* trades needs a custom date range set by hand in the
+#   portal, which is not a schedule change.
+# - **12:00 ET is mid-US-session**, where IBKR builds this statement from unfinalised
+#   daily data. The historical mid-session slots ran 13:00 Berlin 0-for-6 and 20:00
+#   Berlin 1-for-8. `test_ibkr_jobs_run_at_the_declared_hours` records this as a
+#   deliberate exception rather than asserting the old overnight rule.
+# - **Attempts drop from three per ET day to two**, both in the weaker band, against a
+#   3-day Flex window whose whole margin is two consecutive failed days. That is what
+#   `find_flex_generation_gap` exists to catch; `find_stale_ibkr_sync` at 7 days
+#   cannot see it in time.
+#
+# What makes this survivable at all is the guard in `flex_generation.py`: whichever
+# slot runs first in an ET day takes the generation and the rest skip without asking,
+# so the cost of a doomed attempt is now zero rather than a spent `Code=1025` budget.
+IBKR_ONLY_HOURS = (0,)
+FULL_SYNC_HOUR = 18
+# 18:00 is absent here because the full sync already reprices then; these are the
 # additional market-data touches. Why six and not two: see `start()`.
-MARKET_DATA_HOURS = (11, 13, 15, 18, 20, 22)
+#
+# The seven Yahoo repricing hours are 8, 11, 13, 15, 18, 20, 22 and are **unchanged**
+# by the IBKR move — only which job performs the 08:00 and 18:00 touches changed, so
+# 08:00 is now a plain 7-day pass and the 730-day one rides with the 18:00 full sync.
+MARKET_DATA_HOURS = (8, 11, 13, 15, 20, 22)
 ALL_SYNC_HOURS = tuple(sorted({FULL_SYNC_HOUR, *IBKR_ONLY_HOURS, *MARKET_DATA_HOURS}))
 
 
@@ -155,16 +218,20 @@ class SchedulerService:
     """
     Service for scheduling automated data synchronization tasks.
 
-    Runs 9 times daily (Europe/Berlin):
+    Runs 8 times daily (Europe/Berlin):
+    - 08:00, 11:00, 13:00, 15:00, 20:00, 22:00: Market data only (7 days)
+    - 18:00: Full sync (IBKR + 730 days market data) — fills historical gaps gradually
     - 00:00: IBKR + FX only — no Yahoo
-    - 06:00: IBKR + FX only — no Yahoo
-    - 08:00: Full sync (IBKR + 730 days market data) — fills historical gaps gradually
-    - 11:00, 13:00, 15:00, 18:00, 20:00, 22:00: Market data only (7 days)
 
-    The two IBKR-only slots sit overnight on purpose; see `_ibkr_only_sync_locked`
-    and `test_every_ibkr_job_avoids_us_market_hours`. The market-data slots are
-    deliberately spread *through* both sessions rather than sitting after each
-    close — see MARKET_DATA_HOURS and `start()`.
+    **Only one of the two IBKR slots can ever succeed in a day.** IBKR generates this
+    statement about once per US-Eastern calendar day, so 18:00 Berlin (12:00 ET) takes
+    it and 00:00 Berlin (18:00 ET, the same ET day) skips without asking — unless
+    18:00 failed, which is the only case the second slot exists for. The guard is in
+    `app/services/flex_generation.py`; the reasoning for the hour is beside
+    IBKR_ONLY_HOURS.
+
+    Yahoo is repriced at seven hours spread *through* both sessions rather than sitting
+    after each close — see MARKET_DATA_HOURS and `start()`.
     """
 
     def __init__(self):
@@ -176,9 +243,19 @@ class SchedulerService:
         # `_prune_unknown_jobs` to evict jobs the persistent store outlived.
         self._registered_job_ids: set = set()
 
-    async def sync_ibkr_data(self) -> dict:
+    async def sync_ibkr_data(self, force: bool = False) -> dict:
         """
         Sync securities and tax lots from IBKR Flex Query.
+
+        Returns `status="skipped"` without touching the network when IBKR has already
+        generated today's statement — see `app/services/flex_generation.py` for the
+        evidence. Asking anyway cannot succeed and is not free: the refusal arrives as
+        `Code=1001` at the SendRequest step, which is a *failed generation*, and failed
+        generations are exactly what the `Code=1025` token lockout counts.
+
+        `force` exists for the one case the history shows really does allow a second
+        generation in a day: editing the query definition in the IBKR portal (07-31).
+        Nothing scheduled passes it.
 
         Returns:
             Summary of synced data
@@ -186,6 +263,24 @@ class SchedulerService:
         logger.info("Starting scheduled IBKR data sync...")
 
         async with AsyncSessionLocal() as db:
+            if not force:
+                spent = await generation_already_spent(db)
+                if spent is not None:
+                    message = (
+                        f"IBKR already generated today's statement (last successful sync "
+                        f"{utc_iso(spent)}). It issues one per US-Eastern day; the next is "
+                        f"available from {utc_iso(next_generation_opens_at())}."
+                    )
+                    logger.info(f"IBKR sync skipped: {message}")
+                    return {
+                        "status": "skipped",
+                        "reason": "already_generated_today",
+                        "message": message,
+                        "last_success_at": utc_iso(spent),
+                        "next_attempt_after": utc_iso(next_generation_opens_at()),
+                        "timestamp": utc_iso(utcnow()),
+                    }
+
             try:
                 # Initialize services and repositories
                 # Step 1: Fetch data from IBKR. Nobody is waiting on a scheduled run,
@@ -317,10 +412,20 @@ class SchedulerService:
                     diagnostics += await self.find_dividends_predating_their_mapping(db)
                 except Exception as e:
                     logger.warning(f"Could not check dividend provenance: {e}")
-                # IBKR freshness is checked from the *market-data* job on purpose: it
-                # runs at 15:00 and 22:00 and succeeds even while Flex is refusing, so
-                # the warning still reaches `warnings[]`. Hanging it off the IBKR job
-                # instead would silence it in exactly the outage it exists to report.
+                # IBKR freshness is checked from the *market-data* job on purpose: those
+                # slots succeed even while Flex is refusing, so the warning still reaches
+                # `warnings[]`. Hanging it off the IBKR job instead would silence it in
+                # exactly the outage it exists to report.
+                #
+                # Two detectors, two horizons, and they are not redundant. The 7-day one
+                # is the backstop for a broken token; the 2-day one is what actually
+                # protects the data, because a `Last 3 Calendar Days` statement loses
+                # trades permanently once two consecutive ET days go by with no
+                # successful generation — four days before the 7-day one says anything.
+                try:
+                    diagnostics += await self.find_flex_generation_gap(db)
+                except Exception as e:
+                    logger.warning(f"Could not check the Flex generation gap: {e}")
                 try:
                     diagnostics += await self.find_stale_ibkr_sync(db)
                 except Exception as e:
@@ -398,6 +503,63 @@ class SchedulerService:
         if warnings:
             logger.warning(f"{len(warnings)} security(ies) with missing or stale prices")
         return warnings
+
+    async def find_flex_generation_gap(
+        self, db: AsyncSession, as_of: Optional[datetime] = None
+    ) -> list:
+        """
+        Warn after `FLEX_GENERATION_GAP_WARN_DAYS` ET days with no successful IBKR sync.
+
+        **This is the alarm that protects the data; `find_stale_ibkr_sync` is only the
+        backstop.** The Flex Query period is `Last 3 Calendar Days`, so a statement
+        generated on day D covers D-3..D-1 and a trade on day T is unreachable from T+4
+        onward. With one generation available per ET day, two consecutive missed days
+        is the entire margin — and the 7-day detector fires four days after the trades
+        have already gone from every future statement. Warning at 7 about a 3-day
+        window is warning after the loss.
+
+        Counted in **ET days**, not in elapsed hours, because that is the unit IBKR
+        issues statements in: a failure at 23:00 ET and one at 01:00 ET the next day are
+        two missed generations two hours apart, and an hours-based age would call that
+        one.
+
+        Uses `IBKR_SYNC_TYPES`, so an offline `ibkr_manual_xml` ingest **closes** the
+        gap. That is the opposite choice from the guard in `flex_generation.py`, which
+        excludes it — deliberately, and the two questions are genuinely different. A
+        browser download refreshes the data (so the alarm should quieten) while costing
+        no generation (so the guard must not skip the day's attempt). Getting this
+        backwards in either direction is a real bug: the alarm would blare through a
+        correct recovery, or the recovery would suppress the next real sync.
+
+        Silent on a fresh install with no successful sync ever — that is
+        `find_stale_ibkr_sync`'s case, and duplicating it here would put two warnings on
+        one condition.
+        """
+        as_of = as_of or utcnow()
+
+        latest = await db.execute(
+            select(func.max(SyncRun.finished_at)).where(
+                and_(
+                    SyncRun.sync_type.in_(IBKR_SYNC_TYPES),
+                    SyncRun.status == 'success',
+                )
+            )
+        )
+        newest = latest.scalar_one_or_none()
+        if newest is None:
+            return []
+
+        missed = (et_date(as_of) - et_date(newest)).days
+        if missed < FLEX_GENERATION_GAP_WARN_DAYS:
+            return []
+
+        return [
+            f"IBKR: no statement has been generated for {missed} US-Eastern days (last "
+            f"success {et_date(newest):%Y-%m-%d} ET). The Flex Query window only reaches "
+            f"back a few days, so trades are about to become unreachable from every "
+            f"future statement — download the statement from Client Portal with a wider "
+            f"period and ingest it via app/cli/ingest_flex_xml.py"
+        ]
 
     async def find_stale_ibkr_sync(
         self, db: AsyncSession, as_of: Optional[datetime] = None
@@ -732,6 +894,13 @@ class SchedulerService:
         records itself as 'skipped' instead of running concurrently — two
         pipelines would race the Flex budget toward a Code=1025 lockout and
         double-hit Yahoo. The next scheduled slot recovers the freshness.
+
+        `reason` distinguishes this skip from the other one a job can now report.
+        `sync_ibkr_data` also returns `status="skipped"` when IBKR has already
+        generated today's statement, and the two mean opposite things: this one is
+        "come back shortly", that one is "there is nothing more to fetch today".
+        `trigger_sync_now` keys on the reason, because answering 429 *busy* to a day
+        that simply had nothing left to sync is a misleading error.
         """
         try:
             with single_flight(SYNC_PIPELINE):
@@ -741,6 +910,7 @@ class SchedulerService:
             skipped = {
                 "type": job_type,
                 "status": "skipped",
+                "reason": "pipeline_busy",
                 "message": str(e),
                 "timestamp": utc_iso(utcnow()),
             }
@@ -749,7 +919,13 @@ class SchedulerService:
 
     async def full_sync_job(self) -> Optional[dict]:
         """
-        Full sync job that runs once daily at 08:00 Europe/Berlin.
+        Full sync job that runs once daily at 18:00 Europe/Berlin.
+
+        This is the slot that carries the day's one IBKR statement generation — see
+        IBKR_ONLY_HOURS for why it sits at 18:00 rather than overnight. It also keeps
+        the 730-day market-data pass, which moved here with it: pairing them means a
+        security the statement creates is priced by the same job, and 08:00 keeps its
+        Yahoo touch as a plain 7-day pass so the seven repricing hours are unchanged.
 
         Executes in sequence:
         1. IBKR data sync (securities and tax lots)
@@ -814,6 +990,10 @@ class SchedulerService:
             "dividend_result": div_result,
             "status": ibkr_result.get("status", "error"),
         }
+        # A skip is only useful in the history if it says which kind it was; `status`
+        # alone reads the same as a pipeline collision.
+        if ibkr_result.get("reason"):
+            self.last_sync_result["reason"] = ibkr_result["reason"]
         _collect_warnings(self.last_sync_result, ibkr_result, market_result)
         await self._record_run(self.last_sync_result, started_at)
 
@@ -907,23 +1087,29 @@ class SchedulerService:
 
     async def _ibkr_only_sync_locked(self) -> dict:
         """
-        IBKR-only sync, at 00:00 and 06:00 Europe/Berlin.
+        IBKR-only sync, at 00:00 Europe/Berlin — the day's *recovery* attempt.
 
-        Exists because the 08:00 full sync used to be the *only* job that talks to IBKR,
-        so a transient `Code=1001` ("statement could not be generated") cost a whole day
-        of freshness — which got likelier once the Flex Query grew from one section to six
+        Exists because the full sync used to be the only job that talks to IBKR, so a
+        transient `Code=1001` ("statement could not be generated") cost a whole day of
+        freshness — which got likelier once the Flex Query grew from one section to six
         (Trades/CorporateActions/CashTransactions, then Deposits & Withdrawals and
         Transfers), five of which scan the whole period.
 
-        **These ran at 13:00 and 20:00 until 2026-07-31 and must not go back.** IBKR
-        builds the statement from *finalised* daily data, so SendRequest succeeds overnight
-        and fails mid-session — as `Code=1001` at the request step, which is the
+        **It is now almost always a no-op, and that is the point.** 00:00 Berlin is
+        18:00 ET — the *same* ET calendar day as the 18:00 Berlin full sync six hours
+        earlier — so when that one succeeded, the guard in `flex_generation.py` makes
+        this return `skipped` without touching the network. It fires only on a day the
+        primary attempt failed, which is exactly the case that saved the data on
+        2026-08-02 and 08-03. Before the guard existed this slot failed every single
+        day of its recorded history, spending `Code=1025` budget each time.
+
+        **This ran at 13:00 and 20:00 until 2026-07-31 and must not go back there.**
+        IBKR builds the statement from *finalised* daily data, so SendRequest succeeds
+        overnight and fails mid-session — as `Code=1001` at the request step, the
         fatal-fast kind. Measured on this account's own `sync_runs`: overnight 8/9,
-        afternoon and evening 1/15 (13:00 was 0-for-6, 20:00 1-for-8). Those slots were
-        not merely weak but negative, since a failed generation is exactly what
-        `Code=1025` counts — two jobs meant to protect freshness were spending lockout
-        budget twice a day to recover nothing. Pinned by
-        `test_every_ibkr_job_avoids_us_market_hours`.
+        afternoon and evening 1/15 (13:00 was 0-for-6, 20:00 1-for-8). That evidence
+        also argues against the 18:00 Berlin primary slot, which the account owner
+        chose anyway with the trade-off stated; see IBKR_ONLY_HOURS.
 
         Deliberately does NOT call sync_market_data() or sync_dividends(): both hit Yahoo
         Finance, which is rate-limited and, per CLAUDE.md, must never be called without
@@ -949,6 +1135,8 @@ class SchedulerService:
             "fx_result": fx_result,
             "status": ibkr_result.get("status", "error"),
         }
+        if ibkr_result.get("reason"):
+            self.last_sync_result["reason"] = ibkr_result["reason"]
         _collect_warnings(self.last_sync_result, ibkr_result)
         await self._record_run(self.last_sync_result, started_at)
 
@@ -1041,9 +1229,9 @@ class SchedulerService:
 
     def start(self):
         """
-        Start the scheduler with 9 daily syncs (Europe/Berlin):
-        - 00:00, 06:00: IBKR only — second chances if the 08:00 statement isn't ready
-        - 08:00: Full sync (IBKR + 730 days market data) — fills historical gaps
+        Start the scheduler with 8 daily syncs (Europe/Berlin):
+        - 18:00: Full sync (IBKR + 730 days market data) — the day's one generation
+        - 00:00: IBKR only — the recovery attempt, a no-op unless 18:00 failed
         - MARKET_DATA_HOURS: market data only (7 days), through both sessions
 
         Jobs are persisted to `settings.scheduler_jobstore_url` so a restart that
@@ -1096,13 +1284,21 @@ class SchedulerService:
             CronTrigger(hour=FULL_SYNC_HOUR, minute=0, timezone='Europe/Berlin'),
             f'Full IBKR + Market Data Sync ({FULL_SYNC_HOUR:02d}:00 Europe/Berlin)',
         )
-        # Two IBKR-only second chances, so a transient Code=1001 at 08:00 does not cost a
+        # One IBKR-only second chance, so a transient Code=1001 at 18:00 does not cost a
         # full day of freshness.
         #
-        # **They sit at 00:00 and 06:00, not 13:00 and 20:00, and the hours are the whole
-        # point.** IBKR builds a Year-to-Date statement from finalised daily data, so
-        # generation succeeds outside US market hours and fails inside them. Measured on
-        # this account's own `sync_runs` (2026-07-31):
+        # **Adding more would not add freshness.** IBKR generates this statement about
+        # once per ET calendar day and refuses every later attempt, so extra slots buy
+        # failed generations — which is precisely what `Code=1025` counts. What makes
+        # even this one free is the guard in `flex_generation.py`: it skips without
+        # asking whenever the ET day's generation is already spent, so it costs nothing
+        # on the ~everyday case and only reaches the network when 18:00 failed.
+        #
+        # A slot is useful only if it falls in the same ET day *after* the primary and
+        # before midnight ET. 00:00 Berlin is 18:00 ET, which satisfies both.
+        #
+        # The historical hour evidence, kept because it still constrains where a future
+        # slot may go (measured on this account's own `sync_runs`, 2026-07-31):
         #
         #     Berlin   ET       ok/total
         #     00:00    18:00     1/1      after the US close
@@ -1112,13 +1308,10 @@ class SchedulerService:
         #     13:00    07:00     0/6      pre-market
         #     20:00    14:00     1/8      mid-session
         #
-        # Overnight 8/9; afternoon and evening 1/15. The old slots were not merely weak,
-        # they were **negative**: each failure is a failed *generation*, which is exactly
-        # what `Code=1025` counts — so the two jobs meant to protect freshness were
-        # spending lockout budget twice a day to recover nothing, 0-for-6 and 1-for-8.
-        #
-        # Keep any future retry inside roughly 22:00–09:00 Berlin. A midday slot looks
-        # helpful and is not.
+        # Overnight 8/9; afternoon and evening 1/15. Those old midday slots were not
+        # merely weak, they were **negative** — each failure a failed generation. That
+        # is the evidence the 18:00 Berlin primary slot runs against, by the owner's
+        # explicit decision; see IBKR_ONLY_HOURS for the full trade-off.
         #
         # The ids are **numbered, not named for their hour**. They used to be
         # `ibkr_sync_midday` / `ibkr_sync_evening`, which became lies the moment the
@@ -1203,10 +1396,15 @@ class SchedulerService:
 
         Raises SyncBusy (a 429 at the router) when the pipeline is already
         running, instead of pretending a skipped run completed.
+
+        Keyed on the *reason*, not on the bare `skipped` status: a job whose IBKR half
+        was skipped because today's statement is already generated is not busy, it is
+        finished, and answering 429 "try again shortly" to that would send the caller
+        back for something that cannot arrive before midnight ET.
         """
         logger.info("Manually triggering full sync job...")
         result = await self.full_sync_job()
-        if result and result.get("status") == "skipped":
+        if result and result.get("reason") == "pipeline_busy":
             raise SyncBusy(result.get("message") or "sync pipeline is busy")
         # last_sync_result is already set by full_sync_job
         return {"status": "completed", "message": "Manual sync triggered successfully"}
